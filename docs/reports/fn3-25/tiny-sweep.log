@@ -1,0 +1,401 @@
+PARITY {"label":"tiny-gpt2 decode.step1.logits [1 threads]","values":50257,"max_abs":6.109476e-7,"max_at":31254,"actual":0.243519321,"reference":0.243518710,"mean_abs":1.0241756074131722e-7,"mean_abs_bound":2.5e-6,"atol":1e-5,"rtol":1e-4}
+PARITY {"label":"tiny-gpt2 prefill.p13.last_logits [auto threads]","values":50257,"max_abs":5.364418e-7,"max_at":6124,"actual":-0.284389883,"reference":-0.284389347,"mean_abs":1.001476272851793e-7,"mean_abs_bound":2.5e-6,"atol":1e-5,"rtol":1e-4}
+PARITY {"label":"tiny-gpt2 decode.step1.logits [auto threads]","values":50257,"max_abs":6.109476e-7,"max_at":31254,"actual":0.243519321,"reference":0.243518710,"mean_abs":1.0241756074131722e-7,"mean_abs_bound":2.5e-6,"atol":1e-5,"rtol":1e-4}
+BitExact {"variant":"after","budget":1,"case":"attn_scores_2x10x10x64","elements":200}
+BitExact {"variant":"after","budget":1,"case":"attn_values_2x10x10x64","elements":1280}
+BitExact {"variant":"after","budget":1,"case":"mlp_fc_10x128x512","elements":5120}
+BitExact {"variant":"after","budget":1,"case":"mlp_proj_10x512x128","elements":1280}
+BitExact {"variant":"after","budget":1,"case":"lm_head_1x128x50257","elements":50257}
+BitExact {"variant":"after","budget":1,"case":"lm_head_10x128x50257","elements":502570}
+BitExact {"variant":"after","budget":2,"case":"qkv_projection_10x128x384","elements":3840}
+BitExact {"variant":"after","budget":2,"case":"attn_scores_2x10x10x64","elements":200}
+BitExact {"variant":"after","budget":2,"case":"attn_values_2x10x10x64","elements":1280}
+BitExact {"variant":"after","budget":2,"case":"mlp_fc_10x128x512","elements":5120}
+BitExact {"variant":"after","budget":2,"case":"mlp_proj_10x512x128","elements":1280}
+BitExact {"variant":"after","budget":2,"case":"lm_head_1x128x50257","elements":50257}
+BitExact {"variant":"after","budget":2,"case":"lm_head_10x128x50257","elements":502570}
+BitExact {"variant":"after","budget":16,"case":"qkv_projection_10x128x384","elements":3840}
+BitExact {"variant":"after","budget":16,"case":"attn_scores_2x10x10x64","elements":200}
+BitExact {"variant":"after","budget":16,"case":"attn_values_2x10x10x64","elements":1280}
+BitExact {"variant":"after","budget":16,"case":"mlp_fc_10x128x512","elements":5120}
+BitExact {"variant":"after","budget":16,"case":"mlp_proj_10x512x128","elements":1280}
+BitExact {"variant":"after","budget":16,"case":"lm_head_1x128x50257","elements":50257}
+BitExact {"variant":"after","budget":16,"case":"lm_head_10x128x50257","elements":502570}
+KERNEL {"variant":"after","budget":1,"case":"attn_scores_2x10x10x64","p50_us":2.850,"p95_us":2.940,"checksum":"0xa228f44efb1080df"}
+KERNEL {"variant":"after","budget":1,"case":"attn_values_2x10x10x64","p50_us":1.090,"p95_us":1.140,"checksum":"0x958cb8f376a6a78a"}
+KERNEL {"variant":"after","budget":1,"case":"mlp_fc_10x128x512","p50_us":41.370,"p95_us":49.001,"checksum":"0x9d9e2b0dac5b88b2"}
+KERNEL {"variant":"after","budget":1,"case":"mlp_proj_10x512x128","p50_us":33.241,"p95_us":40.400,"checksum":"0x444f972b2c7613a5"}
+KERNEL {"variant":"after","budget":1,"case":"lm_head_1x128x50257","p50_us":1430.397,"p95_us":1509.937,"checksum":"0xa476a8663ba77d95"}
+KERNEL {"variant":"after","budget":1,"case":"lm_head_10x128x50257","p50_us":5455.976,"p95_us":6026.309,"checksum":"0xb5663f9f13ade6cd"}
+KERNEL {"variant":"after","budget":1,"case":"softmax_2x10x10","p50_us":5.130,"p95_us":5.150,"checksum":"0x7f8d37b8a7bc6983"}
+KERNEL {"variant":"after","budget":1,"case":"layernorm_10x128","p50_us":29.670,"p95_us":29.720,"checksum":"0xe9f9b9db250360c4"}
+KERNEL {"variant":"after","budget":1,"case":"gelu_10x512","p50_us":166.411,"p95_us":172.250,"checksum":"0x650d0dd5713677fc"}
+KERNEL {"variant":"after","budget":1,"case":"transpose_lm_head_50257x128","p50_us":3725.668,"p95_us":4527.191,"checksum":"0x2ef9b65b5f686967"}
+KERNEL {"variant":"after","budget":1,"case":"transpose_attn_2x10x64","p50_us":0.830,"p95_us":0.860,"checksum":"0x268b79d1c965d56f"}
+KERNEL {"variant":"after","budget":16,"case":"qkv_projection_10x128x384","p50_us":22.520,"p95_us":29.380,"checksum":"0xf15a6b42fbc8db6b"}
+KERNEL {"variant":"after","budget":16,"case":"attn_scores_2x10x10x64","p50_us":2.660,"p95_us":2.730,"checksum":"0xa228f44efb1080df"}
+KERNEL {"variant":"after","budget":16,"case":"attn_values_2x10x10x64","p50_us":1.010,"p95_us":1.070,"checksum":"0x958cb8f376a6a78a"}
+KERNEL {"variant":"after","budget":16,"case":"mlp_fc_10x128x512","p50_us":38.210,"p95_us":47.840,"checksum":"0x9d9e2b0dac5b88b2"}
+KERNEL {"variant":"after","budget":16,"case":"mlp_proj_10x512x128","p50_us":31.990,"p95_us":39.310,"checksum":"0x444f972b2c7613a5"}
+KERNEL {"variant":"after","budget":16,"case":"lm_head_1x128x50257","p50_us":1426.287,"p95_us":1456.157,"checksum":"0xa476a8663ba77d95"}
+KERNEL {"variant":"after","budget":16,"case":"lm_head_10x128x50257","p50_us":2004.719,"p95_us":3248.995,"checksum":"0xb5663f9f13ade6cd"}
+KERNEL {"variant":"after","budget":16,"case":"softmax_2x10x10","p50_us":6.370,"p95_us":6.380,"checksum":"0x7f8d37b8a7bc6983"}
+KERNEL {"variant":"after","budget":16,"case":"layernorm_10x128","p50_us":37.050,"p95_us":37.120,"checksum":"0xe9f9b9db250360c4"}
+KERNEL {"variant":"after","budget":16,"case":"gelu_10x512","p50_us":167.190,"p95_us":212.961,"checksum":"0x650d0dd5713677fc"}
+KERNEL {"variant":"after","budget":16,"case":"transpose_lm_head_50257x128","p50_us":3724.358,"p95_us":3982.419,"checksum":"0x2ef9b65b5f686967"}
+KERNEL {"variant":"after","budget":16,"case":"transpose_attn_2x10x64","p50_us":0.820,"p95_us":0.840,"checksum":"0x268b79d1c965d56f"}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":1,"op":"matmul","calls":13,"ns":6328258,"pct_of_step":45.91,"pct_of_kernels":50.74}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":1,"op":"transpose","calls":11,"ns":4600591,"pct_of_step":33.38,"pct_of_kernels":36.89}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":1,"op":"add","calls":24,"ns":417560,"pct_of_step":3.03,"pct_of_kernels":3.35}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":1,"op":"reduce_mean","calls":10,"ns":187112,"pct_of_step":1.36,"pct_of_kernels":1.50}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":1,"op":"split","calls":2,"ns":181482,"pct_of_step":1.32,"pct_of_kernels":1.46}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":1,"op":"concat","calls":5,"ns":158802,"pct_of_step":1.15,"pct_of_kernels":1.27}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":1,"op":"pow","calls":7,"ns":143234,"pct_of_step":1.04,"pct_of_kernels":1.15}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":1,"op":"div","calls":5,"ns":136461,"pct_of_step":0.99,"pct_of_kernels":1.09}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":1,"op":"sub","calls":6,"ns":134080,"pct_of_step":0.97,"pct_of_kernels":1.08}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":1,"op":"gather","calls":2,"ns":60020,"pct_of_step":0.44,"pct_of_kernels":0.48}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":1,"op":"tanh","calls":2,"ns":41780,"pct_of_step":0.30,"pct_of_kernels":0.34}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":1,"op":"reshape","calls":24,"ns":17340,"pct_of_step":0.13,"pct_of_kernels":0.14}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":1,"op":"mul","calls":12,"ns":13750,"pct_of_step":0.10,"pct_of_kernels":0.11}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":1,"op":"softmax","calls":2,"ns":12290,"pct_of_step":0.09,"pct_of_kernels":0.10}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":1,"op":"where","calls":3,"ns":12010,"pct_of_step":0.09,"pct_of_kernels":0.10}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":1,"op":"slice","calls":2,"ns":8020,"pct_of_step":0.06,"pct_of_kernels":0.06}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":1,"op":"cast","calls":3,"ns":7620,"pct_of_step":0.06,"pct_of_kernels":0.06}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":1,"op":"expand","calls":2,"ns":6920,"pct_of_step":0.05,"pct_of_kernels":0.06}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":1,"op":"unsqueeze","calls":2,"ns":1820,"pct_of_step":0.01,"pct_of_kernels":0.01}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":1,"op":"constant_of_shape","calls":2,"ns":1360,"pct_of_step":0.01,"pct_of_kernels":0.01}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":1,"op":"sqrt","calls":5,"ns":860,"pct_of_step":0.01,"pct_of_kernels":0.01}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"matmul","geometry":"matmul [1, 10, 128] [128, 50257] -> [1, 10, 50257]","calls":1,"ns":5985878,"pct_of_step":43.43}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"transpose","geometry":"transpose [50257, 128] -> [128, 50257]","calls":1,"ns":4308171,"pct_of_step":31.25}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"transpose","geometry":"transpose [1, 10, 2, 64] -> [1, 2, 10, 64]","calls":6,"ns":218010,"pct_of_step":1.58}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"reduce_mean","geometry":"reduce_mean [1, 10, 128] -> [1, 10, 1]","calls":10,"ns":187112,"pct_of_step":1.36}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"split","geometry":"split [1, 10, 384] [3] -> [3 outputs]","calls":2,"ns":181482,"pct_of_step":1.32}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"add","geometry":"add [10, 512] [512] -> [10, 512]","calls":2,"ns":180490,"pct_of_step":1.31}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"concat","geometry":"concat [1, 2, 0, 64] [1, 2, 10, 64] -> [1, 2, 10, 64]","calls":4,"ns":156002,"pct_of_step":1.13}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"div","geometry":"div [1, 10, 128] [1, 10, 1] -> [1, 10, 128]","calls":5,"ns":136461,"pct_of_step":0.99}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"sub","geometry":"sub [1, 10, 128] [1, 10, 1] -> [1, 10, 128]","calls":5,"ns":133560,"pct_of_step":0.97}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"add","geometry":"add [10, 384] [384] -> [10, 384]","calls":2,"ns":128570,"pct_of_step":0.93}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"matmul","geometry":"matmul [10, 512] [512, 128] -> [10, 128]","calls":2,"ns":107650,"pct_of_step":0.78}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"matmul","geometry":"matmul [10, 128] [128, 512] -> [10, 512]","calls":2,"ns":106030,"pct_of_step":0.77}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"matmul","geometry":"matmul [10, 128] [128, 384] -> [10, 384]","calls":2,"ns":92300,"pct_of_step":0.67}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"pow","geometry":"pow [1, 10, 512] [] -> [1, 10, 512]","calls":2,"ns":87122,"pct_of_step":0.63}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"add","geometry":"add [10, 128] [128] -> [10, 128]","calls":4,"ns":86710,"pct_of_step":0.63}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"transpose","geometry":"transpose [1, 2, 10, 64] -> [1, 10, 2, 64]","calls":2,"ns":72350,"pct_of_step":0.52}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"pow","geometry":"pow [1, 10, 128] [] -> [1, 10, 128]","calls":5,"ns":56112,"pct_of_step":0.41}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"tanh","geometry":"tanh [1, 10, 512] -> [1, 10, 512]","calls":2,"ns":41780,"pct_of_step":0.30}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"gather","geometry":"gather [50257, 128] [1, 10] -> [1, 10, 128]","calls":1,"ns":30340,"pct_of_step":0.22}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"gather","geometry":"gather [1024, 128] [1, 10] -> [1, 10, 128]","calls":1,"ns":29680,"pct_of_step":0.22}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"matmul","geometry":"matmul [10, 128] [128, 128] -> [10, 128]","calls":2,"ns":27970,"pct_of_step":0.20}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"softmax","geometry":"softmax [1, 2, 10, 10] -> [1, 2, 10, 10]","calls":2,"ns":12290,"pct_of_step":0.09}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"add","geometry":"add [1, 2, 10, 10] [1, 1, 10, 10] -> [1, 2, 10, 10]","calls":2,"ns":11020,"pct_of_step":0.08}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"where","geometry":"where [1, 1, 10, 10] [] [1, 1, 10, 10] -> [1, 1, 10, 10]","calls":2,"ns":8660,"pct_of_step":0.06}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"slice","geometry":"slice [1, 1, 10, 10] [1] [1] [1] [1] -> [1, 1, 10, 10]","calls":2,"ns":8020,"pct_of_step":0.06}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"mul","geometry":"mul [1, 10, 512] [] -> [1, 10, 512]","calls":6,"ns":8010,"pct_of_step":0.06}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"cast","geometry":"cast [1, 1, 10, 10] -> [1, 1, 10, 10]","calls":3,"ns":7620,"pct_of_step":0.06}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"matmul","geometry":"matmul [1, 2, 10, 64] [1, 2, 64, 10] -> [1, 2, 10, 10]","calls":2,"ns":6160,"pct_of_step":0.04}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"add","geometry":"add [1, 10, 128] [1, 10, 128] -> [1, 10, 128]","calls":5,"ns":4550,"pct_of_step":0.03}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"expand","geometry":"expand [1, 1, 1, 10] [4] -> [1, 1, 10, 10]","calls":1,"ns":3750,"pct_of_step":0.03}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"reshape","geometry":"reshape [1, 10, 128] [2] -> [10, 128]","calls":6,"ns":3370,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"where","geometry":"where [10, 10] [] [10, 10] -> [10, 10]","calls":1,"ns":3350,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"mul","geometry":"mul [1, 10, 512] [1, 10, 512] -> [1, 10, 512]","calls":2,"ns":3220,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"expand","geometry":"expand [1, 1, 10, 10] [4] -> [1, 1, 10, 10]","calls":1,"ns":3170,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"reshape","geometry":"reshape [1, 10, 128] [4] -> [1, 10, 2, 64]","calls":6,"ns":3100,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"reshape","geometry":"reshape [10, 512] [3] -> [1, 10, 512]","calls":2,"ns":2860,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"reshape","geometry":"reshape [1, 10, 512] [2] -> [10, 512]","calls":2,"ns":2800,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"concat","geometry":"concat [10, 0] [10, 10] -> [10, 10]","calls":1,"ns":2800,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"add","geometry":"add [1, 10, 512] [] -> [1, 10, 512]","calls":2,"ns":2550,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"add","geometry":"add [1, 10, 512] [1, 10, 512] -> [1, 10, 512]","calls":2,"ns":2440,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"matmul","geometry":"matmul [1, 2, 10, 10] [1, 2, 10, 64] -> [1, 2, 10, 64]","calls":2,"ns":2270,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"reshape","geometry":"reshape [10, 384] [3] -> [1, 10, 384]","calls":2,"ns":2200,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"transpose","geometry":"transpose [1, 2, 10, 64] -> [1, 2, 64, 10]","calls":2,"ns":2060,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"reshape","geometry":"reshape [10, 128] [3] -> [1, 10, 128]","calls":4,"ns":2010,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"unsqueeze","geometry":"unsqueeze [1, 10] [2] -> [1, 1, 1, 10]","calls":1,"ns":1390,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"mul","geometry":"mul [1, 2, 10, 64] [1] -> [1, 2, 10, 64]","calls":2,"ns":1290,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"add","geometry":"add [1, 10, 1] [] -> [1, 10, 1]","calls":5,"ns":1230,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"mul","geometry":"mul [1, 2, 64, 10] [1] -> [1, 2, 64, 10]","calls":2,"ns":1230,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"constant_of_shape","geometry":"constant_of_shape [2] [1] -> [10, 10]","calls":1,"ns":1230,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"reshape","geometry":"reshape [1, 10, 2, 64] [3] -> [1, 10, 128]","calls":2,"ns":1000,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"sqrt","geometry":"sqrt [1, 10, 1] -> [1, 10, 1]","calls":5,"ns":860,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"sub","geometry":"sub [] [1, 1, 10, 10] -> [1, 1, 10, 10]","calls":1,"ns":520,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"unsqueeze","geometry":"unsqueeze [10, 10] [2] -> [1, 1, 10, 10]","calls":1,"ns":430,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":1,"op":"constant_of_shape","geometry":"constant_of_shape [2] [1] -> [10, 0]","calls":1,"ns":130,"pct_of_step":0.00}
+PROFILE {"variant":"after","phase":"decode","budget":1,"step_us":6019.398,"kernel_us":5735.057,"session_overhead_us":284.341,"checksum":"0xca2d9d3615ee1863"}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":1,"op":"transpose","calls":11,"ns":3686518,"pct_of_step":61.24,"pct_of_kernels":64.28}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":1,"op":"matmul","calls":13,"ns":1725478,"pct_of_step":28.67,"pct_of_kernels":30.09}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":1,"op":"concat","calls":5,"ns":173971,"pct_of_step":2.89,"pct_of_kernels":3.03}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":1,"op":"add","calls":24,"ns":46920,"pct_of_step":0.78,"pct_of_kernels":0.82}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":1,"op":"reduce_mean","calls":10,"ns":22420,"pct_of_step":0.37,"pct_of_kernels":0.39}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":1,"op":"split","calls":2,"ns":19920,"pct_of_step":0.33,"pct_of_kernels":0.35}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":1,"op":"pow","calls":7,"ns":16310,"pct_of_step":0.27,"pct_of_kernels":0.28}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":1,"op":"gather","calls":2,"ns":10040,"pct_of_step":0.17,"pct_of_kernels":0.18}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":1,"op":"reshape","calls":24,"ns":7170,"pct_of_step":0.12,"pct_of_kernels":0.13}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":1,"op":"tanh","calls":2,"ns":4950,"pct_of_step":0.08,"pct_of_kernels":0.09}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":1,"op":"mul","calls":12,"ns":4140,"pct_of_step":0.07,"pct_of_kernels":0.07}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":1,"op":"where","calls":3,"ns":2390,"pct_of_step":0.04,"pct_of_kernels":0.04}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":1,"op":"slice","calls":2,"ns":2310,"pct_of_step":0.04,"pct_of_kernels":0.04}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":1,"op":"cast","calls":3,"ns":2300,"pct_of_step":0.04,"pct_of_kernels":0.04}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":1,"op":"softmax","calls":2,"ns":2140,"pct_of_step":0.04,"pct_of_kernels":0.04}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":1,"op":"expand","calls":2,"ns":1750,"pct_of_step":0.03,"pct_of_kernels":0.03}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":1,"op":"sub","calls":6,"ns":1580,"pct_of_step":0.03,"pct_of_kernels":0.03}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":1,"op":"unsqueeze","calls":2,"ns":1560,"pct_of_step":0.03,"pct_of_kernels":0.03}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":1,"op":"div","calls":5,"ns":1250,"pct_of_step":0.02,"pct_of_kernels":0.02}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":1,"op":"constant_of_shape","calls":2,"ns":1140,"pct_of_step":0.02,"pct_of_kernels":0.02}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":1,"op":"sqrt","calls":5,"ns":800,"pct_of_step":0.01,"pct_of_kernels":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"transpose","geometry":"transpose [50257, 128] -> [128, 50257]","calls":1,"ns":3653748,"pct_of_step":60.70}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"matmul","geometry":"matmul [1, 1, 128] [128, 50257] -> [1, 1, 50257]","calls":1,"ns":1600778,"pct_of_step":26.59}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"concat","geometry":"concat [1, 2, 10, 64] [1, 2, 1, 64] -> [1, 2, 11, 64]","calls":4,"ns":173101,"pct_of_step":2.88}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"matmul","geometry":"matmul [1, 128] [128, 512] -> [1, 512]","calls":2,"ns":42530,"pct_of_step":0.71}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"matmul","geometry":"matmul [1, 512] [512, 128] -> [1, 128]","calls":2,"ns":38390,"pct_of_step":0.64}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"matmul","geometry":"matmul [1, 128] [128, 384] -> [1, 384]","calls":2,"ns":31390,"pct_of_step":0.52}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"transpose","geometry":"transpose [1, 1, 2, 64] -> [1, 2, 1, 64]","calls":6,"ns":23160,"pct_of_step":0.38}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"reduce_mean","geometry":"reduce_mean [1, 1, 128] -> [1, 1, 1]","calls":10,"ns":22420,"pct_of_step":0.37}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"split","geometry":"split [1, 1, 384] [3] -> [3 outputs]","calls":2,"ns":19920,"pct_of_step":0.33}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"add","geometry":"add [1, 512] [512] -> [1, 512]","calls":2,"ns":17650,"pct_of_step":0.29}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"add","geometry":"add [1, 384] [384] -> [1, 384]","calls":2,"ns":13560,"pct_of_step":0.23}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"add","geometry":"add [1, 128] [128] -> [1, 128]","calls":4,"ns":9600,"pct_of_step":0.16}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"matmul","geometry":"matmul [1, 128] [128, 128] -> [1, 128]","calls":2,"ns":9260,"pct_of_step":0.15}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"pow","geometry":"pow [1, 1, 512] [] -> [1, 1, 512]","calls":2,"ns":9160,"pct_of_step":0.15}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"transpose","geometry":"transpose [1, 2, 1, 64] -> [1, 1, 2, 64]","calls":2,"ns":7440,"pct_of_step":0.12}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"pow","geometry":"pow [1, 1, 128] [] -> [1, 1, 128]","calls":5,"ns":7150,"pct_of_step":0.12}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"gather","geometry":"gather [50257, 128] [1, 1] -> [1, 1, 128]","calls":1,"ns":5170,"pct_of_step":0.09}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"tanh","geometry":"tanh [1, 1, 512] -> [1, 1, 512]","calls":2,"ns":4950,"pct_of_step":0.08}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"gather","geometry":"gather [1024, 128] [1, 1] -> [1, 1, 128]","calls":1,"ns":4870,"pct_of_step":0.08}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"reshape","geometry":"reshape [1, 1, 128] [2] -> [1, 128]","calls":6,"ns":2360,"pct_of_step":0.04}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"slice","geometry":"slice [1, 1, 1, 11] [1] [1] [1] [1] -> [1, 1, 1, 11]","calls":2,"ns":2310,"pct_of_step":0.04}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"cast","geometry":"cast [1, 1, 1, 11] -> [1, 1, 1, 11]","calls":3,"ns":2300,"pct_of_step":0.04}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"add","geometry":"add [1, 1, 128] [1, 1, 128] -> [1, 1, 128]","calls":5,"ns":2180,"pct_of_step":0.04}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"transpose","geometry":"transpose [1, 2, 11, 64] -> [1, 2, 64, 11]","calls":2,"ns":2170,"pct_of_step":0.04}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"softmax","geometry":"softmax [1, 2, 1, 11] -> [1, 2, 1, 11]","calls":2,"ns":2140,"pct_of_step":0.04}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"matmul","geometry":"matmul [1, 2, 1, 64] [1, 2, 64, 11] -> [1, 2, 1, 11]","calls":2,"ns":2030,"pct_of_step":0.03}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"where","geometry":"where [1, 1, 1, 11] [] [1, 1, 1, 11] -> [1, 1, 1, 11]","calls":2,"ns":1970,"pct_of_step":0.03}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"expand","geometry":"expand [1, 1, 1, 11] [4] -> [1, 1, 1, 11]","calls":2,"ns":1750,"pct_of_step":0.03}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"mul","geometry":"mul [1, 1, 512] [] -> [1, 1, 512]","calls":6,"ns":1730,"pct_of_step":0.03}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"add","geometry":"add [1, 2, 1, 11] [1, 1, 1, 11] -> [1, 2, 1, 11]","calls":2,"ns":1600,"pct_of_step":0.03}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"reshape","geometry":"reshape [1, 1, 128] [4] -> [1, 1, 2, 64]","calls":6,"ns":1560,"pct_of_step":0.03}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"unsqueeze","geometry":"unsqueeze [1, 11] [2] -> [1, 1, 1, 11]","calls":2,"ns":1560,"pct_of_step":0.03}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"div","geometry":"div [1, 1, 128] [1, 1, 1] -> [1, 1, 128]","calls":5,"ns":1250,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"sub","geometry":"sub [1, 1, 128] [1, 1, 1] -> [1, 1, 128]","calls":5,"ns":1220,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"add","geometry":"add [1, 1, 1] [] -> [1, 1, 1]","calls":5,"ns":1170,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"matmul","geometry":"matmul [1, 2, 1, 11] [1, 2, 11, 64] -> [1, 2, 1, 64]","calls":2,"ns":1100,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"mul","geometry":"mul [1, 2, 1, 64] [1] -> [1, 2, 1, 64]","calls":2,"ns":950,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"reshape","geometry":"reshape [1, 128] [3] -> [1, 1, 128]","calls":4,"ns":950,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"constant_of_shape","geometry":"constant_of_shape [2] [1] -> [1, 1]","calls":1,"ns":910,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"concat","geometry":"concat [1, 10] [1, 1] -> [1, 11]","calls":1,"ns":870,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"sqrt","geometry":"sqrt [1, 1, 1] -> [1, 1, 1]","calls":5,"ns":800,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"mul","geometry":"mul [1, 2, 64, 11] [1] -> [1, 2, 64, 11]","calls":2,"ns":790,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"mul","geometry":"mul [1, 1, 512] [1, 1, 512] -> [1, 1, 512]","calls":2,"ns":670,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"add","geometry":"add [1, 1, 512] [1, 1, 512] -> [1, 1, 512]","calls":2,"ns":630,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"reshape","geometry":"reshape [1, 1, 512] [2] -> [1, 512]","calls":2,"ns":610,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"reshape","geometry":"reshape [1, 512] [3] -> [1, 1, 512]","calls":2,"ns":610,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"reshape","geometry":"reshape [1, 1, 2, 64] [3] -> [1, 1, 128]","calls":2,"ns":540,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"reshape","geometry":"reshape [1, 384] [3] -> [1, 1, 384]","calls":2,"ns":540,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"add","geometry":"add [1, 1, 512] [] -> [1, 1, 512]","calls":2,"ns":530,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"where","geometry":"where [1, 1] [] [1, 1] -> [1, 1]","calls":1,"ns":420,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"sub","geometry":"sub [] [1, 1, 1, 11] -> [1, 1, 1, 11]","calls":1,"ns":360,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":1,"op":"constant_of_shape","geometry":"constant_of_shape [2] [1] -> [1, 10]","calls":1,"ns":230,"pct_of_step":0.00}
+PROFILE {"variant":"after","phase":"prefill","budget":16,"step_us":10192.499,"kernel_us":8884.222,"session_overhead_us":1308.277,"checksum":"0x57908efa8cfa18b7"}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":16,"op":"transpose","calls":11,"ns":4545661,"pct_of_step":44.60,"pct_of_kernels":51.17}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":16,"op":"matmul","calls":13,"ns":2793091,"pct_of_step":27.40,"pct_of_kernels":31.44}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":16,"op":"add","calls":24,"ns":415500,"pct_of_step":4.08,"pct_of_kernels":4.68}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":16,"op":"reduce_mean","calls":10,"ns":187362,"pct_of_step":1.84,"pct_of_kernels":2.11}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":16,"op":"split","calls":2,"ns":182812,"pct_of_step":1.79,"pct_of_kernels":2.06}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":16,"op":"concat","calls":5,"ns":160502,"pct_of_step":1.57,"pct_of_kernels":1.81}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":16,"op":"pow","calls":7,"ns":143012,"pct_of_step":1.40,"pct_of_kernels":1.61}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":16,"op":"div","calls":5,"ns":134732,"pct_of_step":1.32,"pct_of_kernels":1.52}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":16,"op":"sub","calls":6,"ns":134070,"pct_of_step":1.32,"pct_of_kernels":1.51}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":16,"op":"gather","calls":2,"ns":59930,"pct_of_step":0.59,"pct_of_kernels":0.67}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":16,"op":"tanh","calls":2,"ns":42400,"pct_of_step":0.42,"pct_of_kernels":0.48}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":16,"op":"reshape","calls":24,"ns":18600,"pct_of_step":0.18,"pct_of_kernels":0.21}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":16,"op":"mul","calls":12,"ns":13450,"pct_of_step":0.13,"pct_of_kernels":0.15}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":16,"op":"softmax","calls":2,"ns":12670,"pct_of_step":0.12,"pct_of_kernels":0.14}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":16,"op":"where","calls":3,"ns":12270,"pct_of_step":0.12,"pct_of_kernels":0.14}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":16,"op":"slice","calls":2,"ns":8360,"pct_of_step":0.08,"pct_of_kernels":0.09}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":16,"op":"cast","calls":3,"ns":7880,"pct_of_step":0.08,"pct_of_kernels":0.09}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":16,"op":"expand","calls":2,"ns":7180,"pct_of_step":0.07,"pct_of_kernels":0.08}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":16,"op":"unsqueeze","calls":2,"ns":2320,"pct_of_step":0.02,"pct_of_kernels":0.03}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":16,"op":"constant_of_shape","calls":2,"ns":1400,"pct_of_step":0.01,"pct_of_kernels":0.02}
+PROFILE_CLASS {"variant":"after","phase":"prefill","budget":16,"op":"sqrt","calls":5,"ns":1020,"pct_of_step":0.01,"pct_of_kernels":0.01}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"transpose","geometry":"transpose [50257, 128] -> [128, 50257]","calls":1,"ns":4249591,"pct_of_step":41.69}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"matmul","geometry":"matmul [1, 10, 128] [128, 50257] -> [1, 10, 50257]","calls":1,"ns":2444271,"pct_of_step":23.98}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"transpose","geometry":"transpose [1, 10, 2, 64] -> [1, 2, 10, 64]","calls":6,"ns":221030,"pct_of_step":2.17}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"reduce_mean","geometry":"reduce_mean [1, 10, 128] -> [1, 10, 1]","calls":10,"ns":187362,"pct_of_step":1.84}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"split","geometry":"split [1, 10, 384] [3] -> [3 outputs]","calls":2,"ns":182812,"pct_of_step":1.79}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"add","geometry":"add [10, 512] [512] -> [10, 512]","calls":2,"ns":178380,"pct_of_step":1.75}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"concat","geometry":"concat [1, 2, 0, 64] [1, 2, 10, 64] -> [1, 2, 10, 64]","calls":4,"ns":157652,"pct_of_step":1.55}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"div","geometry":"div [1, 10, 128] [1, 10, 1] -> [1, 10, 128]","calls":5,"ns":134732,"pct_of_step":1.32}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"sub","geometry":"sub [1, 10, 128] [1, 10, 1] -> [1, 10, 128]","calls":5,"ns":133350,"pct_of_step":1.31}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"add","geometry":"add [10, 384] [384] -> [10, 384]","calls":2,"ns":128480,"pct_of_step":1.26}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"matmul","geometry":"matmul [10, 512] [512, 128] -> [10, 128]","calls":2,"ns":111820,"pct_of_step":1.10}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"matmul","geometry":"matmul [10, 128] [128, 512] -> [10, 512]","calls":2,"ns":107530,"pct_of_step":1.05}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"matmul","geometry":"matmul [10, 128] [128, 384] -> [10, 384]","calls":2,"ns":93320,"pct_of_step":0.92}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"pow","geometry":"pow [1, 10, 512] [] -> [1, 10, 512]","calls":2,"ns":87072,"pct_of_step":0.85}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"add","geometry":"add [10, 128] [128] -> [10, 128]","calls":4,"ns":86400,"pct_of_step":0.85}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"transpose","geometry":"transpose [1, 2, 10, 64] -> [1, 10, 2, 64]","calls":2,"ns":72700,"pct_of_step":0.71}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"pow","geometry":"pow [1, 10, 128] [] -> [1, 10, 128]","calls":5,"ns":55940,"pct_of_step":0.55}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"tanh","geometry":"tanh [1, 10, 512] -> [1, 10, 512]","calls":2,"ns":42400,"pct_of_step":0.42}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"gather","geometry":"gather [1024, 128] [1, 10] -> [1, 10, 128]","calls":1,"ns":30190,"pct_of_step":0.30}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"gather","geometry":"gather [50257, 128] [1, 10] -> [1, 10, 128]","calls":1,"ns":29740,"pct_of_step":0.29}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"matmul","geometry":"matmul [10, 128] [128, 128] -> [10, 128]","calls":2,"ns":28120,"pct_of_step":0.28}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"softmax","geometry":"softmax [1, 2, 10, 10] -> [1, 2, 10, 10]","calls":2,"ns":12670,"pct_of_step":0.12}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"add","geometry":"add [1, 2, 10, 10] [1, 1, 10, 10] -> [1, 2, 10, 10]","calls":2,"ns":10960,"pct_of_step":0.11}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"where","geometry":"where [1, 1, 10, 10] [] [1, 1, 10, 10] -> [1, 1, 10, 10]","calls":2,"ns":8820,"pct_of_step":0.09}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"slice","geometry":"slice [1, 1, 10, 10] [1] [1] [1] [1] -> [1, 1, 10, 10]","calls":2,"ns":8360,"pct_of_step":0.08}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"cast","geometry":"cast [1, 1, 10, 10] -> [1, 1, 10, 10]","calls":3,"ns":7880,"pct_of_step":0.08}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"mul","geometry":"mul [1, 10, 512] [] -> [1, 10, 512]","calls":6,"ns":7750,"pct_of_step":0.08}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"matmul","geometry":"matmul [1, 2, 10, 64] [1, 2, 64, 10] -> [1, 2, 10, 10]","calls":2,"ns":5790,"pct_of_step":0.06}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"add","geometry":"add [1, 10, 128] [1, 10, 128] -> [1, 10, 128]","calls":5,"ns":4180,"pct_of_step":0.04}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"expand","geometry":"expand [1, 1, 1, 10] [4] -> [1, 1, 10, 10]","calls":1,"ns":3960,"pct_of_step":0.04}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"reshape","geometry":"reshape [1, 10, 128] [2] -> [10, 128]","calls":6,"ns":3850,"pct_of_step":0.04}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"where","geometry":"where [10, 10] [] [10, 10] -> [10, 10]","calls":1,"ns":3450,"pct_of_step":0.03}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"reshape","geometry":"reshape [1, 10, 128] [4] -> [1, 10, 2, 64]","calls":6,"ns":3280,"pct_of_step":0.03}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"expand","geometry":"expand [1, 1, 10, 10] [4] -> [1, 1, 10, 10]","calls":1,"ns":3220,"pct_of_step":0.03}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"reshape","geometry":"reshape [10, 512] [3] -> [1, 10, 512]","calls":2,"ns":3200,"pct_of_step":0.03}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"add","geometry":"add [1, 10, 512] [1, 10, 512] -> [1, 10, 512]","calls":2,"ns":2930,"pct_of_step":0.03}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"mul","geometry":"mul [1, 10, 512] [1, 10, 512] -> [1, 10, 512]","calls":2,"ns":2920,"pct_of_step":0.03}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"add","geometry":"add [1, 10, 512] [] -> [1, 10, 512]","calls":2,"ns":2900,"pct_of_step":0.03}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"reshape","geometry":"reshape [1, 10, 512] [2] -> [10, 512]","calls":2,"ns":2900,"pct_of_step":0.03}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"concat","geometry":"concat [10, 0] [10, 10] -> [10, 10]","calls":1,"ns":2850,"pct_of_step":0.03}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"transpose","geometry":"transpose [1, 2, 10, 64] -> [1, 2, 64, 10]","calls":2,"ns":2340,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"matmul","geometry":"matmul [1, 2, 10, 10] [1, 2, 10, 64] -> [1, 2, 10, 64]","calls":2,"ns":2240,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"reshape","geometry":"reshape [10, 384] [3] -> [1, 10, 384]","calls":2,"ns":2160,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"unsqueeze","geometry":"unsqueeze [1, 10] [2] -> [1, 1, 1, 10]","calls":1,"ns":1950,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"mul","geometry":"mul [1, 2, 10, 64] [1] -> [1, 2, 10, 64]","calls":2,"ns":1870,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"reshape","geometry":"reshape [10, 128] [3] -> [1, 10, 128]","calls":4,"ns":1800,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"reshape","geometry":"reshape [1, 10, 2, 64] [3] -> [1, 10, 128]","calls":2,"ns":1410,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"add","geometry":"add [1, 10, 1] [] -> [1, 10, 1]","calls":5,"ns":1270,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"constant_of_shape","geometry":"constant_of_shape [2] [1] -> [10, 10]","calls":1,"ns":1200,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"sqrt","geometry":"sqrt [1, 10, 1] -> [1, 10, 1]","calls":5,"ns":1020,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"mul","geometry":"mul [1, 2, 64, 10] [1] -> [1, 2, 64, 10]","calls":2,"ns":910,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"sub","geometry":"sub [] [1, 1, 10, 10] -> [1, 1, 10, 10]","calls":1,"ns":720,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"unsqueeze","geometry":"unsqueeze [10, 10] [2] -> [1, 1, 10, 10]","calls":1,"ns":370,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"after","phase":"prefill","budget":16,"op":"constant_of_shape","geometry":"constant_of_shape [2] [1] -> [10, 0]","calls":1,"ns":200,"pct_of_step":0.00}
+PROFILE {"variant":"after","phase":"decode","budget":16,"step_us":10521.191,"kernel_us":10236.959,"session_overhead_us":284.232,"checksum":"0xca2d9d3615ee1863"}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":16,"op":"transpose","calls":11,"ns":8076579,"pct_of_step":76.76,"pct_of_kernels":78.90}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":16,"op":"matmul","calls":13,"ns":1833048,"pct_of_step":17.42,"pct_of_kernels":17.91}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":16,"op":"concat","calls":5,"ns":173480,"pct_of_step":1.65,"pct_of_kernels":1.69}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":16,"op":"add","calls":24,"ns":47572,"pct_of_step":0.45,"pct_of_kernels":0.46}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":16,"op":"reduce_mean","calls":10,"ns":22380,"pct_of_step":0.21,"pct_of_kernels":0.22}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":16,"op":"split","calls":2,"ns":20540,"pct_of_step":0.20,"pct_of_kernels":0.20}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":16,"op":"pow","calls":7,"ns":16450,"pct_of_step":0.16,"pct_of_kernels":0.16}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":16,"op":"gather","calls":2,"ns":10520,"pct_of_step":0.10,"pct_of_kernels":0.10}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":16,"op":"reshape","calls":24,"ns":7530,"pct_of_step":0.07,"pct_of_kernels":0.07}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":16,"op":"tanh","calls":2,"ns":5200,"pct_of_step":0.05,"pct_of_kernels":0.05}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":16,"op":"mul","calls":12,"ns":4760,"pct_of_step":0.05,"pct_of_kernels":0.05}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":16,"op":"slice","calls":2,"ns":2780,"pct_of_step":0.03,"pct_of_kernels":0.03}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":16,"op":"cast","calls":3,"ns":2490,"pct_of_step":0.02,"pct_of_kernels":0.02}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":16,"op":"where","calls":3,"ns":2420,"pct_of_step":0.02,"pct_of_kernels":0.02}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":16,"op":"softmax","calls":2,"ns":2250,"pct_of_step":0.02,"pct_of_kernels":0.02}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":16,"op":"unsqueeze","calls":2,"ns":2110,"pct_of_step":0.02,"pct_of_kernels":0.02}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":16,"op":"sub","calls":6,"ns":1850,"pct_of_step":0.02,"pct_of_kernels":0.02}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":16,"op":"expand","calls":2,"ns":1650,"pct_of_step":0.02,"pct_of_kernels":0.02}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":16,"op":"div","calls":5,"ns":1330,"pct_of_step":0.01,"pct_of_kernels":0.01}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":16,"op":"sqrt","calls":5,"ns":1020,"pct_of_step":0.01,"pct_of_kernels":0.01}
+PROFILE_CLASS {"variant":"after","phase":"decode","budget":16,"op":"constant_of_shape","calls":2,"ns":1000,"pct_of_step":0.01,"pct_of_kernels":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"transpose","geometry":"transpose [50257, 128] -> [128, 50257]","calls":1,"ns":8043558,"pct_of_step":76.45}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"matmul","geometry":"matmul [1, 1, 128] [128, 50257] -> [1, 1, 50257]","calls":1,"ns":1708288,"pct_of_step":16.24}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"concat","geometry":"concat [1, 2, 10, 64] [1, 2, 1, 64] -> [1, 2, 11, 64]","calls":4,"ns":172730,"pct_of_step":1.64}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"matmul","geometry":"matmul [1, 512] [512, 128] -> [1, 128]","calls":2,"ns":40750,"pct_of_step":0.39}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"matmul","geometry":"matmul [1, 128] [128, 512] -> [1, 512]","calls":2,"ns":40080,"pct_of_step":0.38}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"matmul","geometry":"matmul [1, 128] [128, 384] -> [1, 384]","calls":2,"ns":30770,"pct_of_step":0.29}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"transpose","geometry":"transpose [1, 1, 2, 64] -> [1, 2, 1, 64]","calls":6,"ns":23260,"pct_of_step":0.22}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"reduce_mean","geometry":"reduce_mean [1, 1, 128] -> [1, 1, 1]","calls":10,"ns":22380,"pct_of_step":0.21}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"split","geometry":"split [1, 1, 384] [3] -> [3 outputs]","calls":2,"ns":20540,"pct_of_step":0.20}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"add","geometry":"add [1, 512] [512] -> [1, 512]","calls":2,"ns":17781,"pct_of_step":0.17}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"add","geometry":"add [1, 384] [384] -> [1, 384]","calls":2,"ns":13541,"pct_of_step":0.13}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"matmul","geometry":"matmul [1, 128] [128, 128] -> [1, 128]","calls":2,"ns":10270,"pct_of_step":0.10}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"add","geometry":"add [1, 128] [128] -> [1, 128]","calls":4,"ns":9840,"pct_of_step":0.09}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"pow","geometry":"pow [1, 1, 512] [] -> [1, 1, 512]","calls":2,"ns":9090,"pct_of_step":0.09}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"transpose","geometry":"transpose [1, 2, 1, 64] -> [1, 1, 2, 64]","calls":2,"ns":7421,"pct_of_step":0.07}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"pow","geometry":"pow [1, 1, 128] [] -> [1, 1, 128]","calls":5,"ns":7360,"pct_of_step":0.07}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"gather","geometry":"gather [1024, 128] [1, 1] -> [1, 1, 128]","calls":1,"ns":5320,"pct_of_step":0.05}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"gather","geometry":"gather [50257, 128] [1, 1] -> [1, 1, 128]","calls":1,"ns":5200,"pct_of_step":0.05}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"tanh","geometry":"tanh [1, 1, 512] -> [1, 1, 512]","calls":2,"ns":5200,"pct_of_step":0.05}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"slice","geometry":"slice [1, 1, 1, 11] [1] [1] [1] [1] -> [1, 1, 1, 11]","calls":2,"ns":2780,"pct_of_step":0.03}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"cast","geometry":"cast [1, 1, 1, 11] -> [1, 1, 1, 11]","calls":3,"ns":2490,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"reshape","geometry":"reshape [1, 1, 128] [2] -> [1, 128]","calls":6,"ns":2450,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"transpose","geometry":"transpose [1, 2, 11, 64] -> [1, 2, 64, 11]","calls":2,"ns":2340,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"add","geometry":"add [1, 1, 128] [1, 1, 128] -> [1, 1, 128]","calls":5,"ns":2330,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"softmax","geometry":"softmax [1, 2, 1, 11] -> [1, 2, 1, 11]","calls":2,"ns":2250,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"unsqueeze","geometry":"unsqueeze [1, 11] [2] -> [1, 1, 1, 11]","calls":2,"ns":2110,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"where","geometry":"where [1, 1, 1, 11] [] [1, 1, 1, 11] -> [1, 1, 1, 11]","calls":2,"ns":2010,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"matmul","geometry":"matmul [1, 2, 1, 64] [1, 2, 64, 11] -> [1, 2, 1, 11]","calls":2,"ns":1820,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"mul","geometry":"mul [1, 1, 512] [] -> [1, 1, 512]","calls":6,"ns":1770,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"add","geometry":"add [1, 2, 1, 11] [1, 1, 1, 11] -> [1, 2, 1, 11]","calls":2,"ns":1650,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"expand","geometry":"expand [1, 1, 1, 11] [4] -> [1, 1, 1, 11]","calls":2,"ns":1650,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"reshape","geometry":"reshape [1, 1, 128] [4] -> [1, 1, 2, 64]","calls":6,"ns":1550,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"sub","geometry":"sub [1, 1, 128] [1, 1, 1] -> [1, 1, 128]","calls":5,"ns":1400,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"div","geometry":"div [1, 1, 128] [1, 1, 1] -> [1, 1, 128]","calls":5,"ns":1330,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"mul","geometry":"mul [1, 2, 64, 11] [1] -> [1, 2, 64, 11]","calls":2,"ns":1270,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"matmul","geometry":"matmul [1, 2, 1, 11] [1, 2, 11, 64] -> [1, 2, 1, 64]","calls":2,"ns":1070,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"add","geometry":"add [1, 1, 1] [] -> [1, 1, 1]","calls":5,"ns":1030,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"sqrt","geometry":"sqrt [1, 1, 1] -> [1, 1, 1]","calls":5,"ns":1020,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"reshape","geometry":"reshape [1, 128] [3] -> [1, 1, 128]","calls":4,"ns":920,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"mul","geometry":"mul [1, 2, 1, 64] [1] -> [1, 2, 1, 64]","calls":2,"ns":910,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"mul","geometry":"mul [1, 1, 512] [1, 1, 512] -> [1, 1, 512]","calls":2,"ns":810,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"concat","geometry":"concat [1, 10] [1, 1] -> [1, 11]","calls":1,"ns":750,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"reshape","geometry":"reshape [1, 384] [3] -> [1, 1, 384]","calls":2,"ns":730,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"add","geometry":"add [1, 1, 512] [1, 1, 512] -> [1, 1, 512]","calls":2,"ns":700,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"add","geometry":"add [1, 1, 512] [] -> [1, 1, 512]","calls":2,"ns":700,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"constant_of_shape","geometry":"constant_of_shape [2] [1] -> [1, 1]","calls":1,"ns":680,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"reshape","geometry":"reshape [1, 1, 2, 64] [3] -> [1, 1, 128]","calls":2,"ns":650,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"reshape","geometry":"reshape [1, 512] [3] -> [1, 1, 512]","calls":2,"ns":640,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"reshape","geometry":"reshape [1, 1, 512] [2] -> [1, 512]","calls":2,"ns":590,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"sub","geometry":"sub [] [1, 1, 1, 11] -> [1, 1, 1, 11]","calls":1,"ns":450,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"where","geometry":"where [1, 1] [] [1, 1] -> [1, 1]","calls":1,"ns":410,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"after","phase":"decode","budget":16,"op":"constant_of_shape","geometry":"constant_of_shape [2] [1] -> [1, 10]","calls":1,"ns":320,"pct_of_step":0.00}
+Census {"variant":"after","model":"tiny-gpt2","workload":"decode","seq":1,"past":10,"instructions":144}
+Allocations {"variant":"after","model":"tiny-gpt2","budget":"auto","prefill_first":{"count":8036,"bytes":29318998},"decode_first":{"count":7671,"bytes":956519},"decode_steady":{"count":7092,"bytes":647981},"slot_allocations":323,"slot_reuses":121}
+Environment {"variant":"after","process_budget":16,"budget_note":"auto: visible CPUs, no cap requested","os_threads":16,"iters":30,"warmup":3,"loadavg":"2.46 3.96 3.90 2/2136 1370105","arch":"x86_64","context":96,"max_seq":33}
+Build {"timer":"std::time::Instant","build":"release, lto=true, codegen-units=1, panic=abort","threads":"one process-wide Rayon pool; the budget caps chunks per instruction"}
+Budget {"variant":"after","model":"tiny-gpt2","budget":"1","selected":1,"observed_max_active":0,"observed_threads":0,"tasks":0,"parallel_ops":0,"serial_ops":0,"checksum":"0xd7d884c22480b742"}
+Budget {"variant":"after","model":"tiny-gpt2","budget":"2","selected":2,"observed_max_active":2,"observed_threads":3,"tasks":60,"parallel_ops":30,"serial_ops":0,"checksum":"0xd7d884c22480b742"}
+Budget {"variant":"after","model":"tiny-gpt2","budget":"4","selected":4,"observed_max_active":4,"observed_threads":5,"tasks":120,"parallel_ops":30,"serial_ops":0,"checksum":"0xd7d884c22480b742"}
+Budget {"variant":"after","model":"tiny-gpt2","budget":"8","selected":8,"observed_max_active":8,"observed_threads":15,"tasks":240,"parallel_ops":30,"serial_ops":0,"checksum":"0xd7d884c22480b742"}
+Budget {"variant":"after","model":"tiny-gpt2","budget":"12","selected":12,"observed_max_active":10,"observed_threads":16,"tasks":300,"parallel_ops":30,"serial_ops":0,"checksum":"0xd7d884c22480b742"}
+Budget {"variant":"after","model":"tiny-gpt2","budget":"16","selected":16,"observed_max_active":10,"observed_threads":16,"tasks":300,"parallel_ops":30,"serial_ops":0,"checksum":"0xd7d884c22480b742"}
+Budget {"variant":"after","model":"tiny-gpt2","budget":"auto","selected":16,"observed_max_active":10,"observed_threads":16,"tasks":300,"parallel_ops":30,"serial_ops":0,"checksum":"0xd7d884c22480b742"}
+Environment {"variant":"after","process_budget":16,"budget_note":"auto: visible CPUs, no cap requested","os_threads":16,"iters":30,"warmup":3,"loadavg":"2.51 3.95 3.89 3/2155 1370193","arch":"x86_64","context":96,"max_seq":33}
+Build {"timer":"std::time::Instant","build":"release, lto=true, codegen-units=1, panic=abort","threads":"one process-wide Rayon pool; the budget caps chunks per instruction"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"prefill","seq":10,"past":0,"budget":"1","selected":1,"effective_max":0,"effective_threads":0,"p50_us":13430.343,"p95_us":13695.005,"min_us":13069.782,"alloc_count":3435,"alloc_bytes":29281986,"tasks_per_step":0.0,"parallel_ops_per_step":0.0,"serial_ops_per_step":0.0,"checksum":"0x57908efa8cfa18b7","loadavg":"2.51 3.95 3.89 2/2152 1370194"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"prefill","seq":32,"past":0,"budget":"1","selected":1,"effective_max":0,"effective_threads":0,"p50_us":24403.787,"p95_us":26784.608,"min_us":23730.243,"alloc_count":3435,"alloc_bytes":35924622,"tasks_per_step":0.0,"parallel_ops_per_step":0.0,"serial_ops_per_step":0.0,"checksum":"0x562adb65c7f2369b","loadavg":"2.51 3.95 3.89 3/2161 1370227"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_after_prefill","seq":10,"past":10,"budget":"1","selected":1,"effective_max":0,"effective_threads":0,"p50_us":6000.169,"p95_us":6747.672,"min_us":5808.178,"alloc_count":3396,"alloc_bytes":925921,"tasks_per_step":0.0,"parallel_ops_per_step":0.0,"serial_ops_per_step":0.0,"checksum":"0xca2d9d3615ee1863","loadavg":"2.51 3.95 3.89 4/2148 1370232"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_chain","seq":1,"past":42,"past_start":12,"past_end":42,"budget":"1","selected":1,"effective_max":0,"effective_threads":0,"p50_us":7094.033,"p95_us":7754.087,"min_us":6430.181,"alloc_count":7093,"alloc_bytes":946232,"tasks_per_step":0.0,"parallel_ops_per_step":0.0,"serial_ops_per_step":0.0,"checksum":"0xadbfe177dbc0c2a6","loadavg":"2.51 3.95 3.89 4/2133 1370235"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_after_prefill","seq":32,"past":32,"budget":"1","selected":1,"effective_max":0,"effective_threads":0,"p50_us":6577.341,"p95_us":7258.565,"min_us":6384.341,"alloc_count":3396,"alloc_bytes":1066765,"tasks_per_step":0.0,"parallel_ops_per_step":0.0,"serial_ops_per_step":0.0,"checksum":"0x56ab990c772e716c","loadavg":"2.51 3.95 3.89 3/2128 1370242"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_chain","seq":1,"past":64,"past_start":34,"past_end":64,"budget":"1","selected":1,"effective_max":0,"effective_threads":0,"p50_us":7534.036,"p95_us":8148.589,"min_us":6505.241,"alloc_count":5952,"alloc_bytes":1025251,"tasks_per_step":0.0,"parallel_ops_per_step":0.0,"serial_ops_per_step":0.0,"checksum":"0xdc5c276809d65d1e","loadavg":"2.51 3.95 3.89 2/2126 1370242"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"prefill","seq":10,"past":0,"budget":"2","selected":2,"effective_max":2,"effective_threads":3,"p50_us":10920.222,"p95_us":13555.525,"min_us":10074.108,"alloc_count":3439,"alloc_bytes":29282116,"tasks_per_step":2.0,"parallel_ops_per_step":1.0,"serial_ops_per_step":0.0,"checksum":"0x57908efa8cfa18b7","loadavg":"2.55 3.93 3.89 2/2126 1370242"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"prefill","seq":32,"past":0,"budget":"2","selected":2,"effective_max":2,"effective_threads":3,"p50_us":18538.798,"p95_us":21887.174,"min_us":17597.693,"alloc_count":3439,"alloc_bytes":35924702,"tasks_per_step":2.0,"parallel_ops_per_step":1.0,"serial_ops_per_step":0.0,"checksum":"0x562adb65c7f2369b","loadavg":"2.55 3.93 3.89 3/2126 1370247"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_after_prefill","seq":10,"past":10,"budget":"2","selected":2,"effective_max":2,"effective_threads":3,"p50_us":6112.659,"p95_us":10083.758,"min_us":5858.278,"alloc_count":3396,"alloc_bytes":925921,"tasks_per_step":2.0,"parallel_ops_per_step":1.0,"serial_ops_per_step":0.0,"checksum":"0xca2d9d3615ee1863","loadavg":"2.55 3.93 3.89 2/2126 1370248"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_chain","seq":1,"past":42,"past_start":12,"past_end":42,"budget":"2","selected":2,"effective_max":0,"effective_threads":0,"p50_us":7233.874,"p95_us":7616.826,"min_us":6161.369,"alloc_count":7093,"alloc_bytes":946232,"tasks_per_step":0.0,"parallel_ops_per_step":0.0,"serial_ops_per_step":0.0,"checksum":"0xadbfe177dbc0c2a6","loadavg":"2.55 3.93 3.89 2/2125 1370250"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_after_prefill","seq":32,"past":32,"budget":"2","selected":2,"effective_max":2,"effective_threads":3,"p50_us":7265.505,"p95_us":10678.401,"min_us":6417.100,"alloc_count":3396,"alloc_bytes":1066765,"tasks_per_step":2.0,"parallel_ops_per_step":1.0,"serial_ops_per_step":0.0,"checksum":"0x56ab990c772e716c","loadavg":"2.55 3.93 3.89 3/2132 1370262"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_chain","seq":1,"past":64,"past_start":34,"past_end":64,"budget":"2","selected":2,"effective_max":0,"effective_threads":0,"p50_us":7479.645,"p95_us":8128.529,"min_us":6344.520,"alloc_count":5952,"alloc_bytes":1025251,"tasks_per_step":0.0,"parallel_ops_per_step":0.0,"serial_ops_per_step":0.0,"checksum":"0xdc5c276809d65d1e","loadavg":"2.55 3.93 3.89 2/2132 1370263"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"prefill","seq":10,"past":0,"budget":"4","selected":4,"effective_max":4,"effective_threads":5,"p50_us":12946.892,"p95_us":14588.360,"min_us":11402.704,"alloc_count":3439,"alloc_bytes":29282196,"tasks_per_step":4.0,"parallel_ops_per_step":1.0,"serial_ops_per_step":0.0,"checksum":"0x57908efa8cfa18b7","loadavg":"2.55 3.93 3.89 2/2133 1370266"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"prefill","seq":32,"past":0,"budget":"4","selected":4,"effective_max":4,"effective_threads":6,"p50_us":18094.946,"p95_us":22430.606,"min_us":17107.951,"alloc_count":3439,"alloc_bytes":35924782,"tasks_per_step":4.0,"parallel_ops_per_step":1.0,"serial_ops_per_step":0.0,"checksum":"0x562adb65c7f2369b","loadavg":"2.55 3.93 3.89 2/2132 1370277"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_after_prefill","seq":10,"past":10,"budget":"4","selected":4,"effective_max":4,"effective_threads":6,"p50_us":9647.196,"p95_us":10458.500,"min_us":5947.938,"alloc_count":3396,"alloc_bytes":925921,"tasks_per_step":4.0,"parallel_ops_per_step":1.0,"serial_ops_per_step":0.0,"checksum":"0xca2d9d3615ee1863","loadavg":"2.55 3.93 3.89 2/2133 1370281"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_chain","seq":1,"past":42,"past_start":12,"past_end":42,"budget":"4","selected":4,"effective_max":0,"effective_threads":0,"p50_us":7052.344,"p95_us":7488.905,"min_us":6447.801,"alloc_count":7093,"alloc_bytes":946232,"tasks_per_step":0.0,"parallel_ops_per_step":0.0,"serial_ops_per_step":0.0,"checksum":"0xadbfe177dbc0c2a6","loadavg":"2.55 3.93 3.89 2/2132 1370281"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_after_prefill","seq":32,"past":32,"budget":"4","selected":4,"effective_max":4,"effective_threads":6,"p50_us":10104.838,"p95_us":11845.066,"min_us":6967.493,"alloc_count":3396,"alloc_bytes":1066765,"tasks_per_step":4.0,"parallel_ops_per_step":1.0,"serial_ops_per_step":0.0,"checksum":"0x56ab990c772e716c","loadavg":"2.74 3.95 3.90 2/2129 1370288"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_chain","seq":1,"past":64,"past_start":34,"past_end":64,"budget":"4","selected":4,"effective_max":0,"effective_threads":0,"p50_us":7560.806,"p95_us":8706.481,"min_us":6355.941,"alloc_count":5952,"alloc_bytes":1025251,"tasks_per_step":0.0,"parallel_ops_per_step":0.0,"serial_ops_per_step":0.0,"checksum":"0xdc5c276809d65d1e","loadavg":"2.74 3.95 3.90 2/2130 1370291"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"prefill","seq":10,"past":0,"budget":"8","selected":8,"effective_max":8,"effective_threads":14,"p50_us":11692.155,"p95_us":12569.640,"min_us":10855.992,"alloc_count":3439,"alloc_bytes":29282356,"tasks_per_step":8.0,"parallel_ops_per_step":1.0,"serial_ops_per_step":0.0,"checksum":"0x57908efa8cfa18b7","loadavg":"2.74 3.95 3.90 2/2130 1370292"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"prefill","seq":32,"past":0,"budget":"8","selected":8,"effective_max":8,"effective_threads":15,"p50_us":16384.908,"p95_us":18383.438,"min_us":15048.711,"alloc_count":3439,"alloc_bytes":35924942,"tasks_per_step":8.0,"parallel_ops_per_step":1.0,"serial_ops_per_step":0.0,"checksum":"0x562adb65c7f2369b","loadavg":"2.74 3.95 3.90 3/2130 1370300"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_after_prefill","seq":10,"past":10,"budget":"8","selected":8,"effective_max":8,"effective_threads":16,"p50_us":10075.768,"p95_us":11310.294,"min_us":7436.136,"alloc_count":3396,"alloc_bytes":925921,"tasks_per_step":8.0,"parallel_ops_per_step":1.0,"serial_ops_per_step":0.0,"checksum":"0xca2d9d3615ee1863","loadavg":"2.74 3.95 3.90 2/2136 1370312"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_chain","seq":1,"past":42,"past_start":12,"past_end":42,"budget":"8","selected":8,"effective_max":0,"effective_threads":0,"p50_us":7033.573,"p95_us":9143.314,"min_us":6177.889,"alloc_count":7093,"alloc_bytes":946232,"tasks_per_step":0.0,"parallel_ops_per_step":0.0,"serial_ops_per_step":0.0,"checksum":"0xadbfe177dbc0c2a6","loadavg":"2.74 3.95 3.90 2/2137 1370315"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_after_prefill","seq":32,"past":32,"budget":"8","selected":8,"effective_max":8,"effective_threads":14,"p50_us":10307.179,"p95_us":11732.026,"min_us":8986.182,"alloc_count":3396,"alloc_bytes":1066765,"tasks_per_step":8.0,"parallel_ops_per_step":1.0,"serial_ops_per_step":0.0,"checksum":"0x56ab990c772e716c","loadavg":"2.74 3.95 3.90 2/2144 1370327"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_chain","seq":1,"past":64,"past_start":34,"past_end":64,"budget":"8","selected":8,"effective_max":0,"effective_threads":0,"p50_us":7461.076,"p95_us":7763.777,"min_us":6467.031,"alloc_count":5952,"alloc_bytes":1025251,"tasks_per_step":0.0,"parallel_ops_per_step":0.0,"serial_ops_per_step":0.0,"checksum":"0xdc5c276809d65d1e","loadavg":"2.74 3.95 3.90 2/2144 1370327"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"prefill","seq":10,"past":0,"budget":"12","selected":12,"effective_max":10,"effective_threads":16,"p50_us":10382.430,"p95_us":11846.767,"min_us":9501.325,"alloc_count":3439,"alloc_bytes":29282386,"tasks_per_step":10.0,"parallel_ops_per_step":1.0,"serial_ops_per_step":0.0,"checksum":"0x57908efa8cfa18b7","loadavg":"2.74 3.95 3.90 4/2146 1370329"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"prefill","seq":32,"past":0,"budget":"12","selected":12,"effective_max":12,"effective_threads":16,"p50_us":19334.882,"p95_us":21466.492,"min_us":18523.417,"alloc_count":3439,"alloc_bytes":35925152,"tasks_per_step":12.0,"parallel_ops_per_step":1.0,"serial_ops_per_step":0.0,"checksum":"0x562adb65c7f2369b","loadavg":"2.74 3.95 3.90 3/2144 1370332"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_after_prefill","seq":10,"past":10,"budget":"12","selected":12,"effective_max":10,"effective_threads":16,"p50_us":9986.397,"p95_us":11381.644,"min_us":8033.418,"alloc_count":3396,"alloc_bytes":925921,"tasks_per_step":10.0,"parallel_ops_per_step":1.0,"serial_ops_per_step":0.0,"checksum":"0xca2d9d3615ee1863","loadavg":"2.68 3.92 3.89 3/2145 1370336"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_chain","seq":1,"past":42,"past_start":12,"past_end":42,"budget":"12","selected":12,"effective_max":0,"effective_threads":0,"p50_us":7105.544,"p95_us":8235.579,"min_us":6172.200,"alloc_count":7093,"alloc_bytes":946232,"tasks_per_step":0.0,"parallel_ops_per_step":0.0,"serial_ops_per_step":0.0,"checksum":"0xadbfe177dbc0c2a6","loadavg":"2.68 3.92 3.89 2/2144 1370336"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_after_prefill","seq":32,"past":32,"budget":"12","selected":12,"effective_max":12,"effective_threads":16,"p50_us":10274.969,"p95_us":11478.644,"min_us":8618.551,"alloc_count":3396,"alloc_bytes":1066765,"tasks_per_step":12.0,"parallel_ops_per_step":1.0,"serial_ops_per_step":0.0,"checksum":"0x56ab990c772e716c","loadavg":"2.68 3.92 3.89 2/2144 1370346"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_chain","seq":1,"past":64,"past_start":34,"past_end":64,"budget":"12","selected":12,"effective_max":0,"effective_threads":0,"p50_us":7500.685,"p95_us":9329.044,"min_us":6481.730,"alloc_count":5952,"alloc_bytes":1025251,"tasks_per_step":0.0,"parallel_ops_per_step":0.0,"serial_ops_per_step":0.0,"checksum":"0xdc5c276809d65d1e","loadavg":"2.68 3.92 3.89 3/2144 1370349"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"prefill","seq":10,"past":0,"budget":"16","selected":16,"effective_max":10,"effective_threads":16,"p50_us":10191.669,"p95_us":11588.125,"min_us":9696.286,"alloc_count":3439,"alloc_bytes":29282386,"tasks_per_step":10.0,"parallel_ops_per_step":1.0,"serial_ops_per_step":0.0,"checksum":"0x57908efa8cfa18b7","loadavg":"2.68 3.92 3.89 2/2145 1370353"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"prefill","seq":32,"past":0,"budget":"16","selected":16,"effective_max":16,"effective_threads":16,"p50_us":19393.612,"p95_us":21185.071,"min_us":18405.918,"alloc_count":3439,"alloc_bytes":35925312,"tasks_per_step":16.0,"parallel_ops_per_step":1.0,"serial_ops_per_step":0.0,"checksum":"0x562adb65c7f2369b","loadavg":"2.68 3.92 3.89 3/2144 1370355"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_after_prefill","seq":10,"past":10,"budget":"16","selected":16,"effective_max":10,"effective_threads":16,"p50_us":10141.588,"p95_us":11022.563,"min_us":7083.353,"alloc_count":3396,"alloc_bytes":925921,"tasks_per_step":10.0,"parallel_ops_per_step":1.0,"serial_ops_per_step":0.0,"checksum":"0xca2d9d3615ee1863","loadavg":"2.68 3.92 3.89 2/2144 1370361"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_chain","seq":1,"past":42,"past_start":12,"past_end":42,"budget":"16","selected":16,"effective_max":0,"effective_threads":0,"p50_us":7087.784,"p95_us":8005.648,"min_us":6496.831,"alloc_count":7093,"alloc_bytes":946232,"tasks_per_step":0.0,"parallel_ops_per_step":0.0,"serial_ops_per_step":0.0,"checksum":"0xadbfe177dbc0c2a6","loadavg":"2.68 3.92 3.89 2/2144 1370362"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_after_prefill","seq":32,"past":32,"budget":"16","selected":16,"effective_max":16,"effective_threads":16,"p50_us":10530.450,"p95_us":11356.604,"min_us":8498.740,"alloc_count":3396,"alloc_bytes":1066765,"tasks_per_step":16.0,"parallel_ops_per_step":1.0,"serial_ops_per_step":0.0,"checksum":"0x56ab990c772e716c","loadavg":"4.23 4.22 3.98 3/2144 1370366"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_chain","seq":1,"past":64,"past_start":34,"past_end":64,"budget":"16","selected":16,"effective_max":0,"effective_threads":0,"p50_us":7514.045,"p95_us":8244.499,"min_us":6379.611,"alloc_count":5952,"alloc_bytes":1025251,"tasks_per_step":0.0,"parallel_ops_per_step":0.0,"serial_ops_per_step":0.0,"checksum":"0xdc5c276809d65d1e","loadavg":"4.23 4.22 3.98 5/2145 1370367"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"prefill","seq":10,"past":0,"budget":"auto","selected":16,"effective_max":10,"effective_threads":16,"p50_us":10209.339,"p95_us":11816.586,"min_us":9712.656,"alloc_count":3439,"alloc_bytes":29282386,"tasks_per_step":10.0,"parallel_ops_per_step":1.0,"serial_ops_per_step":0.0,"checksum":"0x57908efa8cfa18b7","loadavg":"4.23 4.22 3.98 2/2143 1370370"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"prefill","seq":32,"past":0,"budget":"auto","selected":16,"effective_max":16,"effective_threads":16,"p50_us":19585.803,"p95_us":22453.727,"min_us":19086.330,"alloc_count":3439,"alloc_bytes":35925312,"tasks_per_step":16.0,"parallel_ops_per_step":1.0,"serial_ops_per_step":0.0,"checksum":"0x562adb65c7f2369b","loadavg":"4.23 4.22 3.98 3/2144 1370374"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_after_prefill","seq":10,"past":10,"budget":"auto","selected":16,"effective_max":10,"effective_threads":16,"p50_us":10076.258,"p95_us":11202.844,"min_us":7815.348,"alloc_count":3396,"alloc_bytes":925921,"tasks_per_step":10.0,"parallel_ops_per_step":1.0,"serial_ops_per_step":0.0,"checksum":"0xca2d9d3615ee1863","loadavg":"4.23 4.22 3.98 2/2142 1370374"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_chain","seq":1,"past":42,"past_start":12,"past_end":42,"budget":"auto","selected":16,"effective_max":0,"effective_threads":0,"p50_us":7289.695,"p95_us":9134.623,"min_us":6776.912,"alloc_count":7093,"alloc_bytes":946232,"tasks_per_step":0.0,"parallel_ops_per_step":0.0,"serial_ops_per_step":0.0,"checksum":"0xadbfe177dbc0c2a6","loadavg":"4.23 4.22 3.98 2/2136 1370376"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_after_prefill","seq":32,"past":32,"budget":"auto","selected":16,"effective_max":16,"effective_threads":16,"p50_us":10916.902,"p95_us":11994.627,"min_us":7929.038,"alloc_count":3396,"alloc_bytes":1066765,"tasks_per_step":16.0,"parallel_ops_per_step":1.0,"serial_ops_per_step":0.0,"checksum":"0x56ab990c772e716c","loadavg":"4.23 4.22 3.98 3/2134 1370389"}
+SWEEP {"variant":"after","model":"tiny-gpt2","kind":"decode_chain","seq":1,"past":64,"past_start":34,"past_end":64,"budget":"auto","selected":16,"effective_max":0,"effective_threads":0,"p50_us":7471.375,"p95_us":8959.893,"min_us":6439.450,"alloc_count":5952,"alloc_bytes":1025251,"tasks_per_step":0.0,"parallel_ops_per_step":0.0,"serial_ops_per_step":0.0,"checksum":"0xdc5c276809d65d1e","loadavg":"4.23 4.22 3.98 2/2135 1370393"}
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 29.51s

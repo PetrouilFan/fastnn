@@ -83,19 +83,14 @@ pub const MAX_THREADS: usize = 64;
 pub const MIN_MACS_PER_TASK: u64 = 4 << 20;
 
 /// How much parallelism a runtime allows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThreadBudget {
     /// Every CPU this process may use (the default).
+    #[default]
     Auto,
     /// At most this many threads; `Fixed(1)` is the serial path. Values above
     /// [`process_budget`] are clamped to it.
     Fixed(usize),
-}
-
-impl Default for ThreadBudget {
-    fn default() -> ThreadBudget {
-        ThreadBudget::Auto
-    }
 }
 
 impl ThreadBudget {
@@ -278,6 +273,7 @@ static DISTINCT_THREADS: AtomicUsize = AtomicUsize::new(0);
 /// registers again afterwards and `distinct_threads` describes the window.
 static GENERATION: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(feature = "parallel")]
 thread_local! {
     /// The [`GENERATION`] this thread last registered in, so
     /// [`CpuParallelStats::distinct_threads`] counts workers that really ran
@@ -285,6 +281,7 @@ thread_local! {
     static REGISTERED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+#[cfg(feature = "parallel")]
 fn enter() {
     TASKS.fetch_add(1, Ordering::Relaxed);
     let active = ACTIVE.fetch_add(1, Ordering::Relaxed) + 1;
@@ -295,6 +292,7 @@ fn enter() {
     }
 }
 
+#[cfg(feature = "parallel")]
 fn leave() {
     ACTIVE.fetch_sub(1, Ordering::Relaxed);
 }

@@ -199,7 +199,7 @@ impl TimingBackend {
             .iter()
             .map(|((op, shape), sample)| (*op, shape.clone(), sample.calls, sample.nanos))
             .collect();
-        rows.sort_by(|left, right| right.3.cmp(&left.3));
+        rows.sort_by_key(|row| std::cmp::Reverse(row.3));
         rows
     }
 }
@@ -863,7 +863,13 @@ fn thread_scaling_sweep() {
 
         for &past in &model.decode_pasts() {
             let past_usize = past as usize;
-            // -- decode at a fixed past ---------------------------------
+            // -- decode immediately after a prefill ----------------------
+            // This is the "first token of a turn" case: every iteration
+            // re-establishes the cache with an untimed prefill on the same
+            // backend, so the number includes whatever the prefill left behind
+            // (cache state, pool wake-ups, clock state). It is reported
+            // separately because that carry-over is real, and because the
+            // steady-state chain below would otherwise hide it.
             for _ in 0..warmups {
                 session.reset();
                 step(
@@ -895,7 +901,7 @@ fn thread_scaling_sweep() {
             let observed = parallel_stats();
             report_sweep(
                 &model,
-                "decode",
+                "decode_after_prefill",
                 past,
                 past,
                 budget,
@@ -904,8 +910,83 @@ fn thread_scaling_sweep() {
                 recorder.finish(),
                 checksum(&last),
             );
+
+            // -- steady-state decode chain ------------------------------
+            // One prefill, two untimed steps, then the timed chain. `past`
+            // grows by one per step, which is what a real generation loop
+            // does; the row prints the start and end context so the reader can
+            // judge the drift. Untimed prefills are *not* repeated here, so a
+            // budget's number is not contaminated by a budget-sized prefill
+            // running in between.
+            session.reset();
+            step(session.prefill(&tokens[..past_usize]), "chain prefill");
+            for _ in 0..2 {
+                step(
+                    session.decode(&tokens[past_usize..past_usize + 1]),
+                    "chain warm",
+                );
+            }
+            let start_context = session.cache_len();
+            reset_parallel_stats();
+            let mut recorder = Recorder::with_capacity(iterations);
+            let mut last = Vec::new();
+            for _ in 0..iterations {
+                let at = session.cache_len() as usize;
+                recorder.time(|| {
+                    let logits = step(session.decode(&tokens[at..at + 1]), "chain decode");
+                    last = logits.as_f32_slice().expect("host logits").to_vec();
+                });
+            }
+            let observed = parallel_stats();
+            report_chain(
+                &model,
+                start_context,
+                session.cache_len(),
+                budget,
+                selected,
+                &observed,
+                recorder.finish(),
+                checksum(&last),
+            );
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn report_chain(
+    model: &ModelUnderTest,
+    past_start: u64,
+    past_end: u64,
+    budget: Option<usize>,
+    selected: usize,
+    observed: &fastnn::fn3::backend::cpu::CpuParallelStats,
+    (samples, allocations, allocated_bytes): (Vec<u128>, u64, u64),
+    checksum: u64,
+) {
+    let mut sorted = samples;
+    sorted.sort_unstable();
+    let steps = sorted.len().max(1) as u64;
+    println!(
+        "SWEEP {{\"variant\":\"{}\",\"model\":\"{}\",\"kind\":\"decode_chain\",\
+         \"seq\":1,\"past\":{past_end},\"past_start\":{past_start},\"past_end\":{past_end},\
+         \"budget\":\"{}\",\"selected\":{selected},\"effective_max\":{},\
+         \"effective_threads\":{},\"p50_us\":{:.3},\"p95_us\":{:.3},\"min_us\":{:.3},\
+         \"alloc_count\":{allocations},\"alloc_bytes\":{allocated_bytes},\
+         \"tasks_per_step\":{:.1},\"parallel_ops_per_step\":{:.1},\
+         \"serial_ops_per_step\":{:.1},\"checksum\":\"{checksum:#018x}\",\"loadavg\":\"{}\"}}",
+        variant(),
+        model.label,
+        ModelUnderTest::budget_label(budget),
+        observed.max_active,
+        observed.distinct_threads,
+        percentile(&sorted, 0.50) as f64 / 1000.0,
+        percentile(&sorted, 0.95) as f64 / 1000.0,
+        sorted.first().copied().unwrap_or(0) as f64 / 1000.0,
+        observed.tasks as f64 / steps as f64,
+        observed.parallel_ops as f64 / steps as f64,
+        observed.serial_ops as f64 / steps as f64,
+        loadavg(),
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1046,7 +1127,7 @@ fn per_op_attribution() {
     };
     let (prepared, _) = model.prepared();
     let tokens = long_tokens();
-    let prompt = *model.prompts().first().unwrap_or(&10) as u64;
+    let prompt = *model.prompts().first().unwrap_or(&10);
     let past = *model.decode_pasts().first().unwrap_or(&10);
     let widest = cpu_process_budget();
     for budget in [1usize, widest] {
@@ -1133,7 +1214,7 @@ fn profile(
         .into_iter()
         .map(|(name, (calls, nanos))| (name, calls, nanos))
         .collect();
-    by_op.sort_by(|left, right| right.2.cmp(&left.2));
+    by_op.sort_by_key(|row| std::cmp::Reverse(row.2));
 
     println!(
         "PROFILE {{\"variant\":\"{}\",\"phase\":\"{kind}\",\"budget\":{budget},\
@@ -1297,7 +1378,7 @@ fn filled(shape: &[u64], seed: f32) -> Tensor {
             let x = index as f32 * 0.001 + seed;
             // A bounded, non-degenerate pattern: tanh/GELU exercise both tails,
             // and the matmul values stay far from overflow.
-            (x.sin() * 2.0) as f32
+            x.sin() * 2.0
         })
         .collect();
     Tensor::from_f32(fastnn::fn3::Shape::from_dims(shape.to_vec()), &values).expect("tensor")
