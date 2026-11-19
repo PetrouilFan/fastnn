@@ -620,3 +620,50 @@ expanded automatic-thread-scaling requirements (1/2/4/8/12/16/Auto on the
 Ryzen 7 3700X, prefill and batch-1 decode, tiny and trained model, Auto
 default with a shared budget and a #69 interface). #72 integrated at `dd1dd7f`;
 the merged tree's `cargo test --lib` is 682 and every `fn3_*` binary passes.
+
+## Wave 2: CPU scaling, runtime hardening, quantized paths
+
+**#71 merged `42d023a`.** Column-tiled prefill and adaptive `Auto`. The cache
+hypothesis was refuted by a six-arm experiment (25.7 MB working set, 16 threads,
+idle recovery: 0.19 ms spread, smaller than within-arm p95; the same binary
+varied 5.277-7.886 ms between windows). Column tiling reads the weight once and
+is 0.77x on tiny prefill 32 and 0.85x on trained prefill. Auto narrows to one
+thread after observing a one-row product that cannot use threads. Reproduced by
+the integrator on trained GPT-2 at `aed9d95`: prefill 1->16 **1.38x**
+(330.4->240.0 ms), 1->12 1.37x; decode 1->12 1.04x (142.5->137.4 ms); Auto
+239.33/258.91/133.19 ms on prefill 10/13/decode-after versus best fixed
+240.02/260.51/133.60. The chain Auto sample 152.82 ms was transient; a repeat
+gave 143.76 vs 142.98 at 4 threads and 139.09 at 16, ratio 1.034 inside the
+0.95-1.05 tolerance. The owner's ~1.2x reproduces for prefill, not decode.
+Residual: the first turn of a session runs wide before narrowing, which needs a
+session-level hook in `model/**`.
+
+**#69 merged `67ca5ae`.** CPU W8A16 fused projection, new module only. Trained
+prefill **1.48x**, decode **1.10x**, projection storage 26.56% of FP32, top-1
+preserved on every measured step; final quantized accuracy sign-off remains tied
+to the trained FP32 decision.
+
+**#73 merged `29d9e69`.** Recoverable failures leave extent/step/tokens/phase
+unchanged, release slots and roll back every KV layer; device loss poisons the
+device and returns a typed terminal error naming adapter, UUID and call.
+Injected matrix 4 debug + 4 release; 12 injected and 8 hardware reset rounds;
+physical e2e 10 with resident and staged arms byte-identical, validation 0/0.
+
+**#70 merged `aed9d95`.** Vulkan W8A16 fused kernel, resident tiny proof: 8
+prefill / 24 decode quantized records with 0 upload, 0 readback, 3 device-local
+bindings, readback exactly 804,112 B, submissions 6/30. Trained is **staged
+only**: the resident path fails on identity `Reshape(input_ids) -> Gather`
+(`Fn3Error::NotImplemented`), a defect in the plan/embedding boundary, not in
+the quantized kernel. #70 stays open until that is fixed and trained resident
+is measured.
+
+**Trained FP32 investigation merged `6e1d564`.** The 5e-5 mean-absolute bound is
+below the reference's own rounding error: an independent float64 evaluation
+differs from ORT by 6.254e-5 at the same position. No numerical defect was
+found; projections reproduce the documented order bit-for-bit, per-layer
+relative RMS stays ~1e-6, and the error is a near-constant logit translation
+that softmax removes. Proposed scale-relative replacement is documented but
+**not applied**; the old bound remains visible and failing. This is an owner
+decision before the stable gate.
+
+Resident-trained fix in progress on `fn3/resident-trained` from `6e1d564`.
