@@ -178,11 +178,12 @@ impl Buffer {
         // least `EMPTY_BUFFER_BYTES`); the buffer is destroyed in `Drop` (or on
         // the error paths below) exactly once.
         let raw = unsafe { device.ash().create_buffer(&create_info, None) }.map_err(|code| {
-            Error::vk(
+            Error::vk_allocation(
                 "vkCreateBuffer",
                 code,
+                create_info.size,
                 format!(
-                    "{}: {} bytes logical, {} bytes reserved, usage {:?}",
+                    "{}: {} bytes logical, {} bytes requested, usage {:?}",
                     desc.name, desc.size, allocation_bytes, desc.usage
                 ),
             )

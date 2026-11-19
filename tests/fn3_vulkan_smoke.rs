@@ -575,6 +575,43 @@ fn an_allocation_over_the_device_cap_is_actionable() {
     assert_eq!(backend.memory_stats().live_device_local_bytes, 0);
 }
 
+#[cfg(feature = "vulkan-fault-injection")]
+#[test]
+fn injected_allocation_oom_reports_buffer_memory_requirements() {
+    use fastnn::inference::backend::vulkan::fault::FaultPoint;
+
+    let _lock = gpu_lock();
+    let counts_before = validation_counts();
+    let Some(backend) = open_physical() else {
+        return;
+    };
+    let desc = BufferDesc::device_storage(1025, "oom-byte-reporting");
+    let baseline = backend.alloc_buffer(&desc).expect("baseline buffer");
+    // SAFETY: the live buffer belongs to this device and stays alive through
+    // the read-only requirements query, which takes no host pointer.
+    let requirements = unsafe {
+        backend
+            .vulkan_device()
+            .ash()
+            .get_buffer_memory_requirements(baseline.raw())
+    };
+    drop(baseline);
+
+    backend.faults().arm(FaultPoint::Allocation, 0);
+    let error = backend.alloc_buffer(&desc).expect_err("injected OOM");
+    assert_eq!(backend.faults().fired_at(), Some(FaultPoint::Allocation));
+    match error {
+        Fn3Error::Allocation { bytes, detail } => {
+            assert_eq!(bytes, requirements.size);
+            assert!(detail.contains("ERROR_OUT_OF_DEVICE_MEMORY"), "{detail}");
+            assert!(detail.contains("injected allocation failure"), "{detail}");
+        }
+        other => panic!("expected a sized allocation failure, found {other:?}"),
+    }
+    drop(backend);
+    assert_eq!(validation_counts().0, counts_before.0, "validation errors");
+}
+
 #[test]
 fn an_over_large_storage_binding_is_rejected_before_allocation() {
     let _guard = gpu_lock();

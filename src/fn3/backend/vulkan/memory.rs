@@ -698,9 +698,10 @@ impl MemoryAllocator {
         // allocation pNext is used, so the result is a normal device memory
         // object owned by this allocator.
         let memory = unsafe { device.allocate_memory(&allocate_info, None) }.map_err(|code| {
-            Error::vk(
+            Error::vk_allocation(
                 "vkAllocateMemory",
                 code,
+                allocate_info.allocation_size,
                 format!(
                     "{what}: {size}-byte {} chunk, memory type {type_index}; live={} \
                      reserved={} chunks={}",
@@ -727,9 +728,10 @@ impl MemoryAllocator {
                     // SAFETY: the failed mapping did not take ownership of the
                     // memory object; free it exactly once.
                     unsafe { device.free_memory(memory, None) };
-                    return Err(Error::vk(
+                    return Err(Error::vk_allocation(
                         "vkMapMemory",
                         code,
+                        size,
                         format!(
                             "{what}: mapping the whole {size}-byte {} chunk",
                             class.name()
@@ -841,6 +843,57 @@ mod tests {
         assert_eq!(align_up(1, 16).unwrap(), 16);
         assert_eq!(align_up(16, 16).unwrap(), 16);
         assert!(align_up(u64::MAX, 16).is_err());
+    }
+
+    #[test]
+    fn driver_oom_reports_the_chunk_size_not_the_suballocation_size() {
+        unsafe extern "system" fn oom(
+            _: vk::Device,
+            _: *const vk::MemoryAllocateInfo<'_>,
+            _: *const vk::AllocationCallbacks<'_>,
+            _: *mut vk::DeviceMemory,
+        ) -> vk::Result {
+            vk::Result::ERROR_OUT_OF_DEVICE_MEMORY
+        }
+
+        // SAFETY: the only Vulkan call made by this test uses the exact
+        // vkAllocateMemory ABI; the stub ignores the dummy handle and never
+        // dereferences or writes to any of the arguments.
+        let device = unsafe {
+            ash::Device::load_with(
+                |name| match name.to_bytes() {
+                    b"vkAllocateMemory" => (oom as vk::PFN_vkAllocateMemory) as *const _,
+                    _ => std::ptr::null(),
+                },
+                vk::Device::null(),
+            )
+        };
+        let mut properties = vk::PhysicalDeviceMemoryProperties::default();
+        properties.memory_type_count = 1;
+        properties.memory_types[0].property_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+        const CHUNK_BYTES: u64 = 64 * 1024 * 1024;
+        let mut allocator = MemoryAllocator::new(properties, CHUNK_BYTES, 1, 1, CHUNK_BYTES);
+        let error = allocator
+            .allocate(
+                &device,
+                vk::MemoryRequirements::default()
+                    .size(1024)
+                    .alignment(256)
+                    .memory_type_bits(1),
+                MemoryClass::DeviceLocal,
+                1,
+                "test buffer",
+            )
+            .expect_err("vkAllocateMemory returns OOM");
+
+        match error.to_fn3() {
+            crate::inference::error::Fn3Error::Allocation { bytes, detail } => {
+                assert_eq!(bytes, CHUNK_BYTES);
+                assert!(detail.contains("vkAllocateMemory"), "{detail}");
+            }
+            other => panic!("expected a sized allocation failure, found {other:?}"),
+        }
+        assert_eq!(allocator.stats().chunks, 0);
     }
 
     #[test]

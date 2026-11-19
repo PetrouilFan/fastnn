@@ -207,10 +207,15 @@ pub enum Fn3Error {
         /// Whether the failure was bounds or alignment, with the values.
         detail: String,
     },
-    /// Host allocation failed.
+    /// An allocation request of a known size failed.
     Allocation {
         /// Requested byte count.
         bytes: u64,
+        /// Allocator detail.
+        detail: String,
+    },
+    /// An allocation failed without a known request size.
+    AllocationSizeUnknown {
         /// Allocator detail.
         detail: String,
     },
@@ -441,6 +446,9 @@ impl fmt::Display for Fn3Error {
             ),
             Fn3Error::Allocation { bytes, detail } => {
                 write!(f, "failed to allocate {bytes} bytes: {detail}")
+            }
+            Fn3Error::AllocationSizeUnknown { detail } => {
+                write!(f, "allocation failed (request size unknown): {detail}")
             }
             Fn3Error::InvalidFormat { format, detail } => {
                 write!(f, "invalid {format}: {detail}")

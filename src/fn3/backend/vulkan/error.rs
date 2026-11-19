@@ -31,6 +31,8 @@ pub enum Error {
         call: &'static str,
         /// Raw result code.
         code: vk::Result,
+        /// Requested bytes for a sized buffer, allocation or mapping operation.
+        requested_bytes: Option<u64>,
         /// What was being attempted, with the values that matter.
         detail: String,
     },
@@ -77,6 +79,22 @@ impl Error {
         Error::Vk {
             call,
             code,
+            requested_bytes: None,
+            detail: detail.into(),
+        }
+    }
+
+    /// A Vulkan allocator call failed with a known request size.
+    pub(crate) fn vk_allocation(
+        call: &'static str,
+        code: vk::Result,
+        bytes: u64,
+        detail: impl Into<String>,
+    ) -> Self {
+        Error::Vk {
+            call,
+            code,
+            requested_bytes: Some(bytes),
             detail: detail.into(),
         }
     }
@@ -204,7 +222,7 @@ impl Error {
     /// |---|---|
     /// | loader / device open | `DeviceUnavailable` |
     /// | limit | `CapacityExceeded` |
-    /// | allocation | `Allocation` |
+    /// | out of memory | `Allocation` or `AllocationSizeUnknown` |
     /// | registration | `InvalidShape { context: "vulkan kernel registration" }` |
     /// | other Vulkan call | `InvalidShape { context: "vulkan runtime" }` |
     ///
@@ -256,17 +274,17 @@ impl Error {
                 detail: format!("kernel {kernel} registration failed: {detail}"),
             },
             Error::Vk {
-                code: vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
-                detail,
+                code: vk::Result::ERROR_OUT_OF_DEVICE_MEMORY | vk::Result::ERROR_OUT_OF_HOST_MEMORY,
+                requested_bytes,
                 ..
-            }
-            | Error::Vk {
-                code: vk::Result::ERROR_OUT_OF_HOST_MEMORY,
-                detail,
-                ..
-            } => Fn3Error::Allocation {
-                bytes: 0,
-                detail: detail.clone(),
+            } => match requested_bytes {
+                Some(bytes) => Fn3Error::Allocation {
+                    bytes: *bytes,
+                    detail: self.to_string(),
+                },
+                None => Fn3Error::AllocationSizeUnknown {
+                    detail: self.to_string(),
+                },
             },
             Error::Vk {
                 code: vk::Result::ERROR_DEVICE_LOST,
@@ -287,9 +305,9 @@ impl Error {
                     ),
                 ))
             }
-            Error::Vk { call, code, detail } => Fn3Error::InvalidShape {
+            Error::Vk { .. } => Fn3Error::InvalidShape {
                 context: "vulkan runtime",
-                detail: format!("{call} failed: {code:?} ({}): {detail}", code.as_raw()),
+                detail: self.to_string(),
             },
             Error::Internal(detail) => Fn3Error::InvalidShape {
                 context: "vulkan runtime",
@@ -322,7 +340,9 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Loader(message) => write!(f, "Vulkan loader unavailable: {message}"),
-            Error::Vk { call, code, detail } => {
+            Error::Vk {
+                call, code, detail, ..
+            } => {
                 write!(f, "{call} failed: {code:?} ({}): {detail}", code.as_raw())
             }
             Error::Limit {
@@ -378,6 +398,24 @@ mod tests {
         assert!(text.contains("ERROR_OUT_OF_DEVICE_MEMORY"), "{text}");
         assert!(text.contains("8 GiB"), "{text}");
         assert!(error.hint().is_some());
+    }
+
+    #[test]
+    fn oom_preserves_known_bytes_and_distinguishes_an_unknown_size() {
+        for code in [
+            vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
+            vk::Result::ERROR_OUT_OF_HOST_MEMORY,
+        ] {
+            let known = Error::vk_allocation("vkAllocateMemory", code, 4096, "test chunk").to_fn3();
+            assert!(matches!(known, Fn3Error::Allocation { bytes: 4096, .. }));
+
+            let unknown = Error::vk("vkBindBufferMemory", code, "binding test buffer").to_fn3();
+            assert!(matches!(unknown, Fn3Error::AllocationSizeUnknown { .. }));
+            let text = unknown.to_string();
+            assert!(text.contains("request size unknown"), "{text}");
+            assert!(text.contains("vkBindBufferMemory"), "{text}");
+            assert!(text.contains(&format!("{code:?}")), "{text}");
+        }
     }
 
     #[test]
