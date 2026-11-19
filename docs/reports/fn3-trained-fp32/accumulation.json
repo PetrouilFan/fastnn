@@ -1,0 +1,163 @@
+{
+  "cases": [
+    {
+      "phase": "prefill",
+      "layer": 0,
+      "projection": "attn.c_attn",
+      "input": "/transformer/h.0/ln_1/Add_1_output_0",
+      "weight": "transformer.h.0.attn.c_attn.weight",
+      "shape": [
+        13,
+        2304
+      ],
+      "fn3_vs_sequential_f32": {
+        "elements": 29952,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "rms": 0.0,
+        "bit_identical": 29952
+      },
+      "fn3_vs_float64": {
+        "elements": 29952,
+        "max_abs": 5.593689447636052e-06,
+        "mean_abs": 2.3312231575042364e-07,
+        "rms": 4.111912644147323e-07,
+        "bit_identical": 2220
+      },
+      "ort_vs_float64": {
+        "elements": 29952,
+        "max_abs": 4.866618347421081e-06,
+        "mean_abs": 2.1757513621940631e-07,
+        "rms": 3.7755394678068317e-07,
+        "bit_identical": 2406
+      },
+      "ort_vs_blas_f32": {
+        "elements": 29952,
+        "max_abs": 5.7220458984375e-06,
+        "mean_abs": 2.3344402689740218e-07,
+        "rms": 4.0048299424973253e-07,
+        "bit_identical": 2280
+      },
+      "sequential_f32_vs_float64": {
+        "elements": 29952,
+        "max_abs": 5.593689447636052e-06,
+        "mean_abs": 2.3312231575042364e-07,
+        "rms": 4.111912644147323e-07,
+        "bit_identical": 2220
+      },
+      "blas_f32_vs_float64": {
+        "elements": 29952,
+        "max_abs": 2.1171936408492797e-06,
+        "mean_abs": 1.0228228152703438e-07,
+        "rms": 1.607475172642398e-07,
+        "bit_identical": 4818
+      }
+    },
+    {
+      "phase": "prefill",
+      "layer": 2,
+      "projection": "mlp.c_proj (column 447, the massive-activation outlier)",
+      "input": "/transformer/h.2/mlp/act/Mul_3_output_0",
+      "weight": "transformer.h.2.mlp.c_proj.weight",
+      "shape": [
+        13,
+        768
+      ],
+      "fn3_vs_sequential_f32": {
+        "elements": 9984,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "rms": 0.0,
+        "bit_identical": 9984
+      },
+      "fn3_vs_float64": {
+        "elements": 9984,
+        "max_abs": 0.0051246226985313115,
+        "mean_abs": 9.604174928308621e-07,
+        "rms": 5.1297142695569005e-05,
+        "bit_identical": 231
+      },
+      "ort_vs_float64": {
+        "elements": 9984,
+        "max_abs": 0.0004906116764686885,
+        "mean_abs": 1.0415033312956838e-06,
+        "rms": 5.128287991763206e-06,
+        "bit_identical": 104
+      },
+      "ort_vs_blas_f32": {
+        "elements": 9984,
+        "max_abs": 0.000244140625,
+        "mean_abs": 1.0331950645008758e-06,
+        "rms": 2.8874254027349295e-06,
+        "bit_identical": 84
+      },
+      "sequential_f32_vs_float64": {
+        "elements": 9984,
+        "max_abs": 0.0051246226985313115,
+        "mean_abs": 9.604174928308621e-07,
+        "rms": 5.1297142695569005e-05,
+        "bit_identical": 231
+      },
+      "blas_f32_vs_float64": {
+        "elements": 9984,
+        "max_abs": 0.00024647105146868853,
+        "mean_abs": 1.9496342499050378e-07,
+        "rms": 2.4795341405691302e-06,
+        "bit_identical": 555
+      }
+    },
+    {
+      "phase": "prefill",
+      "layer": 11,
+      "projection": "mlp.c_fc",
+      "input": "/transformer/h.11/ln_2/Add_1_output_0",
+      "weight": "transformer.h.11.mlp.c_fc.weight",
+      "shape": [
+        13,
+        3072
+      ],
+      "fn3_vs_sequential_f32": {
+        "elements": 39936,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "rms": 0.0,
+        "bit_identical": 39936
+      },
+      "fn3_vs_float64": {
+        "elements": 39936,
+        "max_abs": 7.81954444661892e-06,
+        "mean_abs": 3.6525240520260775e-07,
+        "rms": 5.49815690949009e-07,
+        "bit_identical": 3008
+      },
+      "ort_vs_float64": {
+        "elements": 39936,
+        "max_abs": 5.52319687088243e-05,
+        "mean_abs": 1.212344190504965e-06,
+        "rms": 1.8644744855803095e-06,
+        "bit_identical": 1178
+      },
+      "ort_vs_blas_f32": {
+        "elements": 39936,
+        "max_abs": 5.340576171875e-05,
+        "mean_abs": 1.2228658586256922e-06,
+        "rms": 1.8722229491903132e-06,
+        "bit_identical": 1182
+      },
+      "sequential_f32_vs_float64": {
+        "elements": 39936,
+        "max_abs": 7.81954444661892e-06,
+        "mean_abs": 3.6525240520260775e-07,
+        "rms": 5.49815690949009e-07,
+        "bit_identical": 3008
+      },
+      "blas_f32_vs_float64": {
+        "elements": 39936,
+        "max_abs": 2.3217922038298866e-06,
+        "mean_abs": 1.561039184999857e-07,
+        "rms": 2.2345840879830538e-07,
+        "bit_identical": 7153
+      }
+    }
+  ]
+}
