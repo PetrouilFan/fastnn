@@ -556,3 +556,50 @@ corrected in place with the old figures kept and labelled.
 
 Owner actions deliberately not taken here: no merge, tag, release, package
 upload, PR, issue comment, clock pinning or change to `rewrite/fastnn-3`.
+
+## Wave 1: stable workstreams (post-alpha)
+
+Four of six wave-1 branches are integrated on `rewrite/fastnn-3`. The alpha
+review commit `672cec9` remains an ancestor and is still the named review
+candidate; `main` is untouched.
+
+| Merge | Branch | HEAD | Scope |
+|---|---|---|---|
+| `6275485` | `fn3/artifact-exec` | `a74817e` | `.fnn3` executes without the source ONNX in Rust, CLI and Python |
+| `653cdda` | `fn3/73-hardening` | `06a4208` | loader/parser budgets, 38 malformed cases, fuzz campaigns, unsafe audit |
+| `24aee9e` | `fn3/68-quant-format` | `ba7266e` | trained GPT-2 pin, W4A8 evaluation, `fn3-quant-format-v1` |
+| `3d2870c` | `fn3/alpha-followup` | `792d063` | matched release baseline, strict wheel inference, hosted CI fix |
+
+Decisions taken with the evidence:
+
+- **W8A16 is the starter format, not W4A8.** Every pure 4-bit candidate flipped
+  at least one decode top-1 on the trained model. `fn3-quant-format-v1` is
+  signed INT8 weights in groups of 64 along K with binary16 scales and int16
+  zero-points, FP32 activations, and a fused `Σx·(q−z)` group accumulation.
+  It keeps top-1 on all measured steps at 26.6% of FP32 projection storage
+  (3.77x). The departure from the issue's "W4A8 first" default is documented
+  in `docs/reports/fn3-22-quant-format.md`; the evaluation itself was done
+  first and is what rejected W4A8.
+- **The trained FP32 reference exceeds its own suite `mean_abs` bound**
+  (prefill and decode step 2, 1.640e-4 and 2.975e-4 against 5e-5) while every
+  elementwise tolerance and every top-1/top-5 agrees. This is recorded as a
+  systematic-bias finding for #74/#75 rather than hidden by loosening the
+  bound.
+- **Hosted CI on the review candidate exposed a workflow defect, not a code
+  defect**: run 44486950429 failed `vulkan-software` because the hosted image
+  ships lavapipe but not `VK_LAYER_KHRONOS_validation`. Installing the layer
+  fixed it without weakening the 0 errors / 0 warnings requirement. The
+  candidate stays identifiable and red on that lane; the fix is in the
+  follow-up.
+- **Artifact-only is now the normal path.** `--onnx` is optional verification,
+  and the Rust, CLI and Python paths all run from a `.fnn3` alone with the
+  ONNX renamed away, producing identical plan ids and top-5.
+
+#73's **runtime half** (device loss, unavailable features, repeated reset,
+session error recovery, release-build behaviour) is deliberately not in this
+wave and is scheduled after #72, whose storage and submission rewrite changes
+the failure surface it must test.
+
+Still running at the time of this entry: **#71** (CPU profiling) and **#72**
+(Vulkan residency). #72 merges last because it is the largest shared-contract
+change.
