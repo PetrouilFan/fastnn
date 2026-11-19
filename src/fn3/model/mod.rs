@@ -59,8 +59,8 @@ pub mod weights;
 
 pub use kv::{KvCacheConfig, KvCacheLayout, KvCacheState, MAX_KV_LAYERS};
 pub use plan::{
-    BoundValue, Constant, ConstantData, FoldedNode, MaskConstant, MaskRole, Plan, PlanBound,
-    PlanCache, PlanId, SlotPlan, SlotRole,
+    BoundValue, Constant, ConstantData, FoldKind, FoldedNode, MaskConstant, MaskRole, Plan,
+    PlanBound, PlanCache, PlanId, SlotPlan, SlotRole,
 };
 pub use session::{Session, SessionOptions, SessionPhase};
 pub use specialize::{PlanAttr, Planner};
