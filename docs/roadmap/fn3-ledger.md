@@ -4,6 +4,27 @@ Tracking issue: #46. This file is the orchestrator's working ledger for the loca
 3.0 rewrite. It records ownership, worktree/branch/state per issue and the exact
 evidence links. A GitHub issue being open or closed is not execution evidence.
 
+## Stable follow-through
+
+The audited report at `7836a65` is historical. The integration branch contains
+the resident trained FP32 fix (`14adee3`), the approved three-phase FP32 parity
+gate (`0bcf2ef`), the session-only reshape alias regressions (`95a44e9`),
+canonical Rust/Python/CLI names (`9c7a281`), and seven-store `3.0.0` metadata
+alignment (`2022de4`). These are intermediate verification points, not a
+release-ready SHA.
+
+| Work | Release check still owed |
+|---|---|
+| #70 production INT8 | Trained artifact-only FP32 and INT8-weight/FP32-activation runs; CPU and default resident physical Vulkan, staged control; accuracy, coverage, fallback, transfers, submits and peak memory |
+| #74 evaluation | Trained longer-context measurements and evidence-backed platform/device claims |
+| #75 cleanup | Caller-backed legacy classification and retirement, active docs and migration notes |
+| #76 packaging and gates | Actual artifacts, strict source-free clean install, checks and hosted/physical runs on the exact candidate SHA |
+| Vulkan runtime | Persistent transaction is unmerged; discarded-batch and OOM reporting need regression coverage; unknown fence completion can release still-in-use resources and remains deferred, not passed |
+
+One integrator owns `rewrite/fastnn-3`; review correctness, cleanup, and
+performance separately. Keep CUDA and training deferred and leave publication,
+tagging, and merging to `main` to the owner.
+
 ## Frozen references
 
 | Item | Value |
