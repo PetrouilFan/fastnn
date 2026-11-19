@@ -729,7 +729,7 @@ the alpha review commit `672cec9` and the audited wave report `7836a65`.
 
 Gates on the candidate are recorded in `docs/reports/fn3-3.0.0-release.md`
 §9–§11: fmt, **707/779/782** library tests, fourteen `fn3_*` binaries, clippy in
-four feature sets, the Python lane, fifteen physical-Vulkan binaries with
+four feature sets, the Python lane, thirteen physical-Vulkan test binaries with
 validation 0/0 (including quarantine, persistent identity and the three trained
 gates), the artifact-only FP32/INT8 CLI matrix on CPU and the GTX 1080 Ti, and
 the strict packaging lane rebuilt from this tree (wheel
