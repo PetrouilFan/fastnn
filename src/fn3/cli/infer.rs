@@ -385,9 +385,7 @@ fn plan_failure(backend: &OpenedBackend, error: Fn3Error) -> CliError {
             backend.device
         ))
         .with_next(
-            "full-model Vulkan execution is a known alpha blocker: the kernels exist, but the \
-             session's complete decoder plan is not yet validated on Vulkan. Run `--device cpu` \
-             for a working inference path; `fn3-infer diagnose` shows what the GPU did open",
+            "this plan contains an operation the requested backend does not implement for these              operand types; an explicit device never falls back to CPU. `fn3-infer diagnose`              shows what the device opened, and `--device cpu` is a different, explicit choice",
         );
     }
     failure("building the initial decoder plan", error, backend.device)

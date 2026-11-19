@@ -6685,7 +6685,7 @@ impl Backend for CpuBackend {
                                         #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                                         {
                                             microkernels::pool_max_f32_scalar(
-                                                &input,
+                                                input,
                                                 out_f32,
                                                 n,
                                                 c,
@@ -6735,7 +6735,7 @@ impl Backend for CpuBackend {
                                         #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                                         {
                                             microkernels::pool_avg_f32_scalar(
-                                                &input,
+                                                input,
                                                 out_f32,
                                                 n,
                                                 c,

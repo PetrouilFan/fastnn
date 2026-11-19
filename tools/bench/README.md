@@ -15,5 +15,6 @@ Layout:
 - `model.rs` — deterministic synthetic GPT-2 decoder graph for 2.x.
 - `adapters/baseline.rs` — 2.x projection + whole-model suites.
 - `adapters/criterion_wrap.rs` — imports `benches/cpu_baselines.rs` results.
-- `adapters/fn3.rs` — 3.0 runtime seam (fails loudly today).
+- `adapters/fn3.rs` — 3.0 prepared-model adapter behind `--features fn3`.
+- `fn3-model.example.json` — manifest for the pinned tiny-GPT-2 model.
 - `compare.rs` — compatibility checks and delta table.

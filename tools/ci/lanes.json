@@ -17,7 +17,7 @@
       "required": true,
       "hosted": true,
       "proves": [
-        "The crate builds with --no-default-features, formatting is clean, clippy stays within a documented budget, and the library plus fn3 contract and smoke tests pass."
+        "The crate builds with --no-default-features, formatting is clean, package versions agree, `cargo clippy --all-targets -- -D warnings` reports zero findings, and the library plus fn3 contract and smoke tests pass."
       ],
       "does_not_prove": [
         "No Vulkan device is touched: it proves nothing about the Vulkan backend, shaders, or a physical GPU.",
@@ -38,7 +38,7 @@
       "hosted": true,
       "proves": [
         "Every committed .spv validates with spirv-val, and the shader sources recompile byte-identically through spike/vk-bringup/scripts/compile-shaders.sh.",
-        "The crate compiles with --no-default-features --features vulkan."
+        "The crate compiles with --no-default-features --features vulkan, and `cargo clippy --all-targets --no-default-features --features vulkan -- -D warnings` reports zero findings."
       ],
       "does_not_prove": [
         "A build is not execution: no instance or device is created, no shader is dispatched, and no validation layer runs.",
@@ -77,13 +77,16 @@
       "required": true,
       "hosted": true,
       "proves": [
-        "A wheel builds from this tree, installs into a fresh virtual environment, imports from a temporary directory outside the checkout, reports its version, and imports the fastnn.fn3 inference surface with the CPU device listed."
+        "Package versions agree across Cargo.toml, both Cargo lockfiles, pyproject.toml, uv.lock, fastnn/__init__.py and CHANGELOG.md.",
+        "A wheel builds from this tree and installs into a fresh virtual environment with only its declared dependencies.",
+        "The installed package imports from a temporary directory outside the checkout and reports its version.",
+        "When the pinned tiny-GPT-2 ONNX model is present, the installed wheel prepares, loads, prefills and decodes it and reproduces the pinned top-5 token IDs."
       ],
       "does_not_prove": [
-        "It does not prove the Rust test suites pass, that a model file loads, or that Vulkan works from the installed wheel.",
-        "It does not run prepare/prefill/decode; that needs the pinned model and belongs to the end-to-end gate."
+        "It does not prove the Rust test suites pass, GPU support, or manylinux compliance.",
+        "When the pinned model is absent the inference step is recorded not_run with its reason; the lane then proves import and packaging only, never numerical inference."
       ],
-      "reproduce": "tools/ci/packaging-lane.sh"
+      "reproduce": "python3 tools/ci/packaging_lane.py"
     },
     {
       "name": "pinned-model",

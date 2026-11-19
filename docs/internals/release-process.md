@@ -4,8 +4,24 @@ Release workflow, checklist, and version management for fastnn.
 
 ## Current Release Status
 
-The current published release is **v2.5.0**. The **v2.6.0** release is being
-prepared on `dev`; release tags are created only from a reviewed, green `main`.
+The published release is **v2.6.0**. The 3.0 alpha candidate is
+**`3.0.0-alpha.1`** on branch `fn3/67-alpha-release`; it is prepared and
+verified locally, not merged, tagged or published. Release tags are created only
+from a reviewed, green `main`.
+
+### Prereleases
+
+Rust and Python spell the same prerelease differently:
+
+| Ecosystem | File | Value |
+|---|---|---|
+| Cargo / SemVer | `Cargo.toml`, both `Cargo.lock` files | `3.0.0-alpha.1` |
+| Python / PEP 440 | `pyproject.toml`, `uv.lock`, `fastnn/__init__.py` | `3.0.0a1` |
+
+`scripts/ci/check-versions.py` is the only version rule. It normalises both
+spellings, checks every location (including both lockfiles and the changelog)
+and accepts `--tag v3.0.0-alpha.1` for the release workflow. Do not compare the
+three "main" files with string equality: a prerelease is guaranteed to differ.
 
 ### Recent Release History
 
@@ -101,7 +117,7 @@ Release: vX.Y.Z
 Date: YYYY-MM-DD
 
 [ ] Preflight script passes
-[ ] Version updated in all three version sources and all three lockfiles
+[ ] `python3 scripts/ci/check-versions.py` passes (manifests + all lockfiles + facade + changelog)
 [ ] CHANGELOG.md updated
 [ ] No stale artifacts in git status
 [ ] Worktree is clean

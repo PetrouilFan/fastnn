@@ -320,11 +320,11 @@ pub fn execute_diagnose(args: &DiagnoseArgs, out: &mut dyn Write) -> Result<(), 
     }
 
     let _ = writeln!(out, "\ndevice matrix:");
-    let _ = writeln!(out, "  {:<16} {:<12} {}", "request", "state", "evidence");
+    let _ = writeln!(out, "  {:<16} {:<12} evidence", "request", "state");
     let _ = writeln!(
         out,
-        "  {:<16} {:<12} {}",
-        "cpu", "ready", "backend cpu; reference implementation"
+        "  {:<16} {:<12} backend cpu; reference implementation",
+        "cpu", "ready"
     );
 
     if cfg!(feature = "vulkan") {
@@ -442,8 +442,8 @@ fn diagnose_vulkan(request: Option<&DeviceSpec>, out: &mut dyn Write) -> Result<
     if adapters.is_empty() {
         let _ = writeln!(
             out,
-            "  {:<16} {:<12} {}",
-            "vulkan", "unavailable", "the loader reported zero physical devices"
+            "  {:<16} {:<12} the loader reported zero physical devices",
+            "vulkan", "unavailable"
         );
         return Ok(());
     }

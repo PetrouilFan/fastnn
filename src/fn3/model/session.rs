@@ -1188,11 +1188,15 @@ mod tests {
 
         let keys = Tensor::from_f32(Shape::from_dims([1, 2, 1, 2]), &[1.0, 2.0, 3.0, 4.0]).unwrap();
         let wrong = Tensor::from_f32(Shape::from_dims([1, 2, 1, 2]), &[1.0; 4]).unwrap();
-        let error = session.resume(&[keys.clone()], &[wrong], 2).unwrap_err();
+        let cached = [keys.clone()];
+        let error = session.resume(&cached, &[wrong], 2).unwrap_err();
         assert!(matches!(error, Fn3Error::ShapeMismatch { .. }), "{error}");
         assert_eq!(session.cache_len(), 0, "a rejected resume changes nothing");
 
-        session.resume(&[keys.clone()], &[keys], 1).unwrap();
+        let cached = [keys.clone()];
+        session
+            .resume(&cached, std::slice::from_ref(&keys), 1)
+            .unwrap();
         assert_eq!(session.phase(), SessionPhase::Ready);
         assert_eq!(session.cache_len(), 1);
         assert_eq!(session.tokens_consumed(), 1);

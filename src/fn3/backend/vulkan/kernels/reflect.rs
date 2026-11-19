@@ -363,11 +363,9 @@ impl Module {
                         .insert((operands[0], operands[1]), operands[2]);
                 }
             }
-            OP_MEMBER_DECORATE => {
-                if operands.len() >= 4 {
-                    self.member_decorations
-                        .insert((operands[0], operands[1], operands[2]), operands[3]);
-                }
+            OP_MEMBER_DECORATE if operands.len() >= 4 => {
+                self.member_decorations
+                    .insert((operands[0], operands[1], operands[2]), operands[3]);
             }
             _ => {}
         }

@@ -298,12 +298,12 @@ pub(crate) fn out_window_bytes<'a>(
 }
 
 /// One element as a byte slice of `element_bytes`, addressed from `storage`.
-pub(crate) fn element_slice<'a>(
+pub(crate) fn element_slice(
     op: OpId,
-    storage: &'a [u8],
+    storage: &[u8],
     element_index: usize,
     element_bytes: usize,
-) -> Result<&'a [u8], Fn3Error> {
+) -> Result<&[u8], Fn3Error> {
     let from = byte_offset(op, element_index, element_bytes)?;
     let end = from
         .checked_add(element_bytes)
@@ -314,12 +314,12 @@ pub(crate) fn element_slice<'a>(
 }
 
 /// One element as a mutable byte slice of `element_bytes`.
-pub(crate) fn element_slice_mut<'a>(
+pub(crate) fn element_slice_mut(
     op: OpId,
-    storage: &'a mut [u8],
+    storage: &mut [u8],
     element_index: usize,
     element_bytes: usize,
-) -> Result<&'a mut [u8], Fn3Error> {
+) -> Result<&mut [u8], Fn3Error> {
     let from = byte_offset(op, element_index, element_bytes)?;
     let len = storage.len();
     let end = from

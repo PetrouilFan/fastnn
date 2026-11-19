@@ -1841,7 +1841,7 @@ pub struct PersistentPreparedWeights {
 }
 
 impl PersistentPreparedWeights {
-    #[cfg(any(feature = "prepared-plan", test))]
+    #[cfg(any(all(feature = "prepared-plan", feature = "python"), test))]
     pub(crate) fn belongs_to(&self, prepared: &PreparedExecutablePlan) -> bool {
         self.prepared_plan_identity != 0 && self.prepared_plan_identity == prepared.identity
     }

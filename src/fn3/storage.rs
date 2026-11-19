@@ -83,12 +83,12 @@ fn check_element_layout<T>(address: *const u8, byte_len: usize) -> Result<(), St
     if size == 0 {
         return Err("zero-sized element types are not supported".to_string());
     }
-    if byte_len % size != 0 {
+    if !byte_len.is_multiple_of(size) {
         return Err(format!(
             "{byte_len} bytes is not a whole number of {size}-byte elements"
         ));
     }
-    if (address as usize) % align != 0 {
+    if !(address as usize).is_multiple_of(align) {
         return Err(format!(
             "start address {address:p} is not {align}-byte aligned for this element type"
         ));
@@ -400,7 +400,7 @@ impl Storage {
         dtype: DType,
     ) -> Result<StorageWindow, Fn3Error> {
         let hint = dtype.alignment_hint();
-        if offset % hint != 0 {
+        if !offset.is_multiple_of(hint) {
             return Err(Fn3Error::StorageWindow {
                 what: "Storage::window",
                 offset: offset as u64,
@@ -545,7 +545,7 @@ impl StorageWindow {
     /// byte offset is not a multiple of that dtype's element size.
     pub fn element_offset(&self, dtype: DType) -> Result<usize, Fn3Error> {
         let size = dtype.size_bytes();
-        if self.offset % size != 0 {
+        if !self.offset.is_multiple_of(size) {
             return Err(Fn3Error::StorageWindow {
                 what: "StorageWindow::element_offset",
                 offset: self.offset as u64,
@@ -663,7 +663,7 @@ mod tests {
         assert_eq!(window.end(), 16);
         assert_eq!(window.element_offset(DType::F32).unwrap(), 2);
         assert_eq!(window.as_slice::<f32>().unwrap().len(), 2);
-        assert!(!window.as_slice::<f32>().unwrap().as_ptr().is_null());
+        assert_ne!(window.as_slice::<f32>().unwrap().as_ptr() as usize, 0);
         assert_eq!(window.as_bytes().len(), 8);
         assert!(storage.window(32, 0, DType::F32).is_ok());
         assert!(storage.window(0, 32, DType::Bool).is_ok());

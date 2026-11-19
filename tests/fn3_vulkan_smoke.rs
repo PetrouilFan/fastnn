@@ -26,7 +26,7 @@ use fastnn::fn3::backend::vulkan::{
     adapters, available_devices as vulkan_devices, BufferDesc, KernelSpec, VulkanBackend,
     VulkanConfig,
 };
-use fastnn::fn3::backend::{Backend, OpParams, Support};
+use fastnn::fn3::backend::{Backend, OpParams};
 use fastnn::fn3::device::{available_devices, DeviceId, DeviceRequest, PhysicalDeviceId};
 use fastnn::fn3::dtype::DType;
 use fastnn::fn3::error::Fn3Error;
@@ -275,10 +275,14 @@ fn upload_dispatch_download_matches_cpu_add_with_an_odd_tail() {
 
     drop(slots);
     drop(backend);
+    let counts_after = validation_counts();
     assert_eq!(
-        validation_counts(),
-        counts_before,
+        counts_after, counts_before,
         "validation layer reported an error or warning; see the [fn3vk][validation] lines above"
+    );
+    eprintln!(
+        "[fn3vk][validation] errors={} warnings={} (delta 0/0 since the section opened)",
+        counts_after.0, counts_after.1
     );
 }
 
@@ -531,10 +535,14 @@ fn explicit_teardown_leaves_only_the_device_and_pipeline_cache() {
     }
     drop(device);
     drop(instance);
+    let counts_after = validation_counts();
     assert_eq!(
-        validation_counts(),
-        counts_before,
+        counts_after, counts_before,
         "validation reported a leak at device/instance destruction"
+    );
+    eprintln!(
+        "[fn3vk][validation] errors={} warnings={} (delta 0/0 at device/instance destruction)",
+        counts_after.0, counts_after.1
     );
 }
 

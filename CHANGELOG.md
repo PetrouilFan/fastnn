@@ -1,5 +1,54 @@
 # Changelog
 
+## [3.0.0-alpha.1] - 2026-11-19
+
+The first 3.0 alpha. The crate is `3.0.0-alpha.1`; the Python wheel is
+`3.0.0a1` (PEP 440), and both name the same release.
+
+### Added
+- **`fastnn.fn3` inference API**: `prepare` an ONNX decoder into one versioned
+  `.fnn3` artifact, `load` it on an explicit device, then `prefill` and cached
+  `decode` through a `Session` that owns its KV cache. Logits are NumPy arrays.
+- **`fn3-infer` CLI**: `prepare`, `inspect`, `run`, `generate` and `diagnose`,
+  taking token IDs and refusing to approximate a tokenizer.
+- **Prepared-model artifact v1** (`FNN3PREP`): framing, payload CRC-32, strict
+  section reader and an atomic writer that reads its own output back.
+- **Strict ONNX decoder import**: opset 13..=17, named shapes and geometry
+  validation, typed diagnostics, and integer shape arithmetic folded at plan
+  time rather than silently cast to f32.
+- **Bounded execution plans and sessions**: a plan is admitted by the declared
+  window before it runs, plans are cached per `(seq, past)` shape, and two
+  sessions over one prepared model are independent.
+- **Portable CPU reference backend** and an opt-in `vulkan` backend whose
+  kernel families are validated on a physical GTX 1080 Ti.
+- **`fn3-bench`** benchmark harness with a versioned JSON result schema.
+
+### Changed
+- The primary Rust surface is `fastnn::fn3`. The 2.x modules remain as a
+  secondary inference-only surface for the legacy AOT/quantized CPU path.
+- `Cargo.toml` is `3.0.0-alpha.1`; `pyproject.toml` and
+  `fastnn.__version__` are `3.0.0a1`.
+- The release workflow accepts prerelease tags (`v3.0.0-alpha.1`) and validates
+  every version location with `scripts/ci/check-versions.py`, including the
+  Cargo/Python spelling difference.
+
+### Removed
+- **Training, autograd and optimizer paths** are gone. 3.0 is inference-only.
+- **The wgpu backend** is gone, together with its dependencies; the lockfile no
+  longer contains wgpu.
+
+### Known limitations
+- **Vulkan is verified on one device.** Full-decoder prefill and cached decode
+  run on the NVIDIA GTX 1080 Ti (`471b2bda-51e1-6451-e692-ff5d1e146f1e`,
+  driver 580.196.07) with validation 0 errors / 0 warnings; other GPUs, drivers
+  and OSes are not alpha claims. An explicit `--device vulkan` never falls back
+  to CPU.
+- Quantized execution exists only on the retained 2.x CPU path; there is no 3.0
+  quantized format yet.
+- The alpha ships no tokenizer. Token IDs are the only text input.
+- The pinned conformance model is not redistributed (upstream declares no
+  licence); tests skip with a printed reason when it is absent.
+
 ## [2.6.0] - 2026-07-27
 
 ### Added

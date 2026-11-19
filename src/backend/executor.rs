@@ -1292,7 +1292,9 @@ impl<B: Backend> GraphExecutor<B> {
         .map(|(outputs, _profile)| outputs)
     }
 
-    #[cfg(feature = "prepared-plan")]
+    // Reachable only through the Python bindings (`src/python/nn.rs`); the
+    // no-python feature set must not carry an unused copy of the path.
+    #[cfg(all(feature = "prepared-plan", feature = "python"))]
     pub(crate) fn execute_prepared_no_copy_reusing_outputs_with_view(
         &mut self,
         graph: &ComputeGraph,

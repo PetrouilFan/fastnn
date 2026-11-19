@@ -238,8 +238,7 @@ fn a_model_prepared_for_vulkan_is_never_executed_by_the_cpu_backend() {
         "expected DeviceUnavailable, found {error}"
     );
     println!(
-        "no-fallback: a Vulkan-prepared model was refused by cpu ({error_expected}); no tensor \
-         was allocated on {vulkan}",
-        error_expected = "DeviceMismatch"
+        "no-fallback: a Vulkan-prepared model was refused by cpu (DeviceMismatch); no tensor \
+         was allocated on {vulkan}"
     );
 }

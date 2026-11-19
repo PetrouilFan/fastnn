@@ -497,7 +497,7 @@ mod tests {
         let backend = CpuBackend::new();
         assert!(backend.supports(OpId::Softmax).is_full());
         assert!(backend.supports(OpId::LayerNorm).is_full());
-        assert!(backend.supports(OpId::MaskedAttention).is_supported() == false);
+        assert!(!backend.supports(OpId::MaskedAttention).is_supported());
         assert!(backend
             .supports(OpId::MaskedAttention)
             .reason()

@@ -82,6 +82,7 @@ fn print_usage() {
          \x20 --prompt-tokens <n>      prefill tokens (default: quick 8 / normal 128)\n\
          \x20 --layers <n>             decoder layers (default: quick 1 / normal 12)\n\
          \x20 --decode-tokens <n>      decode steps (default: quick 5 / normal 32)\n\
+         \x20 --fn3-manifest <path>   model manifest for --adapter fn3 (see tools/bench/README.md)\n\
          \x20 --max-load <f>           load-average warning threshold (default: half logical cores, min 2.0)\n\
          \x20 --no-gpu-probe           skip `vulkaninfo --summary`\n\
          \x20 --reuse-criterion        import existing target/criterion output\n\
@@ -96,7 +97,12 @@ fn print_usage() {
 }
 
 fn cmd_list_suites() {
-    println!("Suites (adapter baseline is available in this revision, fn3 is not):");
+    let fn3 = if adapters::fn3::is_available() {
+        "available"
+    } else {
+        "not built (rebuild with --features fn3)"
+    };
+    println!("Suites:");
     for suite in [
         Suite::Smoke,
         Suite::Projections,
@@ -107,7 +113,9 @@ fn cmd_list_suites() {
     }
     println!("\nAdapters:");
     println!("  baseline     2.x CPU runtime measured through the existing AOT pipeline");
-    println!("  fn3          3.0 runtime seam; fails with `not built in this revision` today");
+    println!(
+        "  fn3          3.0 pinned prepared model ({fn3}); needs --fn3-manifest and --suite model"
+    );
 }
 
 struct RunOptions {
@@ -127,6 +135,7 @@ struct RunOptions {
     gpu_probe: bool,
     label: Option<String>,
     reuse_criterion: bool,
+    fn3_manifest: Option<PathBuf>,
 }
 
 fn parse_u64(value: &str, flag: &str) -> Result<u64, String> {
@@ -163,6 +172,7 @@ fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
     let mut gpu_probe = true;
     let mut label = None;
     let mut reuse_criterion = false;
+    let mut fn3_manifest = None;
 
     let mut index = 0;
     while index < args.len() {
@@ -228,6 +238,13 @@ fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
             }
             "--no-gpu-probe" => gpu_probe = false,
             "--reuse-criterion" => reuse_criterion = true,
+            "--fn3-manifest" => {
+                fn3_manifest = Some(PathBuf::from(take_value(
+                    args,
+                    &mut index,
+                    "--fn3-manifest",
+                )?))
+            }
             "--label" => label = Some(take_value(args, &mut index, "--label")?),
             "--help" | "-h" => return Err("__help__".to_string()),
             other => return Err(format!("unknown run option `{other}`")),
@@ -259,6 +276,7 @@ fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
         gpu_probe,
         label,
         reuse_criterion,
+        fn3_manifest,
     })
 }
 
@@ -318,6 +336,7 @@ fn cmd_run(args: &[String]) -> i32 {
         warmup: options.warmup,
         manifest_dir: env::manifest_dir().to_path_buf(),
         reuse_criterion: options.reuse_criterion,
+        fn3_manifest: options.fn3_manifest,
     };
 
     let outcome = match adapters::run(options.adapter, options.suite, &config) {

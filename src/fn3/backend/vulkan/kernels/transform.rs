@@ -1019,7 +1019,7 @@ pub fn launch_split(
                 .collect::<Fn3Result<Vec<_>>>()?
         }
         None => {
-            if dimension % count as u64 != 0 {
+            if !dimension.is_multiple_of(count as u64) {
                 return Err(Fn3Error::ShapeMismatch {
                     op: Some(op),
                     expected: format!("axis {axis} of {} divisible by {count}", input.shape()),
@@ -1058,7 +1058,8 @@ pub fn launch_split(
 
     let mut expected_dims = dims.to_vec();
     let mut offset = 0u64;
-    let mut plans: Vec<Option<(Vec<u8>, [u32; 3], usize)>> = Vec::with_capacity(count);
+    type PlannedSplit = Option<(Vec<u8>, [u32; 3], usize)>;
+    let mut plans: Vec<PlannedSplit> = Vec::with_capacity(count);
     for (position, out) in outputs.iter_mut().enumerate() {
         if out.dtype() != dtype {
             return Err(Fn3Error::DTypeMismatch {

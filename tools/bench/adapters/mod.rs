@@ -96,6 +96,8 @@ pub struct BenchConfig {
     pub manifest_dir: PathBuf,
     /// Import existing `target/criterion` data instead of running cargo bench.
     pub reuse_criterion: bool,
+    /// Model manifest for the fn3 adapter (ONNX source + prepared artifact).
+    pub fn3_manifest: Option<PathBuf>,
 }
 
 impl BenchConfig {

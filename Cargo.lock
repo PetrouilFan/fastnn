@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "fastnn"
-version = "2.6.0"
+version = "3.0.0-alpha.1"
 dependencies = [
  "ash",
  "bincode",

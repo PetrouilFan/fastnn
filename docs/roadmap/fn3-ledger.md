@@ -115,6 +115,7 @@ Statuses: ready, in progress, review, integrated, verified, blocked, deferred.
 | #64 | Python API | verified (integrated `db94d6c`) | `fn3/64-python` | `fastnn-wt-64-python` | `c5b69c2` | done; wheel installs clean outside the checkout, 27 Python tests |
 | #65 | Remove training/wgpu | verified (integrated `f772f10`) | `fn3/65-remove-training-wgpu` | `fastnn-wt-65-remove` | `0becaca` | done; 171 files, -27,921 lines, 81 lock entries gone |
 | #66 | CI | verified (integrated `880b979`) | `fn3/66-ci` | `fastnn-wt-66-ci` | `cfea81b` | done; lanes render NOT VERIFIED honestly |
+| #67 | Alpha release | review (local candidate) | `fn3/67-alpha-release` | `fastnn-wt-67-release` | `854afb6` | owner: review, then tag/publish/merge; see `docs/reports/fn3-21-alpha-release.md` |
 
 ### #47 finding that changes the alpha story
 
@@ -198,7 +199,7 @@ Per-dispatch fences and per-tensor allocations do not scale; design note for
 | #64 | Python API | verified (integrated `db94d6c`) | `fn3/64-python` | `fastnn-wt-64-python` | `c5b69c2` | done; wheel installs clean outside the checkout, 27 Python tests |
 | #65 | Remove training/wgpu | verified (integrated `f772f10`) | `fn3/65-remove-training-wgpu` | `fastnn-wt-65-remove` | `0becaca` | done; 171 files, -27,921 lines, 81 lock entries gone |
 | #66 | CI | ready | — | — | — | after #48 |
-| #67 | Alpha release | ready | — | — | — | after #50, #62-#66 |
+| #67 | Alpha release | review (local candidate) | `fn3/67-alpha-release` | `fastnn-wt-67-release` | `854afb6` | owner actions only |
 | #68 | Quant format | deferred (stable) | — | — | — | after #62 |
 | #69 | CPU quant | deferred (stable) | — | — | — | after #68 |
 | #70 | GPU quant | deferred (stable) | — | — | — | after #68 |
@@ -264,6 +265,7 @@ matrix, and clean install verification.
 | `f772f10` | #65 | wgpu + training removed, inference surface promoted (`43396e5`) | lib 673 (37 training tests enumerated), ten fn3 binaries unchanged, 10/10 e2e on the GTX 1080 Ti, 0/0 validation, no wgpu in `cargo tree` |
 | `1cebabd` | #62 | end-to-end on CPU and the physical GPU merged (`44081e0`) | 10 e2e tests, 719/719 proven executions, 0 readbacks, validation 0/0 |
 | `0becaca` | #52/#57/#62 fix | device errors name the request in any configuration | lib 710 default / 753 vulkan / 690 no-default |
+| `d0c7b00` | #67 | alpha candidate: versions, wheel smoke, clippy zero, fn3 bench adapter | lib 673, 10 fn3 binaries, 378 pytest, wheel top-5 exact, clippy clean in six configurations, GPU e2e 10/10 with 0/0 validation; see `docs/reports/fn3-21-alpha-release.md` |
 | `db94d6c` | #64 | Python facade `fastnn.fn3` merged (`1e32752`) | 27 Python tests, 710 lib, 43 contracts, 36 storage, 5 ci-smoke; wheel installed in a clean venv outside the checkout reproduces the CLI's top-5 exactly |
 | `117e51a` | #61 | Vulkan norm/softmax/reduce/fused-attention merged (`c69a890`) | 19 attention tests, 14/14 smoke, 41 platform, 43 contracts; all-masked row exactly [0.25;4] |
 | `82e0003` | #46 | ledger: #61 state, fused-id decision, gate rows | n/a |
@@ -343,15 +345,16 @@ observed exit status, not a plan.
 | `cargo test --features vulkan --test fn3_vulkan_attention` | 19 |
 | `cargo test --bin fn3-bench` (release feature set) | 24 |
 
-Known non-blocking debt, both owned by #67:
+Known debt, cleared by #67:
 
-- `cargo clippy --all-targets -- -D warnings` still fails. `src/fn3` has
-  style-only lints carried in from #52/#53 — elidable lifetimes in
-  `backend/cpu/kernels/mod.rs`, `manual_implementation_of_is_multiple_of` in
-  `storage.rs` — plus intentional constant-folded shape arithmetic in
-  `tests/fn3_cpu_reference.rs`. None is a correctness or API finding.
-- `scripts/ci/check-agents-freshness.py` fails at base because `src/fn3/AGENTS.md`
-  contains a literal `"3.0"`.
+- `cargo clippy --all-targets -- -D warnings` now passes in every shipped
+  feature configuration (default, `--no-default-features`, `vulkan`, `cli`, and
+  `fn3`). The budget in `tools/ci/cpu-lane.sh` is **0** and warnings are denied,
+  so a new finding fails the lane. Suppressions were kept to two deliberate
+  test-helper cases (an 8-argument reference/table helper in the Vulkan tests);
+  everything else was fixed.
+- `scripts/ci/check-agents-freshness.py` passes on this tree. The #67 version
+  work added no version literal to any AGENTS.md; the checker is in the CPU lane.
 
 ## Alpha gate status
 
@@ -366,8 +369,8 @@ Known non-blocking debt, both owned by #67:
 | GPU pointwise/transform/embedding | proven (#59): Add/Sub/Mul/Neg/Relu/Cast/comparisons/layout byte-exact, Gelu 4.77e-7, embedding exact |
 | Explicit device requests never run model computation on CPU | proven (#48/#57, both feature configurations) |
 | Python facade | **proven** (#64): `fastnn.fn3` prepare/load/session/prefill/decode. From a wheel installed in a fresh venv outside the checkout, a 10-token prefill gives the same top-5 as the Rust CLI (46737, 28597, 16571, 7868, 13); GIL released on every long call. |
-| CLI + quickstart | **proven** (#63): `fn3-infer prepare/inspect/run/generate/diagnose`, 27,879,928-byte artifact with verified CRC, 10-token prefill to top-5 [46737, 28597, 16571, 7868, 13]; token IDs only, no approximate tokeniser. `--device vulkan` opens the GPU then refuses at plan instruction 1 instead of falling back to CPU. |
-| Package versions 3.0.0-alpha.1 / 3.0.0a1 | open — #67 |
+| CLI + quickstart | **proven** (#63/#67): `fn3-infer prepare/inspect/run/generate/diagnose`, 27,879,928-byte artifact with verified CRC, 10-token prefill to top-5 [46737, 28597, 16571, 7868, 13]; token IDs only, no approximate tokeniser. `--device vulkan` runs prefill and three cached decode steps on the GTX 1080 Ti (top-3 [46737, 28597, 16571]); an explicit request never falls back to CPU. |
+| Package versions 3.0.0-alpha.1 / 3.0.0a1 | **proven** (#67): both spellings agree in the manifests, both Cargo lockfiles, `uv.lock`, `fastnn/__init__.py` and the changelog; `scripts/ci/check-versions.py` enforces it and runs in the CPU and packaging lanes and the release workflow. The wheel is `fastnn-3.0.0a1-cp311-abi3-manylinux_2_39_x86_64.whl`; a clean venv with `numpy 2.5.5` only reproduces top-5 [46737, 28597, 16571, 7868, 13]. |
 | CI lanes | machinery merged (#66); vulkan lanes now genuinely execute |
 
 ## #54 findings that bind #56, #58 and #62
@@ -440,7 +443,10 @@ fact to be copied into code or a report.
 ## Remote state (owner authorised writes)
 
 `rewrite/fastnn-3` is pushed to `origin` and tracks it; `origin/rewrite/fastnn-3`
-is `0becaca1c6c4044ac60ea266bcb0a5b94f9b4261`. No PR to `main` was created and
+is `0becaca1c6c4044ac60ea266bcb0a5b94f9b4261`. The #67 candidate
+(`fn3/67-alpha-release`, `d0c7b00`) is **local only**: this issue performed no
+push, tag, package upload, pull request or merge. The owner actions are listed
+in `docs/reports/fn3-21-alpha-release.md`. No PR to `main` was created and
 `main` is untouched, so the original prohibition on merging into `main` still
 holds. **Nineteen issues are closed as completed** (#47-#64 except none, plus
 #66) each with an evidence comment naming the branch HEAD and the measured

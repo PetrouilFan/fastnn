@@ -84,7 +84,7 @@ nvtx = [
 
 [[package]]
 name = "fastnn"
-version = "2.6.0"
+version = "3.0.0a1"
 source = { editable = "." }
 dependencies = [
     { name = "numpy" },

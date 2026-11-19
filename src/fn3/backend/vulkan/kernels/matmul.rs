@@ -670,13 +670,11 @@ fn operand_window_bytes<'a>(
         detail: format!("{name}: element {start} plus window {window}"),
     })?;
     let storage = view.storage_slice::<f32>()?;
-    let slice = storage
-        .get(start..end)
-        .ok_or_else(|| Fn3Error::OutOfBounds {
-            what: "vulkan matmul operand window (storage elements)",
-            index: end as u64,
-            len: storage.len() as u64,
-        })?;
+    let slice = storage.get(start..end).ok_or(Fn3Error::OutOfBounds {
+        what: "vulkan matmul operand window (storage elements)",
+        index: end as u64,
+        len: storage.len() as u64,
+    })?;
     Ok(bytemuck::cast_slice(slice))
 }
 

@@ -3,8 +3,11 @@
 
 The wheel is installed into a fresh virtual environment and imported from a
 temporary directory outside the checkout, so an editable install cannot pass by
-accident. This proves packaging works; it says nothing about the Rust test
-suites or GPU support.
+accident. When the pinned tiny-GPT-2 ONNX model is present, the smoke also runs
+a real `fastnn.fn3` prepare/load/prefill/decode and asserts the pinned top-5
+tokens; without the model the step is recorded as `not_run` with its reason,
+never as a pass. This proves packaging works; it says nothing about the Rust
+test suites or GPU support.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -66,8 +70,49 @@ def _record(job: str, status: str, detail: str, checks: list[dict], reproduce: s
 
 
 def _version_from_cargo() -> str:
-    match = re.search(r'^version\s*=\s*"([^"]+)"', (ROOT / "Cargo.toml").read_text(encoding="utf-8"), re.MULTILINE)
+    match = re.search(
+        r'^version\s*=\s*"([^"]+)"',
+        (ROOT / "Cargo.toml").read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
     return match.group(1) if match else ""
+
+
+def _python_version() -> str:
+    """The PEP 440 spelling of the Cargo version (the wheel's version)."""
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "ci" / "check-versions.py"), "--print-normalised"],
+        cwd=str(ROOT),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _declared_dependencies() -> set[str]:
+    """Requirement names from `[project].dependencies`, PEP 503-normalised."""
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    names = set()
+    for requirement in project.get("dependencies", []):
+        name = re.split(r"[<>=!~ ;\[]", requirement, maxsplit=1)[0]
+        names.add(name.lower().replace("_", "-"))
+    return names
+
+
+def _installed_distributions(python: Path) -> set[str]:
+    result = subprocess.run(
+        [str(python), "-m", "pip", "list", "--format=json"],
+        cwd=str(ROOT),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return set()
+    distributions = {item["name"].lower().replace("_", "-") for item in json.loads(result.stdout)}
+    # `venv` installs these to bootstrap pip; they are not wheel dependencies.
+    return distributions - {"pip", "setuptools", "wheel"}
 
 
 def _venv_python(venv: Path) -> Path:
@@ -85,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
     dist = out / "dist"
     venv = out / "venv"
     started = time.monotonic()
@@ -92,12 +138,28 @@ def main(argv: list[str] | None = None) -> int:
     reproduce = "python3 tools/ci/packaging_lane.py"
 
     print("LANE packaging — wheel build/install smoke")
-    print("  PROVES: a wheel builds, installs into a clean venv outside the checkout, and the fastnn.fn3 surface imports.")
-    print("  DOES NOT PROVE: Rust tests, model loading, GPU support, or manylinux compliance.")
+    print("  PROVES: versions agree everywhere, a wheel builds, installs into a clean venv")
+    print("          outside the checkout with only its declared dependencies, the fastnn.fn3")
+    print("          surface imports, and (when the pinned model is present) a real")
+    print("          prepare/load/prefill/decode reproduces the pinned top-5 tokens.")
+    print("  DOES NOT PROVE: Rust tests, GPU support, or manylinux compliance.")
 
     version = _version_from_cargo()
     if not version:
         return _fail(args.job, "could not read the crate version from Cargo.toml", reproduce, checks, args.status_dir)
+    wheel_version = _python_version()
+    if not wheel_version:
+        return _fail(
+            args.job,
+            "could not derive the PEP 440 wheel version from Cargo.toml",
+            reproduce,
+            checks,
+            args.status_dir,
+        )
+    result = _run([sys.executable, str(ROOT / "scripts" / "ci" / "check-versions.py")], cwd=ROOT)
+    if result.returncode != 0:
+        return _fail(args.job, "version drift between manifests, lockfiles and the facade", reproduce, checks, args.status_dir)
+    checks.append({"name": "versions_agree", "status": "passed"})
 
     if not args.skip_build:
         maturin = os.environ.get("MATURIN") or shutil.which("maturin")
@@ -126,10 +188,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     wheel = wheels[0]
     print(f"wheel: {wheel}")
-    if not wheel.name.startswith(f"fastnn-{version}-"):
+    # maturin writes the PEP 440 spelling (3.0.0a1), not the SemVer spelling
+    # (3.0.0-alpha.1), so the filename is checked against the normalised value.
+    if not wheel.name.startswith(f"fastnn-{wheel_version}-"):
         return _fail(
             args.job,
-            f"wheel {wheel.name} does not match crate version {version}",
+            f"wheel {wheel.name} does not match {wheel_version} (Cargo.toml {version})",
             reproduce,
             checks,
             args.status_dir,
@@ -156,15 +220,41 @@ def main(argv: list[str] | None = None) -> int:
         return _fail(args.job, "installing the wheel into the clean venv failed", reproduce, checks, args.status_dir)
     checks.append({"name": "wheel_install", "status": "passed"})
 
+    declared = _declared_dependencies()
+    installed = _installed_distributions(python)
+    unexpected = installed - declared - {"fastnn"}
+    if unexpected:
+        return _fail(
+            args.job,
+            f"the clean venv contains undeclared distributions: {sorted(unexpected)} "
+            f"(declared: {sorted(declared)})",
+            reproduce,
+            checks,
+            args.status_dir,
+        )
+    checks.append(
+        {
+            "name": "declared_dependencies_only",
+            "status": "passed",
+            "distributions": sorted(installed),
+        }
+    )
+
+    report_path = out / "wheel-inference.json"
+    report_path.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory() as temp:
         result = _run(
             [
                 str(python),
                 str(ROOT / "tools" / "ci" / "wheel_smoke.py"),
                 "--expect-version",
-                version,
+                wheel_version,
                 "--source-root",
                 str(ROOT),
+                "--model",
+                os.environ.get("FASTNN_FN3_ONNX_MODEL", "/tmp/opencode/parity-fresh/models/tiny-gpt2/onnx/model.onnx"),
+                "--report",
+                str(report_path),
             ],
             cwd=Path(temp),
         )
@@ -178,8 +268,47 @@ def main(argv: list[str] | None = None) -> int:
         )
     checks.append({"name": "wheel_smoke", "status": "passed"})
 
+    inference = {}
+    if report_path.is_file():
+        try:
+            inference = json.loads(report_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            inference = {}
+    if inference.get("status") == "passed":
+        checks.append(
+            {
+                "name": "wheel_inference",
+                "status": "passed",
+                "top5": inference.get("top5"),
+                "model_sha256": inference.get("model_sha256"),
+            }
+        )
+    elif inference.get("status") == "failed":
+        return _fail(
+            args.job,
+            f"the installed wheel's real inference failed: {inference.get('reason', 'no reason recorded')}",
+            reproduce,
+            checks,
+            args.status_dir,
+        )
+    else:
+        reason = inference.get(
+            "reason",
+            "the pinned tiny-GPT-2 ONNX model was absent, so prepare/load/prefill/decode did not run",
+        )
+        print(f"\nWHEEL INFERENCE: NOT RUN — {reason}")
+        checks.append({"name": "wheel_inference", "status": "not_run", "reason": reason})
+
     elapsed = round(time.monotonic() - started, 3)
-    detail = f"wheel {wheel.name} built, installed in a clean venv and smoke-tested from outside the source tree ({elapsed}s)"
+    inference_detail = (
+        f"real inference top-5 {inference.get('top5')}"
+        if inference.get("status") == "passed"
+        else "pinned-model inference NOT RUN (model absent)"
+    )
+    detail = (
+        f"wheel {wheel.name} built, installed in a clean venv with only its declared "
+        f"dependencies and smoke-tested from outside the source tree; {inference_detail} ({elapsed}s)"
+    )
     print(f"\nPACKAGING PASSED: {detail}")
     _record(args.job, "passed", detail, checks, reproduce, args.status_dir)
     return 0
