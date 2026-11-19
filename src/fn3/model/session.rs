@@ -65,9 +65,10 @@
 //! it ([`Plan::execute`]). It never owns or borrows a second backend, so a
 //! session over a Vulkan [`PreparedModel`] cannot dispatch a CPU kernel: the
 //! constructor rejects a backend whose device differs from the model's
-//! ([`Fn3Error::DeviceMismatch`]). On a Vulkan device the cache and every value
-//! slot are host-staged (see [`super::kv`]); the backend records
-//! `host_staged = true` for each op and proves the arithmetic ran on the device.
+//! ([`Fn3Error::DeviceMismatch`]). Value slots and the KV cache are
+//! device-resident when the backend can allocate there (FN3-26); a caller can
+//! force the alpha's host staging with [`SessionOptions::staged`]. Either way
+//! the backend proves the arithmetic ran on the device.
 //!
 //! [`PlanId`]: super::PlanId
 
@@ -94,6 +95,40 @@ use super::{ModelWeights, PreparedModel};
 /// length plus one per decode position. Past that, [`super::PlanCache`] evicts
 /// the smallest key deterministically, and a rebuild is correct but not free.
 const MAX_SESSION_PLAN_CACHE: usize = 64;
+
+/// How a session allocates its mutable state.
+///
+/// The default is the device-resident path on a backend that has one (FN3-26),
+/// and the alpha's host-staged path everywhere else. `staged` forces host
+/// staging, which is the comparison arm for #72 and the debugging switch; the
+/// `FN3_VK_STAGED` environment variable does the same for a process.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionOptions {
+    /// Keep value slots and the KV cache in host memory.
+    pub staged: bool,
+}
+
+impl SessionOptions {
+    /// Host staging, the alpha behaviour.
+    pub fn staged() -> SessionOptions {
+        SessionOptions { staged: true }
+    }
+}
+
+/// Whether this session should keep its value slots and KV cache on the device.
+///
+/// `FN3_VK_STAGED=1` (or `true`/`yes`/`on`) forces the alpha's host-staged path
+/// even on a resident-capable backend: that is the comparison arm for #72 and
+/// the debugging switch this issue promises to keep. Otherwise the backend's
+/// own answer decides, so the CPU reference is unaffected.
+fn resident_enabled(backend: &dyn Backend, options: SessionOptions) -> bool {
+    let staged = options.staged
+        || matches!(
+            std::env::var("FN3_VK_STAGED").as_deref(),
+            Ok("1") | Ok("true") | Ok("yes") | Ok("on")
+        );
+    !staged && backend.supports_resident_storage()
+}
 
 /// Session lifecycle phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +204,9 @@ struct StepRuntime<'model> {
     allocated_bytes: u64,
     last_plan: Option<PlanId>,
     last_dims: Option<LiveDims>,
+    /// Allocate device-resident slots and KV (FN3-26). `false` under
+    /// `FN3_VK_STAGED=1` or on a backend with no device allocator.
+    resident: bool,
 }
 
 impl StepRuntime<'_> {
@@ -234,7 +272,7 @@ impl StepRuntime<'_> {
                             Some(tensor)
                         }
                         None => {
-                            let tensor = allocate(slot.shape().clone(), slot.dtype(), device)?;
+                            let tensor = self.allocate_slot(slot, device)?;
                             self.allocations += 1;
                             self.allocated_bytes += tensor.storage().len() as u64;
                             Some(tensor)
@@ -245,6 +283,22 @@ impl StepRuntime<'_> {
             slots.push(tensor);
         }
         Ok(slots)
+    }
+
+    /// Allocate one instruction-output slot.
+    ///
+    /// A resident session asks the backend for a device tensor (step 2), a
+    /// staged one keeps the alpha's host buffer. A zero-element slot always
+    /// takes the host path: it has no bytes to keep on the device, and the
+    /// resident allocator is byte-granular.
+    fn allocate_slot(&self, slot: &SlotPlan, device: DeviceId) -> Result<Tensor, Fn3Error> {
+        if self.resident {
+            let required = slot.shape().byte_len(slot.dtype())?;
+            if required > 0 {
+                return self.backend.allocate_resident(slot.shape(), slot.dtype());
+            }
+        }
+        allocate(slot.shape().clone(), slot.dtype(), device)
     }
 
     /// Keep the instruction outputs of a finished step for the next one.
@@ -337,6 +391,20 @@ impl<'model> Session<'model> {
         import: &'model ModelImport,
         backend: &'model dyn Backend,
     ) -> Result<Session<'model>, Fn3Error> {
+        Session::with_runtime_options(model, import, backend, SessionOptions::default())
+    }
+
+    /// [`Session::with_runtime`] with explicit allocation options.
+    ///
+    /// `SessionOptions::staged()` reproduces the alpha's host-staged session
+    /// exactly; the default keeps value slots and the KV cache on the device
+    /// when the backend can allocate there.
+    pub fn with_runtime_options(
+        model: &'model PreparedModel,
+        import: &'model ModelImport,
+        backend: &'model dyn Backend,
+        options: SessionOptions,
+    ) -> Result<Session<'model>, Fn3Error> {
         if backend.device() != model.device() {
             return Err(Fn3Error::DeviceMismatch {
                 op: None,
@@ -408,7 +476,21 @@ impl<'model> Session<'model> {
                 ),
             });
         }
-        let caches = Session::allocate_caches(model)?;
+        // Keep every immutable weight on the device once per backend (FN3-26).
+        // The backend decides what that means: the CPU backend has no-op
+        // persistence, the Vulkan backend uploads each weight exactly once and
+        // resolves later binds by handle. The host tensors are untouched, so the
+        // CPU/fallback path keeps its bytes.
+        let weights = model.weights();
+        let mut persistent: Vec<&Tensor> = Vec::with_capacity(weights.len());
+        for index in 0..weights.len() {
+            if let Some(tensor) = weights.get(index) {
+                persistent.push(tensor);
+            }
+        }
+        backend.prepare_persistent(&persistent)?;
+        let resident = resident_enabled(backend, options);
+        let caches = Session::allocate_caches_with(model, Some((backend, resident)))?;
         let capacity =
             (config.capacity_tokens.saturating_mul(2) as usize + 1).min(MAX_SESSION_PLAN_CACHE);
         let plans = super::PlanCache::new(model.envelope(), backend.name(), capacity)?;
@@ -425,6 +507,7 @@ impl<'model> Session<'model> {
                 allocated_bytes: 0,
                 last_plan: None,
                 last_dims: None,
+                resident,
             }),
             geometry: Some(SessionGeometry {
                 batch: config.batch,
@@ -442,12 +525,26 @@ impl<'model> Session<'model> {
     }
 
     fn allocate_caches(model: &PreparedModel) -> Result<Vec<KvCacheState>, Fn3Error> {
+        Session::allocate_caches_with(model, None)
+    }
+
+    /// Allocate one cache per layer, on the device when `backend` enables it.
+    fn allocate_caches_with(
+        model: &PreparedModel,
+        backend: Option<(&dyn Backend, bool)>,
+    ) -> Result<Vec<KvCacheState>, Fn3Error> {
         let mut caches = Vec::new();
         if let Some(config) = model.kv_config() {
             config.validate(&model.envelope())?;
             caches.reserve(config.layers as usize);
             for _ in 0..config.layers {
-                caches.push(KvCacheState::new(*config, model.device())?);
+                let cache = match backend {
+                    Some((backend, true)) => {
+                        KvCacheState::new_resident(*config, model.device(), backend)?
+                    }
+                    _ => KvCacheState::new(*config, model.device())?,
+                };
+                caches.push(cache);
             }
         }
         Ok(caches)
@@ -834,9 +931,18 @@ impl<'model> Session<'model> {
         // Bind the decoder interface. The plan's own input table is the
         // authority on shapes and dtypes: a disagreement is a named error, never
         // a silent reshape.
-        bind_ids(&plan, &mut slots, "input_ids", tokens, self.model.device())?;
+        let backend = runtime.backend;
+        bind_ids(
+            backend,
+            &plan,
+            &mut slots,
+            "input_ids",
+            tokens,
+            self.model.device(),
+        )?;
         let positions: Vec<i64> = (past..last_position).map(|value| value as i64).collect();
         bind_i64(
+            backend,
             &plan,
             &mut slots,
             "position_ids",
@@ -845,24 +951,44 @@ impl<'model> Session<'model> {
         )?;
         let mask = vec![1i64; last_position as usize];
         bind_i64(
+            backend,
             &plan,
             &mut slots,
             "attention_mask",
             &mask,
             self.model.device(),
         )?;
-        for (layer, cache) in caches.iter().enumerate() {
+        for (layer, cache) in caches.iter_mut().enumerate() {
             let names = &runtime.kv[layer];
-            bind_tensor(&plan, &mut slots, &names.past_key, cache.live_keys()?)?;
-            bind_tensor(&plan, &mut slots, &names.past_value, cache.live_values()?)?;
+            if runtime.resident {
+                let (keys, values) = cache.live_with(backend)?;
+                bind_tensor(&plan, &mut slots, &names.past_key, keys)?;
+                bind_tensor(&plan, &mut slots, &names.past_value, values)?;
+            } else {
+                bind_tensor(&plan, &mut slots, &names.past_key, cache.live_keys()?)?;
+                bind_tensor(&plan, &mut slots, &names.past_value, cache.live_values()?)?;
+            }
         }
 
-        // The only execution path: the session's backend.
-        plan.execute(runtime.backend, &mut slots)?;
+        // The only execution path: the session's backend. `begin_step` /
+        // `end_step` give a batching backend one submission scope per step; its
+        // default bodies are no-ops, so the CPU path is unchanged. The scope is
+        // always closed, including on failure, so a failed step cannot leak a
+        // recording context into the next one.
+        let label = if past == 0 { "prefill" } else { "decode" };
+        // A resident step is one submission: every operand of every op is a
+        // device buffer, so nothing needs to reach the host before the batch
+        // completes. A staged step submits per op (it reads each output back),
+        // so it does not batch.
+        backend.begin_step(label, runtime.resident)?;
+        let executed = plan.execute(backend, &mut slots);
+        let closed = backend.end_step();
+        executed?;
+        closed?;
 
         // Extract the logits before touching the caches, so a malformed output
         // is still an untouched session.
-        let logits = last_position_logits(&plan, &slots, seq, geometry.batch)?;
+        let logits = last_position_logits(backend, &plan, &slots, seq, geometry.batch)?;
 
         // Validate every layer's `present` before appending to any layer.
         let mut presents: Vec<(TensorView<'_>, TensorView<'_>)> = Vec::with_capacity(caches.len());
@@ -878,7 +1004,7 @@ impl<'model> Session<'model> {
         // cannot fail; `?` is kept so a refactor that breaks that invariant is
         // reported rather than ignored.
         for (cache, (keys, values)) in caches.iter_mut().zip(presents.iter()) {
-            cache.append(keys, values)?;
+            cache.append_with(Some(backend), keys, values)?;
         }
         drop(presents);
 
@@ -933,6 +1059,7 @@ fn output<'a>(plan: &'a Plan, name: &str) -> Result<&'a super::BoundValue, Fn3Er
 
 /// Bind a token-id input (`[batch, seq]` `i64`).
 fn bind_ids(
+    backend: &dyn Backend,
     plan: &Plan,
     slots: &mut [Option<Tensor>],
     name: &str,
@@ -940,11 +1067,18 @@ fn bind_ids(
     device: DeviceId,
 ) -> Result<(), Fn3Error> {
     let values: Vec<i64> = tokens.iter().map(|&token| i64::from(token)).collect();
-    bind_i64(plan, slots, name, &values, device)
+    bind_i64(backend, plan, slots, name, &values, device)
 }
 
-/// Allocate a host-staged `i64` input on `device` and bind it.
+/// Allocate a host-backed `i64` input on `device` and bind it.
+///
+/// Graph inputs stay host-backed even in a resident session: they are computed
+/// on the host every step, they are the step-boundary upload the contract
+/// allows, and a kernel that *validates* index values (gather) needs them on
+/// the host. Their bytes are tiny (tens of bytes per step) and the kernel
+/// uploads them once through the normal operand path.
 fn bind_i64(
+    backend: &dyn Backend,
     plan: &Plan,
     slots: &mut [Option<Tensor>],
     name: &str,
@@ -970,6 +1104,7 @@ fn bind_i64(
             actual: format!("{} values", values.len()),
         });
     }
+    let _ = backend;
     let mut tensor = allocate(input.shape().clone(), DType::I64, device)?;
     {
         let mut view = tensor.as_mut_view()?;
@@ -1009,6 +1144,7 @@ fn bind_tensor(
 /// Copy the logits of the last position of every batch row into `[batch, 1,
 /// vocab]`.
 fn last_position_logits(
+    backend: &dyn Backend,
     plan: &Plan,
     slots: &[Option<Tensor>],
     seq: u64,
@@ -1040,12 +1176,29 @@ fn last_position_logits(
             ),
         });
     }
-    let source = tensor.as_f32_slice()?;
     let mut last = allocate(
         Shape::from_dims([batch, 1, vocab as u64]),
         DType::F32,
         tensor.device(),
     )?;
+    if tensor.is_device_resident() {
+        // The one readback a step performs: the last position's row for each
+        // batch entry, downloaded explicitly. Nothing else leaves the device.
+        let vocab_bytes = vocab * 4;
+        let base = tensor.meta().byte_offset()?;
+        let mut row = vec![0u8; vocab_bytes];
+        let mut view = last.as_mut_view()?;
+        let destination = view.storage_slice_mut::<f32>()?;
+        for batch_row in 0..batch as usize {
+            let offset = base + (batch_row * seq as usize + seq as usize - 1) * vocab_bytes;
+            tensor.storage().download_range(offset, &mut row)?;
+            let values: &[f32] = bytemuck::cast_slice(&row);
+            destination[batch_row * vocab..(batch_row + 1) * vocab].copy_from_slice(values);
+        }
+        backend.note_readback(batch * vocab_bytes as u64);
+        return Ok(last);
+    }
+    let source = tensor.as_f32_slice()?;
     {
         let mut view = last.as_mut_view()?;
         let destination = view.storage_slice_mut::<f32>()?;

@@ -32,10 +32,11 @@
 
 use crate::fn3::backend::check_arity;
 use crate::fn3::backend::vulkan::context::BindingRole;
+use crate::fn3::backend::vulkan::kernels::io;
 use crate::fn3::backend::vulkan::kernels::pointwise::{
-    element_count, output_window_bytes, require_contiguous_output, require_contiguous_view,
-    require_device, require_only_axes, require_output_shape, require_shader_rank, single_axis,
-    view_window_bytes, workgroups, Job, Push, WORKGROUP,
+    element_count, require_contiguous_output, require_contiguous_view, require_device,
+    require_only_axes, require_output_shape, require_shader_rank, single_axis, workgroups, Job,
+    Push, WORKGROUP,
 };
 use crate::fn3::backend::vulkan::kernels::transform::{checked_product, read_i64_values};
 use crate::fn3::backend::vulkan::kernels::{grid, BindingSpec, KernelSet, KernelSpec, OpKernel};
@@ -46,6 +47,9 @@ use crate::fn3::error::{Fn3Error, Fn3Result};
 use crate::fn3::ops::OpId;
 use crate::fn3::shape::Shape;
 use crate::fn3::tensor::{TensorMut, TensorView};
+
+/// Owning issue named in this family's rejection messages.
+const KERNEL_OWNER: &str = "FN3-13 (#59)";
 
 /// Table lookup over any axis.
 pub const GATHER: KernelSpec = KernelSpec {
@@ -193,11 +197,34 @@ pub fn launch_gather(
         elements
     };
     let workgroups = workgroups(&GATHER, threads, expected.dims())?;
-    let mut bytes = vec![0u8; out.meta().byte_len()?];
+    let table_operand = io::input(
+        KERNEL_OWNER,
+        backend,
+        op,
+        "fn3.gather.table",
+        data,
+        data.dtype(),
+    )?;
+    let index_operand = io::input(
+        KERNEL_OWNER,
+        backend,
+        op,
+        "fn3.gather.indices",
+        indices,
+        indices.dtype(),
+    )?;
+    let out_operand = io::output(
+        KERNEL_OWNER,
+        backend,
+        op,
+        "fn3.gather.out",
+        out,
+        out.dtype(),
+    )?;
     let mut job = Job::new(backend, op, &GATHER)?;
-    let table = job.input(view_window_bytes(data)?, "fn3.gather.table")?;
-    let index_buffer = job.input(view_window_bytes(indices)?, "fn3.gather.indices")?;
-    let destination = job.output(out.meta().byte_len()? as u64, "fn3.gather.out")?;
+    let table = job.input_operand("fn3.gather.table", &table_operand)?;
+    let index_buffer = job.input_operand("fn3.gather.indices", &index_operand)?;
+    let destination = job.output_operand("fn3.gather.out", out_operand)?;
     job.step(
         push,
         workgroups,
@@ -207,7 +234,6 @@ pub fn launch_gather(
             (2, destination, BindingRole::Output),
         ],
     );
-    job.run(&mut [&mut bytes])?;
-    output_window_bytes(out)?.copy_from_slice(&bytes);
+    job.run()?;
     Ok(())
 }

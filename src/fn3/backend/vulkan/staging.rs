@@ -232,6 +232,19 @@ impl<'a> StagingLease<'a> {
     }
 }
 
+impl StagingLease<'_> {
+    /// Take the block out of the pool's ownership.
+    ///
+    /// A step batch uses this: the recorded copy still references the block, so
+    /// it must not return to the pool until the batch's fence signals. The
+    /// batch owns the returned `Arc` and releases it after the wait.
+    pub fn detach(mut self) -> Arc<Buffer> {
+        self.buffer
+            .take()
+            .expect("a live staging lease always owns its buffer")
+    }
+}
+
 impl Drop for StagingLease<'_> {
     fn drop(&mut self) {
         if let Some(buffer) = self.buffer.take() {

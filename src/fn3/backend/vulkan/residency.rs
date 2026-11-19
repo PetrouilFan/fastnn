@@ -52,8 +52,12 @@ pub struct ExecutionRecord {
     pub backend: &'static str,
     /// Device the work ran on.
     pub device: DeviceId,
-    /// Queue submissions used by this op (at least 1).
+    /// Queue submissions used by this op (0 when it joined a step batch).
     pub submissions: u32,
+    /// Step batch this op was recorded into, when the backend batches.
+    pub batch: Option<u64>,
+    /// Timestamp pair index inside that batch.
+    pub batch_query: Option<u32>,
     /// Workgroup counts.
     pub workgroups: [u32; 3],
     /// Every descriptor binding, in binding order.
@@ -88,6 +92,8 @@ impl ExecutionRecord {
             backend: VULKAN_BACKEND_NAME,
             device,
             submissions: 0,
+            batch: None,
+            batch_query: None,
             workgroups: [0, 0, 0],
             bindings: Vec::new(),
             upload_bytes: 0,
@@ -101,10 +107,11 @@ impl ExecutionRecord {
         }
     }
 
-    /// `true` when the record proves device work: a submission, a dispatch and
-    /// at least one device-local binding.
+    /// `true` when the record proves device work: a submission (its own, or
+    /// the step batch it joined), a dispatch and at least one device-local
+    /// binding.
     pub fn proves_device_execution(&self) -> bool {
-        self.submissions >= 1
+        (self.submissions >= 1 || self.batch.is_some())
             && self.workgroups.iter().all(|count| *count > 0)
             && self.bindings.iter().any(|binding| binding.device_local)
             && !self.inputs_read_back
@@ -116,8 +123,12 @@ impl ExecutionRecord {
 pub struct ResidencySummary {
     /// Executions recorded.
     pub executions: u64,
-    /// Queue submissions over all executions.
+    /// Queue submissions over all executions, including step batches.
     pub submissions: u64,
+    /// Step batches recorded.
+    pub batches: u64,
+    /// Records that joined a step batch instead of submitting on their own.
+    pub batched_executions: u64,
     /// Bytes uploaded.
     pub upload_bytes: u64,
     /// Bytes read back.
@@ -142,6 +153,7 @@ pub struct ResidencyLedger {
 struct LedgerInner {
     records: Vec<ExecutionRecord>,
     next_sequence: u64,
+    batch_submissions: u64,
 }
 
 impl ResidencyLedger {
@@ -188,11 +200,48 @@ impl ResidencyLedger {
 
     /// Drop every record. Sequence numbers keep increasing.
     pub fn clear(&self) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.records.clear();
+        inner.batch_submissions = 0;
+    }
+
+    /// Count one submission made by a step batch.
+    pub fn note_batch_submission(&self) {
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .records
-            .clear();
+            .batch_submissions += 1;
+    }
+
+    /// Attach per-op device timings to the records of one completed batch.
+    ///
+    /// `timings[i]` is the raw `(start, end)` tick pair of query index `i`, so
+    /// a batched op keeps the same per-op device evidence a per-op submission
+    /// produced — the submission count changed, the evidence did not.
+    pub fn complete_batch(&self, batch: u64, timings: &[Option<(u64, u64)>], period_ns: f64) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for record in inner.records.iter_mut() {
+            if record.batch != Some(batch) {
+                continue;
+            }
+            let Some(index) = record.batch_query else {
+                continue;
+            };
+            let Some(Some((start, end))) = timings.get(index as usize) else {
+                continue;
+            };
+            let ticks = end.saturating_sub(*start) as f64;
+            record.gpu_ticks = Some((*start, *end));
+            record.gpu_ns = Some((ticks * period_ns).max(0.0).round().min(u64::MAX as f64) as u64);
+            // The op's own share of the batch. The submission itself is
+            // counted once by `note_batch_submission`.
+        }
     }
 
     /// Aggregate counters.
@@ -208,6 +257,9 @@ impl ResidencyLedger {
         for record in &inner.records {
             summary.executions += 1;
             summary.submissions += u64::from(record.submissions);
+            if record.batch.is_some() {
+                summary.batched_executions += 1;
+            }
             summary.upload_bytes += record.upload_bytes;
             summary.readback_bytes += record.readback_bytes;
             if record.inputs_read_back {
@@ -227,6 +279,13 @@ impl ResidencyLedger {
         }
         ops.sort_by_key(|(op, _)| op.code());
         summary.ops = ops;
+        summary.submissions += inner.batch_submissions;
+        summary.batches = inner
+            .records
+            .iter()
+            .filter_map(|record| record.batch)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len() as u64;
         summary.gpu_ns = if gpu_complete && !inner.records.is_empty() {
             Some(gpu_total)
         } else {

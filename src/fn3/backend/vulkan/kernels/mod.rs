@@ -51,6 +51,7 @@ use ash::vk;
 
 pub mod attention;
 pub mod embedding;
+pub(super) mod io;
 pub mod matmul;
 pub mod norm;
 pub mod pointwise;

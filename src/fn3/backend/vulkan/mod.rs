@@ -69,6 +69,7 @@ pub mod ledger;
 pub mod memory;
 pub mod pipeline;
 pub mod residency;
+pub mod resident;
 pub mod staging;
 pub mod submission;
 
@@ -81,6 +82,9 @@ pub use ledger::HandleLedger;
 pub use memory::{MemoryClass, MemoryStats};
 pub use pipeline::Kernel;
 pub use residency::{ExecutionRecord, ResidencyLedger, ResidencySummary};
+pub use resident::{
+    padded_bytes, ResidencyCounters, ResidencyPhase, ResidencyStats, ResidentBuffer,
+};
 pub use staging::{StagingPool, StagingStats};
 pub use submission::{BindingSnapshot, DispatchInfo, Submission, SubmitReport, Submitter};
 
@@ -182,6 +186,10 @@ pub struct VulkanBackend {
     staging: StagingPool,
     submitters: Mutex<SubmitterPool>,
     residency: ResidencyLedger,
+    /// One device copy per immutable tensor, uploaded at prepare (FN3-26).
+    persistent: resident::PersistentTable,
+    /// Upload/readback/residency counters, attributed per phase.
+    residency_counters: resident::ResidencyCounters,
     /// Declared last so every resource above drops before the device.
     device: Arc<Device>,
 }
@@ -341,6 +349,8 @@ impl VulkanBackend {
             staging,
             submitters: Mutex::new(SubmitterPool::default()),
             residency: ResidencyLedger::new(),
+            persistent: resident::PersistentTable::new(),
+            residency_counters: resident::ResidencyCounters::new(),
             device,
         }))
     }
@@ -610,6 +620,14 @@ impl VulkanBackend {
         &self.residency
     }
 
+    /// Number of `vkQueueSubmit` calls this backend has made.
+    ///
+    /// The authoritative submission count for #72: it includes step batches,
+    /// per-op recordings, transfers and explicit downloads.
+    pub fn queue_submissions(&self) -> u64 {
+        self.device.queue_submissions()
+    }
+
     /// Allocator counters (chunk sizes, live/peak bytes, allocation count).
     pub fn memory_stats(&self) -> MemoryStats {
         self.device.memory_stats()
@@ -693,6 +711,84 @@ impl Backend for VulkanBackend {
                 ),
             })?;
         (kernel.launch)(self, inputs, outputs, params)
+    }
+
+    fn supports_resident_storage(&self) -> bool {
+        // Every registered kernel binds resident operands by handle; the
+        // argument order and arithmetic are unchanged, only the buffer source
+        // is (see `kernels::io`). The staged path stays available through
+        // `FN3_VK_STAGED=1`, which makes the session allocate host tensors.
+        true
+    }
+
+    fn allocate_resident(
+        &self,
+        shape: &crate::fn3::shape::Shape,
+        dtype: crate::fn3::dtype::DType,
+    ) -> Fn3Result<crate::fn3::tensor::Tensor> {
+        VulkanBackend::allocate_resident(self, shape, dtype)
+    }
+
+    fn prepare_persistent(&self, tensors: &[&crate::fn3::tensor::Tensor]) -> Fn3Result<()> {
+        self.prepare_persistent_tensors(tensors)
+    }
+
+    fn write_resident(
+        &self,
+        dst: &crate::fn3::storage::Storage,
+        byte_offset: u64,
+        bytes: &[u8],
+    ) -> Fn3Result<()> {
+        self.write_resident_storage(dst, byte_offset, bytes)
+    }
+
+    fn note_readback(&self, bytes: u64) {
+        VulkanBackend::note_readback(self, bytes);
+    }
+
+    fn copy_resident_regions(
+        &self,
+        dst: &crate::fn3::storage::Storage,
+        src: &crate::fn3::storage::Storage,
+        regions: &[(u64, u64, u64)],
+    ) -> Fn3Result<()> {
+        self.copy_resident_storage_regions(dst, src, regions)
+    }
+
+    fn begin_step(&self, label: &'static str, batch: bool) -> Fn3Result<()> {
+        self.set_phase(match label {
+            "prefill" => resident::ResidencyPhase::Prefill,
+            "decode" => resident::ResidencyPhase::Decode,
+            _ => resident::ResidencyPhase::Prepare,
+        });
+        if !batch {
+            return Ok(());
+        }
+        let mut submitter = self.checkout_submitter()?;
+        submitter.begin_batch().map_err(|error| error.to_fn3())?;
+        drop(submitter);
+        Ok(())
+    }
+
+    fn end_step(&self) -> Fn3Result<u32> {
+        let mut submitter = self.checkout_submitter()?;
+        let batch_id = submitter.batch_id();
+        if !submitter.is_batching() {
+            return Ok(0);
+        }
+        let report = submitter.end_batch().map_err(|error| error.to_fn3())?;
+        drop(submitter);
+        if report.submissions == 0 {
+            return Ok(0);
+        }
+        self.residency.note_batch_submission();
+        let period = f64::from(self.vulkan_device().limits().timestamp_period);
+        if let Some(batch) = batch_id {
+            self.residency
+                .complete_batch(batch, &report.timings, period);
+        }
+        self.residency_counters.note_batch(report.submissions);
+        Ok(report.submissions)
     }
 }
 

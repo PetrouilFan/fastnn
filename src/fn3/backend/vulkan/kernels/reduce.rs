@@ -32,9 +32,9 @@
 //! which the FN3-11 (#57) platform layer does not enable.
 
 use super::super::VulkanBackend;
+use super::io;
 use super::norm::{
-    contiguous_f32, contiguous_f32_bytes_mut, execute_staged, normalize_axis, require_shape,
-    unsupported, BufferSource, ParamWriter,
+    execute_staged, normalize_axis, require_shape, unsupported, BufferSource, ParamWriter,
 };
 use super::{grid, BindingSpec, KernelSet, KernelSpec, OpKernel};
 use crate::fn3::backend::{check_arity, CapabilityFeatures, OpParams, Support};
@@ -43,6 +43,9 @@ use crate::fn3::error::{Fn3Error, Fn3Result};
 use crate::fn3::ops::OpId;
 use crate::fn3::shape::Shape;
 use crate::fn3::tensor::{TensorMut, TensorView};
+
+/// Owning issue named in this family's rejection messages.
+const KERNEL_OWNER: &str = "FN3-15 (#61)";
 
 /// The largest tensor rank the alpha contract accepts (matches the core).
 const MAX_RANK: usize = 8;
@@ -294,8 +297,7 @@ fn launch_reduce_impl(
         return Ok(());
     }
 
-    let input_values = contiguous_f32(op, input, "reduce input")?;
-    let out_bytes = contiguous_f32_bytes_mut(op, out, "reduce output")?;
+    let input_operand = io::input(KERNEL_OWNER, backend, op, "reduce.input", input, DType::F32)?;
 
     let dims: Vec<u64> = input.shape().dims().to_vec();
     let strides = strides_u32(op, &dims, "vulkan reduce strides")?;
@@ -360,15 +362,10 @@ fn launch_reduce_impl(
     let workgroups = REDUCE_SUM_MEAN
         .workgroups(out_numel, expected.dims())
         .map_err(|error| error.to_fn3())?;
+    let out_operand = io::output(KERNEL_OWNER, backend, op, "reduce.out", out, DType::F32)?;
     let mut sources = [
-        BufferSource::Upload {
-            name: "reduce.input",
-            bytes: bytemuck::cast_slice(input_values),
-        },
-        BufferSource::Readback {
-            name: "reduce.out",
-            bytes: out_bytes,
-        },
+        BufferSource::input("reduce.input", input_operand),
+        BufferSource::output("reduce.out", out_operand),
         BufferSource::Upload {
             name: "reduce.params",
             bytes: &params_bytes,
@@ -480,19 +477,9 @@ pub fn launch_argmax(
 
     // The input travels as raw 32-bit words: `f32` bits or native `i32`, which
     // the shader reinterprets according to `mode`.
-    let input_bytes: &[u8] = match dtype {
-        DType::F32 => bytemuck::cast_slice(input.as_f32_slice().map_err(|error| {
-            if matches!(error, Fn3Error::NonContiguous { .. }) {
-                unsupported(
-                    op,
-                    "argmax input is a strided view; the FN3-15 kernels require contiguous \
-                     operands",
-                )
-            } else {
-                error
-            }
-        })?),
-        DType::I32 => bytemuck::cast_slice(input.as_i32_slice()?),
+    let input_operand = match dtype {
+        DType::F32 => io::input(KERNEL_OWNER, backend, op, "argmax.input", input, DType::F32)?,
+        DType::I32 => io::input(KERNEL_OWNER, backend, op, "argmax.input", input, DType::I32)?,
         other => {
             return Err(unsupported(
                 op,
@@ -500,34 +487,14 @@ pub fn launch_argmax(
             ))
         }
     };
-    let out_bytes = {
-        out.meta().require_dtype(Some(op), DType::I64)?;
-        if !out.is_contiguous() {
-            return Err(unsupported(
-                op,
-                format!(
-                    "argmax output is a strided view ({}); the FN3-15 kernels require \
-                     contiguous outputs",
-                    out.strides()
-                ),
-            ));
-        }
-        let values = out.as_mut_slice::<i64>()?;
-        bytemuck::cast_slice_mut::<i64, u8>(values)
-    };
+    let out_operand = io::output(KERNEL_OWNER, backend, op, "argmax.out", out, DType::I64)?;
 
     let workgroups = ARGMAX
         .workgroups(out_numel, expected.dims())
         .map_err(|error| error.to_fn3())?;
     let mut sources = [
-        BufferSource::Upload {
-            name: "argmax.input",
-            bytes: input_bytes,
-        },
-        BufferSource::Readback {
-            name: "argmax.out",
-            bytes: out_bytes,
-        },
+        BufferSource::input("argmax.input", input_operand),
+        BufferSource::output("argmax.out", out_operand),
         BufferSource::Upload {
             name: "argmax.params",
             bytes: &params_bytes,

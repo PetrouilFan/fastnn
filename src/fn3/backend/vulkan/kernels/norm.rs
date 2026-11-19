@@ -42,6 +42,8 @@
 //! residency record. `reduce.rs` and `attention.rs` use it too, so every kernel
 //! in this family produces the same evidence fields.
 
+use std::sync::Arc;
+
 use ash::vk;
 
 use super::super::context::{BindingArg, BindingRole, Buffer, BufferDesc, KernelInvocation};
@@ -49,6 +51,7 @@ use super::super::error::Error;
 use super::super::residency::ExecutionRecord;
 use super::super::staging::StagingLease;
 use super::super::VulkanBackend;
+use super::io::{self, Operand, OperandMut};
 use super::{BindingKind, BindingSpec, KernelSet, KernelSpec, OpKernel};
 use crate::fn3::backend::vulkan::VULKAN_BACKEND_NAME;
 use crate::fn3::backend::{check_arity, Backend, CapabilityFeatures, OpParams, Support};
@@ -57,6 +60,9 @@ use crate::fn3::error::{Fn3Error, Fn3Result};
 use crate::fn3::ops::OpId;
 use crate::fn3::shape::Shape;
 use crate::fn3::tensor::{TensorMut, TensorView};
+
+/// Owning issue named in this family's rejection messages.
+const KERNEL_OWNER: &str = "FN3-15 (#61)";
 
 /// LayerNorm over the trailing axis (`shaders/fn3_layernorm.comp`).
 pub const LAYER_NORM: KernelSpec = KernelSpec {
@@ -96,7 +102,12 @@ pub const SOFTMAX_LAST: KernelSpec = KernelSpec {
 // Shared launch plumbing (used by `reduce.rs` and `attention.rs` as well)
 // ---------------------------------------------------------------------------
 
-/// One host-visible source for a declared storage-buffer binding.
+/// One declared storage-buffer source for a dispatch.
+///
+/// A *host* source (upload, readback, scratch) is allocated for this dispatch
+/// and staged through the host-visible pool; a *resident* source is bound in
+/// place and moves nothing. That is the whole difference FN3-26 introduces, and
+/// it is a property of the tensor, so the kernel arithmetic above is unchanged.
 pub(super) enum BufferSource<'a> {
     /// Host bytes copied to a device buffer before the dispatch.
     Upload {
@@ -119,14 +130,52 @@ pub(super) enum BufferSource<'a> {
         /// Byte size; must be a non-zero multiple of 4.
         size: u64,
     },
+    /// A device buffer that already holds the operand (persistent or resident).
+    Resident {
+        /// Diagnostic buffer name.
+        name: &'static str,
+        /// The bound buffer.
+        buffer: Arc<Buffer>,
+        /// Descriptor role.
+        role: BindingRole,
+        /// Logical byte length.
+        bytes: u64,
+    },
 }
 
-impl BufferSource<'_> {
+impl<'a> BufferSource<'a> {
+    /// A read-only operand, resident or staged.
+    pub(super) fn input(name: &'static str, operand: Operand<'a>) -> BufferSource<'a> {
+        match operand {
+            Operand::Resident { buffer } => BufferSource::Resident {
+                name,
+                bytes: buffer.size(),
+                buffer,
+                role: BindingRole::Input,
+            },
+            Operand::Host { bytes } => BufferSource::Upload { name, bytes },
+        }
+    }
+
+    /// A writable operand, resident or read back.
+    pub(super) fn output(name: &'static str, operand: OperandMut<'a>) -> BufferSource<'a> {
+        match operand {
+            OperandMut::Resident { buffer } => BufferSource::Resident {
+                name,
+                bytes: buffer.size(),
+                buffer,
+                role: BindingRole::Output,
+            },
+            OperandMut::Host { bytes } => BufferSource::Readback { name, bytes },
+        }
+    }
+
     fn name(&self) -> &'static str {
         match self {
             BufferSource::Upload { name, .. }
             | BufferSource::Readback { name, .. }
-            | BufferSource::Scratch { name, .. } => name,
+            | BufferSource::Scratch { name, .. }
+            | BufferSource::Resident { name, .. } => name,
         }
     }
 
@@ -135,6 +184,7 @@ impl BufferSource<'_> {
             BufferSource::Upload { bytes, .. } => bytes.len() as u64,
             BufferSource::Readback { bytes, .. } => bytes.len() as u64,
             BufferSource::Scratch { size, .. } => *size,
+            BufferSource::Resident { bytes, .. } => *bytes,
         }
     }
 
@@ -143,16 +193,19 @@ impl BufferSource<'_> {
             BufferSource::Upload { .. } => BindingRole::Input,
             BufferSource::Readback { .. } => BindingRole::Output,
             BufferSource::Scratch { .. } => BindingRole::Scratch,
+            BufferSource::Resident { role, .. } => *role,
         }
     }
 }
 
-/// Record and wait for one dispatch over device-resident buffers.
+/// Record and wait for one dispatch over device buffers.
 ///
 /// `sources` must have exactly one entry per declared binding, in declaration
-/// order. Every input is uploaded, every [`BufferSource::Readback`] is filled
-/// from the device, and one [`ExecutionRecord`] is appended with the submission,
-/// dispatch geometry, bindings, transfer sizes and device timestamps.
+/// order. Every host input is uploaded, every [`BufferSource::Readback`] is
+/// filled from the device, and one [`ExecutionRecord`] is appended with the
+/// submission, dispatch geometry, bindings, transfer sizes and device
+/// timestamps. A [`BufferSource::Resident`] is bound as it is: no allocation,
+/// no copy, and the record says `host_staged = false` when no source moved.
 pub(super) fn execute_staged(
     op: OpId,
     backend: &VulkanBackend,
@@ -216,22 +269,26 @@ pub(super) fn execute_staged(
     }
 
     let kernel = backend.kernel(spec)?;
-    let mut buffers: Vec<Buffer> = Vec::with_capacity(sources.len());
+    let mut buffers: Vec<Arc<Buffer>> = Vec::with_capacity(sources.len());
     for source in sources.iter() {
-        buffers
-            .push(backend.alloc_buffer(&BufferDesc::device_storage(source.size(), source.name()))?);
+        match source {
+            BufferSource::Resident { buffer, .. } => buffers.push(Arc::clone(buffer)),
+            _ => buffers.push(Arc::new(backend.alloc_buffer(
+                &BufferDesc::device_storage(source.size(), source.name()),
+            )?)),
+        }
     }
 
     let staging = backend.staging();
     let mut leases: Vec<Option<StagingLease<'_>>> = Vec::with_capacity(sources.len());
     for source in sources.iter() {
         let lease = match source {
-            BufferSource::Scratch { .. } => None,
-            _ => Some(
+            BufferSource::Upload { .. } | BufferSource::Readback { .. } => Some(
                 staging
                     .acquire(source.size())
                     .map_err(|error| error.to_fn3())?,
             ),
+            _ => None,
         };
         leases.push(lease);
     }
@@ -249,11 +306,27 @@ pub(super) fn execute_staged(
         .iter()
         .enumerate()
         .map(|(index, buffer)| {
-            BindingArg::whole(spec.bindings[index].binding, sources[index].role(), buffer)
+            BindingArg::whole(
+                spec.bindings[index].binding,
+                sources[index].role(),
+                buffer.as_ref(),
+            )
         })
         .collect();
 
     let mut submitter = backend.checkout_submitter()?;
+    let batching = submitter.is_batching();
+    if batching
+        && sources
+            .iter()
+            .any(|s| matches!(s, BufferSource::Readback { .. }))
+    {
+        return Err(Error::internal(format!(
+            "{}: a batched step cannot satisfy a readback; the output must be device-resident",
+            spec.name
+        ))
+        .to_fn3());
+    }
     let mut dispatch = None;
     let (submission_report, dispatch_info) = {
         let report = submitter
@@ -263,16 +336,34 @@ pub(super) fn execute_staged(
                         recorder.copy_buffer(
                             leases[index].as_ref().expect("upload lease").buffer(),
                             0,
-                            &buffers[index],
+                            buffers[index].as_ref(),
                             0,
                             source.size(),
                         )?;
+                    }
+                }
+                for (index, source) in sources.iter().enumerate() {
+                    if matches!(source, BufferSource::Upload { .. }) {
                         recorder.barrier(
-                            &buffers[index],
+                            buffers[index].as_ref(),
                             vk::PipelineStageFlags::TRANSFER,
                             vk::PipelineStageFlags::COMPUTE_SHADER,
                             vk::AccessFlags::TRANSFER_WRITE,
                             vk::AccessFlags::SHADER_READ,
+                        );
+                    }
+                }
+                if batching {
+                    // One submission cannot rely on submission order to order
+                    // two dispatches: a later op reads what an earlier one
+                    // wrote, so order every binding compute -> compute first.
+                    for binding in &bindings {
+                        recorder.barrier(
+                            binding.buffer,
+                            vk::PipelineStageFlags::COMPUTE_SHADER,
+                            vk::PipelineStageFlags::COMPUTE_SHADER,
+                            vk::AccessFlags::SHADER_WRITE,
+                            vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
                         );
                     }
                 }
@@ -285,14 +376,14 @@ pub(super) fn execute_staged(
                 for (index, source) in sources.iter().enumerate() {
                     if matches!(source, BufferSource::Readback { .. }) {
                         recorder.barrier(
-                            &buffers[index],
+                            buffers[index].as_ref(),
                             vk::PipelineStageFlags::COMPUTE_SHADER,
                             vk::PipelineStageFlags::TRANSFER,
                             vk::AccessFlags::SHADER_WRITE,
                             vk::AccessFlags::TRANSFER_READ,
                         );
                         recorder.copy_buffer(
-                            &buffers[index],
+                            buffers[index].as_ref(),
                             0,
                             leases[index].as_ref().expect("readback lease").buffer(),
                             0,
@@ -313,36 +404,52 @@ pub(super) fn execute_staged(
         })?;
         (report, info)
     };
+    if batching {
+        // Every buffer a recorded dispatch references must outlive the batch.
+        for buffer in &buffers {
+            submitter.retain_block(Arc::clone(buffer));
+        }
+        for lease in std::mem::take(&mut leases).into_iter().flatten() {
+            submitter.retain_block(lease.detach());
+        }
+    }
     drop(submitter);
 
     for (index, source) in sources.iter_mut().enumerate() {
         if let BufferSource::Readback { bytes, .. } = source {
-            leases[index]
-                .as_ref()
+            leases
+                .get(index)
+                .and_then(|lease| lease.as_ref())
                 .expect("readback lease")
                 .read_into(bytes)
                 .map_err(|error| error.to_fn3())?;
+            backend.note_readback(bytes.len() as u64);
         }
     }
 
     let mut upload_bytes = 0u64;
     let mut readback_bytes = 0u64;
     let mut device_local_bytes = 0u64;
+    let mut host_staged = false;
     for source in sources.iter() {
         device_local_bytes = device_local_bytes.saturating_add(source.size());
         match source {
             BufferSource::Upload { .. } => {
+                host_staged = true;
                 upload_bytes = upload_bytes.saturating_add(source.size());
             }
             BufferSource::Readback { .. } => {
+                host_staged = true;
                 readback_bytes = readback_bytes.saturating_add(source.size());
             }
-            BufferSource::Scratch { .. } => {}
+            BufferSource::Scratch { .. } | BufferSource::Resident { .. } => {}
         }
     }
 
     let mut record = ExecutionRecord::new(0, op, spec.name, backend.device_id());
     record.submissions = submission_report.submissions;
+    record.batch = submission_report.batch;
+    record.batch_query = submission_report.batch_query;
     record.workgroups = dispatch_info.workgroups;
     record.bindings = dispatch_info.bindings;
     record.upload_bytes = upload_bytes;
@@ -350,7 +457,7 @@ pub(super) fn execute_staged(
     // No input is ever copied back to the host: inputs travel host → device and
     // only declared outputs travel device → host.
     record.inputs_read_back = false;
-    record.host_staged = true;
+    record.host_staged = host_staged;
     record.device_local_bytes = device_local_bytes;
     record.host_ns = submission_report.host_ns;
     record.gpu_ns = submission_report.gpu_ns;
@@ -426,47 +533,6 @@ pub(super) fn normalize_axis(
         });
     }
     Ok(resolved as usize)
-}
-
-/// `require_dtype` plus the contiguous-view precondition of every FN3-15 kernel.
-pub(super) fn contiguous_f32<'a>(
-    op: OpId,
-    view: &TensorView<'a>,
-    what: &'static str,
-) -> Fn3Result<&'a [f32]> {
-    view.meta().require_dtype(Some(op), DType::F32)?;
-    if !view.is_contiguous() {
-        return Err(unsupported(
-            op,
-            format!(
-                "{what} is a strided view ({}), and the FN3-15 kernels require contiguous \
-                 operands; materialise it with `to_contiguous` first",
-                view.strides()
-            ),
-        ));
-    }
-    view.as_f32_slice()
-}
-
-/// Mutable twin of [`contiguous_f32`], returning raw little-endian bytes.
-pub(super) fn contiguous_f32_bytes_mut<'a>(
-    op: OpId,
-    view: &'a mut TensorMut<'_>,
-    what: &'static str,
-) -> Fn3Result<&'a mut [u8]> {
-    view.meta().require_dtype(Some(op), DType::F32)?;
-    if !view.is_contiguous() {
-        return Err(unsupported(
-            op,
-            format!(
-                "{what} is a strided view ({}), and the FN3-15 kernels require contiguous \
-                 outputs",
-                view.strides()
-            ),
-        ));
-    }
-    let values = view.as_mut_slice::<f32>()?;
-    Ok(bytemuck::cast_slice_mut::<f32, u8>(values))
 }
 
 /// Require `actual` to equal `expected` and report both when it does not.
@@ -642,11 +708,31 @@ pub fn launch_layer_norm(
         }
     }
 
-    let input_values = contiguous_f32(op, input, "layer_norm input")?;
-    let weight_values = contiguous_f32(op, weight, "layer_norm weight")?;
-    let bias_values = contiguous_f32(op, bias, "layer_norm bias")?;
+    let input_operand = io::input(
+        KERNEL_OWNER,
+        backend,
+        op,
+        "layernorm.input",
+        input,
+        DType::F32,
+    )?;
+    let weight_operand = io::input(
+        KERNEL_OWNER,
+        backend,
+        op,
+        "layernorm.weight",
+        weight,
+        DType::F32,
+    )?;
+    let bias_operand = io::input(
+        KERNEL_OWNER,
+        backend,
+        op,
+        "layernorm.bias",
+        bias,
+        DType::F32,
+    )?;
     let out_dims: Vec<u64> = out.shape().dims().to_vec();
-    let out_bytes = contiguous_f32_bytes_mut(op, out, "layer_norm output")?;
 
     let rows = input
         .shape()
@@ -683,23 +769,12 @@ pub fn launch_layer_norm(
         .workgroups(u64::from(rows), &out_dims)
         .map_err(|error| error.to_fn3())?;
 
+    let out_operand = io::output(KERNEL_OWNER, backend, op, "layernorm.out", out, DType::F32)?;
     let mut sources = [
-        BufferSource::Upload {
-            name: "layernorm.input",
-            bytes: bytemuck::cast_slice(input_values),
-        },
-        BufferSource::Upload {
-            name: "layernorm.weight",
-            bytes: bytemuck::cast_slice(weight_values),
-        },
-        BufferSource::Upload {
-            name: "layernorm.bias",
-            bytes: bytemuck::cast_slice(bias_values),
-        },
-        BufferSource::Readback {
-            name: "layernorm.out",
-            bytes: out_bytes,
-        },
+        BufferSource::input("layernorm.input", input_operand),
+        BufferSource::input("layernorm.weight", weight_operand),
+        BufferSource::input("layernorm.bias", bias_operand),
+        BufferSource::output("layernorm.out", out_operand),
     ];
     execute_staged(
         op,
@@ -757,9 +832,15 @@ pub fn launch_softmax(
     }
     require_shape(op, input.shape(), out.shape())?;
 
-    let input_values = contiguous_f32(op, input, "softmax input")?;
+    let input_operand = io::input(
+        KERNEL_OWNER,
+        backend,
+        op,
+        "softmax.input",
+        input,
+        DType::F32,
+    )?;
     let out_dims: Vec<u64> = out.shape().dims().to_vec();
-    let out_bytes = contiguous_f32_bytes_mut(op, out, "softmax output")?;
 
     let rows = input
         .shape()
@@ -794,15 +875,10 @@ pub fn launch_softmax(
         .workgroups(u64::from(rows), &out_dims)
         .map_err(|error| error.to_fn3())?;
 
+    let out_operand = io::output(KERNEL_OWNER, backend, op, "softmax.out", out, DType::F32)?;
     let mut sources = [
-        BufferSource::Upload {
-            name: "softmax.input",
-            bytes: bytemuck::cast_slice(input_values),
-        },
-        BufferSource::Readback {
-            name: "softmax.out",
-            bytes: out_bytes,
-        },
+        BufferSource::input("softmax.input", input_operand),
+        BufferSource::output("softmax.out", out_operand),
     ];
     execute_staged(
         op,

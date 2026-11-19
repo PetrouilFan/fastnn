@@ -37,9 +37,15 @@ use super::device::Device;
 use super::error::{check, Error, Result};
 
 /// Maximum descriptor sets one recording may allocate.
-const DESCRIPTOR_SETS_PER_RECORDING: u32 = 64;
+///
+/// A per-op recording needs one set; a step batch needs one per op of the plan
+/// (144 for the pinned decoder) with room to spare, because the transient pool
+/// cannot be reset while the batch is still recording.
+const DESCRIPTOR_SETS_PER_RECORDING: u32 = 640;
+/// Timestamp pairs a step batch may record (one pair per op).
+const BATCH_QUERY_PAIRS: u32 = 512;
 /// Storage-buffer descriptors per set reserved in the transient pool.
-const STORAGE_DESCRIPTORS_PER_SET: u32 = 32;
+const STORAGE_DESCRIPTORS_PER_SET: u32 = 16;
 /// Uniform-buffer descriptors per set reserved in the transient pool.
 const UNIFORM_DESCRIPTORS_PER_SET: u32 = 8;
 
@@ -89,6 +95,41 @@ pub struct SubmitReport {
     pub copies: u32,
     /// Bytes moved by buffer copies.
     pub copied_bytes: u64,
+    /// Step batch this recording joined, when the submitter is batching.
+    pub batch: Option<u64>,
+    /// Query pair index inside that batch (`start = 2 * index`).
+    pub batch_query: Option<u32>,
+}
+
+/// Result of closing a step batch.
+#[derive(Debug, Clone, Default)]
+pub struct BatchReport {
+    /// Queue submissions this batch made (1 when it recorded anything).
+    pub submissions: u32,
+    /// Host wall time between submit and fence signal, in nanoseconds.
+    pub host_ns: u64,
+    /// Device time for the whole batch, when timestamps are available.
+    pub gpu_ns: Option<u64>,
+    /// Raw `(start, end)` ticks for one timestamp pair per recorded op.
+    pub timings: Vec<Option<(u64, u64)>>,
+    /// Dispatches recorded in the batch.
+    pub dispatches: u32,
+    /// Buffer copies recorded in the batch.
+    pub copies: u32,
+    /// Bytes moved by those copies.
+    pub copied_bytes: u64,
+}
+
+/// State of an open step batch on one submitter.
+#[derive(Debug, Default)]
+struct BatchState {
+    id: u64,
+    records: u32,
+    dispatches: u32,
+    copies: u32,
+    copied_bytes: u64,
+    /// Staging blocks whose host bytes the recorded copies still reference.
+    retained: Vec<Arc<super::context::Buffer>>,
 }
 
 /// A per-thread recording context.
@@ -102,6 +143,9 @@ pub struct Submitter {
     serial: u64,
     in_flight: bool,
     destroyed: bool,
+    /// One open step batch, when the backend is batching plan executions.
+    batch: Option<BatchState>,
+    next_batch_id: u64,
 }
 
 impl Submitter {
@@ -217,7 +261,7 @@ impl Submitter {
         let query_pool = if timestamp_bits > 0 {
             let query_info = vk::QueryPoolCreateInfo::default()
                 .query_type(vk::QueryType::TIMESTAMP)
-                .query_count(2);
+                .query_count(2 * BATCH_QUERY_PAIRS);
             // SAFETY: a two-query timestamp pool; timestamps are valid on this
             // family. A failure is degraded (gpu timing absent), not fatal.
             match unsafe { device.ash().create_query_pool(&query_info, None) } {
@@ -249,15 +293,196 @@ impl Submitter {
             serial: 0,
             in_flight: false,
             destroyed: false,
+            batch: None,
+            next_batch_id: 0,
+        })
+    }
+
+    /// `true` while a step batch is open on this submitter.
+    pub fn is_batching(&self) -> bool {
+        self.batch.is_some()
+    }
+
+    /// Id of the open batch, if any.
+    pub fn batch_id(&self) -> Option<u64> {
+        self.batch.as_ref().map(|batch| batch.id)
+    }
+
+    /// Hold a staging block until the open batch completes.
+    ///
+    /// A batched recording copies from a host-visible block that must not be
+    /// reused before the submission runs; the batch owns it from here.
+    pub fn retain_block(&mut self, block: Arc<super::context::Buffer>) {
+        match &mut self.batch {
+            Some(batch) => batch.retained.push(block),
+            None => {
+                // Not batching: the block was already safe to release.
+            }
+        }
+    }
+
+    /// Begin a step batch: reset and open one command buffer for every
+    /// dispatch until [`Submitter::end_batch`].
+    pub fn begin_batch(&mut self) -> Result<u64> {
+        if self.in_flight {
+            return Err(Error::internal(
+                "Submitter::begin_batch while its previous submission is in flight",
+            ));
+        }
+        if self.batch.is_some() {
+            return Err(Error::internal(
+                "Submitter::begin_batch while a batch is already open",
+            ));
+        }
+        // SAFETY: the previous submission completed, and the pool was created
+        // with RESET_COMMAND_BUFFER.
+        check(
+            "vkResetCommandBuffer",
+            unsafe {
+                self.device
+                    .ash()
+                    .reset_command_buffer(self.cmd, vk::CommandBufferResetFlags::empty())
+            },
+            "opening a step batch on a completed command buffer",
+        )?;
+        // SAFETY: every descriptor set allocated from this pool belongs to a
+        // completed submission; resetting returns all sets at once.
+        check(
+            "vkResetDescriptorPool",
+            unsafe {
+                self.device.ash().reset_descriptor_pool(
+                    self.descriptor_pool,
+                    vk::DescriptorPoolResetFlags::empty(),
+                )
+            },
+            "reusing the transient descriptor pool for a step batch",
+        )?;
+        let begin_info = vk::CommandBufferBeginInfo::default();
+        // SAFETY: the buffer was just reset and is not in flight.
+        check(
+            "vkBeginCommandBuffer",
+            unsafe {
+                self.device
+                    .ash()
+                    .begin_command_buffer(self.cmd, &begin_info)
+            },
+            "recording a step batch",
+        )?;
+        if let Some(query_pool) = self.query_pool {
+            // SAFETY: the buffer is recording and no submission is in flight,
+            // so the whole range may be reset before any timestamp is written.
+            unsafe {
+                self.device.ash().cmd_reset_query_pool(
+                    self.cmd,
+                    query_pool,
+                    0,
+                    2 * BATCH_QUERY_PAIRS,
+                );
+            }
+        }
+        self.next_batch_id += 1;
+        self.batch = Some(BatchState {
+            id: self.next_batch_id,
+            ..BatchState::default()
+        });
+        Ok(self.next_batch_id)
+    }
+
+    /// Close and submit the open step batch, then wait for it once.
+    pub fn end_batch(&mut self) -> Result<BatchReport> {
+        let started = Instant::now();
+        let Some(batch) = self.batch.take() else {
+            return Ok(BatchReport::default());
+        };
+        // SAFETY: recording was begun on this buffer and no other thread uses
+        // it.
+        check(
+            "vkEndCommandBuffer",
+            unsafe { self.device.ash().end_command_buffer(self.cmd) },
+            "finishing a step batch",
+        )?;
+        let command_buffers = [self.cmd];
+        let submit = vk::SubmitInfo::default().command_buffers(&command_buffers);
+        self.device.submit(&[submit], self.fence)?;
+        self.serial += 1;
+        self.in_flight = true;
+        self.finish_wait()?;
+        let host_ns = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+        let mut timings = Vec::with_capacity(batch.records as usize);
+        if let Some(query_pool) = self.query_pool {
+            let mut raw = vec![0u64; 2 * batch.records as usize];
+            if !raw.is_empty() {
+                // SAFETY: every recorded pair belongs to the submission that
+                // just completed; `raw` has exactly two slots per record.
+                match unsafe {
+                    self.device.ash().get_query_pool_results(
+                        query_pool,
+                        0,
+                        &mut raw,
+                        vk::QueryResultFlags::TYPE_64,
+                    )
+                } {
+                    Ok(()) => {
+                        for pair in raw.chunks_exact(2) {
+                            timings.push(Some((pair[0], pair[1])));
+                        }
+                    }
+                    Err(code) => {
+                        if self.device.instance().validation() {
+                            eprintln!("[fn3vk][warn] reading batch timestamps failed: {code:?}");
+                        }
+                        timings.resize(batch.records as usize, None);
+                    }
+                }
+            }
+        } else {
+            timings.resize(batch.records as usize, None);
+        }
+        // The batch's device span is the span of its per-op timestamps: the
+        // first op starts and the last op ends, so no separate pair is needed.
+        let gpu_ns = {
+            let first = timings.iter().flatten().map(|(start, _)| *start).min();
+            let last = timings.iter().flatten().map(|(_, end)| *end).max();
+            match (first, last) {
+                (Some(start), Some(end)) if end >= start => Some(
+                    ((end - start) as f64 * f64::from(self.device.limits().timestamp_period))
+                        .max(0.0)
+                        .round()
+                        .min(u64::MAX as f64) as u64,
+                ),
+                _ => None,
+            }
+        };
+        // The retained staging blocks are safe to reuse only now.
+        drop(batch.retained);
+        Ok(BatchReport {
+            submissions: 1,
+            host_ns,
+            gpu_ns,
+            timings,
+            dispatches: batch.dispatches,
+            copies: batch.copies,
+            copied_bytes: batch.copied_bytes,
         })
     }
 
     /// Record one submission. The closure may copy, barrier and dispatch;
     /// the batch is submitted when it returns.
+    ///
+    /// While a step batch is open the closure appends to the batch's command
+    /// buffer and the returned token is *deferred*: [`Submission::wait`]
+    /// reports what was recorded without waiting, and the microseconds a
+    /// per-op fence wait costs disappear. A deferred recording must not read a
+    /// staging buffer back — [`Submission::wait`] on one returns
+    /// `submissions: 0` and the caller's host read would observe stale bytes,
+    /// so the kernels reject a host output while batching.
     pub fn record<F>(&mut self, record: F) -> Result<Submission<'_>>
     where
         F: FnOnce(&mut Recorder) -> Result<()>,
     {
+        if self.batch.is_some() {
+            return self.record_batched(record);
+        }
         if self.in_flight {
             return Err(Error::internal(
                 "Submitter::record called while its previous submission is in flight; \
@@ -356,13 +581,81 @@ impl Submitter {
         let serial = self.serial;
 
         Ok(Submission {
-            submitter: self,
+            submitter: Some(self),
             serial,
             started: Instant::now(),
             dispatches: recorder.dispatches,
             copies: recorder.copies,
             copied_bytes: recorder.copied_bytes,
             waited: false,
+            batch: None,
+            batch_query: None,
+        })
+    }
+
+    /// Append one recording to the open batch.
+    fn record_batched<F>(&mut self, record: F) -> Result<Submission<'_>>
+    where
+        F: FnOnce(&mut Recorder) -> Result<()>,
+    {
+        let query_pool = self.query_pool;
+        let (index, id) = {
+            let batch = self.batch.as_ref().expect("checked by the caller");
+            if batch.records >= BATCH_QUERY_PAIRS {
+                return Err(Error::internal(format!(
+                    "one step batch may record at most {BATCH_QUERY_PAIRS} dispatches; split the \
+                     plan"
+                )));
+            }
+            (batch.records, batch.id)
+        };
+        if let Some(query_pool) = query_pool {
+            // SAFETY: the index pair is inside the pool and unused in this
+            // batch, and the command buffer is recording.
+            unsafe {
+                self.device.ash().cmd_write_timestamp(
+                    self.cmd,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    query_pool,
+                    2 * index,
+                );
+            }
+        }
+        let mut recorder = Recorder {
+            device: Arc::clone(&self.device),
+            cmd: self.cmd,
+            descriptor_pool: self.descriptor_pool,
+            dispatches: 0,
+            copies: 0,
+            copied_bytes: 0,
+        };
+        record(&mut recorder)?;
+        if let Some(query_pool) = query_pool {
+            // SAFETY: same buffer, still recording; the pair is unused.
+            unsafe {
+                self.device.ash().cmd_write_timestamp(
+                    self.cmd,
+                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                    query_pool,
+                    2 * index + 1,
+                );
+            }
+        }
+        let batch = self.batch.as_mut().expect("checked above");
+        batch.records += 1;
+        batch.dispatches += recorder.dispatches;
+        batch.copies += recorder.copies;
+        batch.copied_bytes += recorder.copied_bytes;
+        Ok(Submission {
+            submitter: None,
+            serial: 0,
+            started: Instant::now(),
+            dispatches: recorder.dispatches,
+            copies: recorder.copies,
+            copied_bytes: recorder.copied_bytes,
+            waited: false,
+            batch: Some(id),
+            batch_query: Some(index),
         })
     }
 
@@ -461,13 +754,16 @@ impl std::fmt::Debug for Submitter {
 /// reused until [`Submission::wait`] returns (or the token is dropped, which
 /// waits).
 pub struct Submission<'a> {
-    submitter: &'a mut Submitter,
+    /// `None` for a deferred (batched) recording: nothing was submitted.
+    submitter: Option<&'a mut Submitter>,
     serial: u64,
     started: Instant,
     dispatches: u32,
     copies: u32,
     copied_bytes: u64,
     waited: bool,
+    batch: Option<u64>,
+    batch_query: Option<u32>,
 }
 
 impl<'a> Submission<'a> {
@@ -477,12 +773,31 @@ impl<'a> Submission<'a> {
     }
 
     /// Wait for the fence and read device timestamps.
+    ///
+    /// A deferred (batched) recording submits nothing: the batch's single
+    /// fence is waited on by `end_step`, and this call reports what was
+    /// recorded without waiting.
     pub fn wait(mut self) -> Result<SubmitReport> {
-        let timestamps = self.submitter.finish_wait()?;
+        let Some(submitter) = self.submitter.as_deref_mut() else {
+            self.waited = true;
+            return Ok(SubmitReport {
+                serial: 0,
+                host_ns: 0,
+                gpu_ns: None,
+                timestamps: None,
+                submissions: 0,
+                dispatches: self.dispatches,
+                copies: self.copies,
+                copied_bytes: self.copied_bytes,
+                batch: self.batch,
+                batch_query: self.batch_query,
+            });
+        };
+        let timestamps = submitter.finish_wait()?;
         let host_ns = self.started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
         let gpu_ns = timestamps.map(|(start, end)| {
             let ticks = end.saturating_sub(start) as f64;
-            let nanoseconds = ticks * f64::from(self.submitter.device.limits().timestamp_period);
+            let nanoseconds = ticks * f64::from(submitter.device.limits().timestamp_period);
             nanoseconds.max(0.0).round().min(u64::MAX as f64) as u64
         });
         self.waited = true;
@@ -495,6 +810,8 @@ impl<'a> Submission<'a> {
             dispatches: self.dispatches,
             copies: self.copies,
             copied_bytes: self.copied_bytes,
+            batch: None,
+            batch_query: None,
         })
     }
 }
@@ -504,10 +821,15 @@ impl Drop for Submission<'_> {
         if self.waited {
             return;
         }
+        // A deferred recording submitted nothing, so there is nothing to wait
+        // for; the batch owns the fence.
+        let Some(submitter) = self.submitter.as_deref_mut() else {
+            return;
+        };
         // A token dropped without an explicit wait must still complete before
         // the submitter can be reused. Errors are reported but cannot change
         // the outcome of the already-submitted work.
-        if let Err(error) = self.submitter.finish_wait() {
+        if let Err(error) = submitter.finish_wait() {
             eprintln!(
                 "[fn3vk][warn] implicit wait for submission {} failed: {error}",
                 self.serial

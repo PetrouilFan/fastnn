@@ -68,6 +68,26 @@
 //! [`TensorView::to_contiguous`] return an owned contiguous tensor whose bytes
 //! are the logical row-major order of the view; they never reinterpret a
 //! strided window as if it were contiguous.
+//!
+//! # Device-resident tensors (FN3-26 / #72)
+//!
+//! A tensor whose [`Storage`] is device-resident
+//! ([`crate::fn3::storage::Storage::from_resident`]) carries its authoritative
+//! bytes in device memory. It is the same tensor to the planner and the
+//! kernels — same [`TensorMeta`], same strides, same device — but it has no
+//! host bytes:
+//!
+//! - host byte accessors ([`Tensor::as_f32_slice`], [`TensorView::as_slice`],
+//!   [`TensorMut::as_mut_slice`], …) return [`Fn3Error::NotImplemented`] and
+//!   name the remedy instead of returning empty or stale bytes;
+//! - [`Tensor::to_host`] downloads the allocation explicitly and returns a
+//!   host tensor with identical metadata;
+//! - a device kernel writes a resident output through
+//!   [`Tensor::as_mut_view`], which is still an exclusive-borrow operation:
+//!   the storage must be uniquely owned.
+//!
+//! CPU tensors are never resident, so the CPU backend's semantics are
+//! unaffected: every code path it takes is the host path above.
 
 use std::fmt;
 
@@ -509,17 +529,60 @@ impl<'a> TensorView<'a> {
         self.meta.is_contiguous()
     }
 
+    /// The shared storage the view addresses.
+    ///
+    /// The whole allocation, not just the view's window; pair it with
+    /// [`TensorMeta::offset`] and the strides.
+    pub fn storage(&self) -> &'a Storage {
+        self.storage
+    }
+
     /// The whole underlying storage as bytes.
     ///
     /// Kernels use this together with [`TensorMeta::offset`] and the strides;
-    /// it is deliberately *not* restricted to the view's window.
+    /// it is deliberately *not* restricted to the view's window. A
+    /// device-resident view has no host bytes: use [`TensorView::host_bytes`],
+    /// which rejects it, or [`TensorView::to_host`].
     pub fn storage_bytes(&self) -> &'a [u8] {
         self.storage.as_bytes()
+    }
+
+    /// The whole underlying storage as bytes, rejecting device-resident
+    /// storage.
+    pub fn host_bytes(&self) -> Result<&'a [u8], Fn3Error> {
+        self.storage.host_bytes()
+    }
+
+    /// `true` when the view's bytes live in device memory.
+    pub fn is_device_resident(&self) -> bool {
+        self.storage.is_resident()
     }
 
     /// The whole underlying storage as elements of `T`.
     pub fn storage_slice<T: Pod>(&self) -> Result<&'a [T], Fn3Error> {
         self.storage.as_slice()
+    }
+
+    /// Download this view's bytes and return an owned host tensor.
+    ///
+    /// A host view returns a cheap storage-sharing clone; a device-resident
+    /// view is copied device → host through
+    /// [`Storage::download`](crate::fn3::storage::Storage::download), so the
+    /// result is a snapshot, never a stale alias.
+    pub fn to_host(&self) -> Result<Tensor, Fn3Error> {
+        if !self.storage.is_resident() {
+            return Tensor::from_storage(self.storage.clone(), self.meta.clone());
+        }
+        let bytes = self.materialised_bytes()?;
+        Tensor::from_storage(Storage::from_bytes(&bytes)?, self.meta.clone())
+    }
+
+    /// The whole resident allocation as host bytes, or an error for a host
+    /// allocation (which is already host-readable).
+    fn materialised_bytes(&self) -> Result<Vec<u8>, Fn3Error> {
+        let mut bytes = vec![0u8; self.storage.len()];
+        self.storage.download(&mut bytes)?;
+        Ok(bytes)
     }
 
     /// The view's window as elements of `T`.
@@ -551,6 +614,9 @@ impl<'a> TensorView<'a> {
     }
 
     fn contiguous_window<T: Pod>(&self, context: &'static str) -> Result<&'a [T], Fn3Error> {
+        if self.storage.is_resident() {
+            return Err(device_resident_read(context));
+        }
         if std::mem::size_of::<T>() != self.meta.dtype.size_bytes() {
             return Err(Fn3Error::StorageCast {
                 element: std::any::type_name::<T>(),
@@ -594,16 +660,27 @@ impl<'a> TensorView<'a> {
     ///
     /// A contiguous view shares its storage (no copy). A strided view is copied
     /// element by element in row-major logical order into a fresh allocation.
-    /// An empty view produces an empty tensor with no allocation.
+    /// An empty view produces an empty tensor with no allocation. A
+    /// device-resident view is downloaded first.
     pub fn to_contiguous(&self) -> Result<Tensor, Fn3Error> {
-        materialise_contiguous(self.storage, &self.meta)
+        let host = self.to_host()?;
+        materialise_contiguous(host.storage(), host.meta())
     }
+}
+
+/// Which allocation a writable view addresses.
+#[derive(Debug)]
+enum TensorMutBacking<'a> {
+    /// An exclusively borrowed host buffer.
+    Host(&'a mut AlignedBuffer),
+    /// A device-resident storage, written by a device kernel.
+    Device(&'a Storage),
 }
 
 /// A writable, exclusively borrowed view of a tensor.
 #[derive(Debug)]
 pub struct TensorMut<'a> {
-    buffer: &'a mut AlignedBuffer,
+    backing: TensorMutBacking<'a>,
     meta: TensorMeta,
 }
 
@@ -627,7 +704,52 @@ impl<'a> TensorMut<'a> {
                 len: buffer.len() as u64,
             });
         }
-        Ok(TensorMut { buffer, meta })
+        Ok(TensorMut {
+            backing: TensorMutBacking::Host(buffer),
+            meta,
+        })
+    }
+
+    /// Bind `meta` to an exclusively borrowed device-resident storage.
+    ///
+    /// The exclusivity rule is the same as for host storage: the caller must
+    /// hold the only handle ([`Storage::is_exclusive`]), which is what
+    /// [`Tensor::as_mut_view`] checks. A device kernel writes the buffer; no
+    /// host bytes are involved.
+    pub fn resident(storage: &'a Storage, meta: TensorMeta) -> Result<TensorMut<'a>, Fn3Error> {
+        if !meta.is_writable() {
+            return Err(Fn3Error::InvalidShape {
+                context: "TensorMut::resident",
+                detail: format!("broadcast view {meta} is read-only"),
+            });
+        }
+        if !storage.is_resident() {
+            return Err(Fn3Error::InvalidShape {
+                context: "TensorMut::resident",
+                detail: format!(
+                    "the storage for {meta} is host memory; bind it with TensorMut::new and an \
+                     exclusively borrowed buffer"
+                ),
+            });
+        }
+        if !storage.is_exclusive() {
+            return Err(Fn3Error::StorageShared {
+                bytes: storage.len(),
+                handles: storage.handle_count(),
+            });
+        }
+        let required = meta.required_bytes()?;
+        if required > storage.len() {
+            return Err(Fn3Error::OutOfBounds {
+                what: "TensorMut::resident (storage bytes)",
+                index: required as u64,
+                len: storage.len() as u64,
+            });
+        }
+        Ok(TensorMut {
+            backing: TensorMutBacking::Device(storage),
+            meta,
+        })
     }
 
     /// Metadata of the view.
@@ -665,14 +787,54 @@ impl<'a> TensorMut<'a> {
         self.meta.is_contiguous()
     }
 
+    /// `true` when this output lives in device memory.
+    pub fn is_device_resident(&self) -> bool {
+        matches!(self.backing, TensorMutBacking::Device(_))
+    }
+
+    /// The device-resident storage this output writes, when it is resident.
+    pub fn resident_storage(&self) -> Option<&'a Storage> {
+        match &self.backing {
+            TensorMutBacking::Device(storage) => Some(storage),
+            TensorMutBacking::Host(_) => None,
+        }
+    }
+
     /// The whole underlying buffer as bytes.
+    ///
+    /// Empty for a device-resident output; [`TensorMut::host_bytes`] rejects
+    /// that case explicitly.
     pub fn storage_bytes(&self) -> &[u8] {
-        self.buffer.as_bytes()
+        match &self.backing {
+            TensorMutBacking::Host(buffer) => buffer.as_bytes(),
+            TensorMutBacking::Device(_) => &[],
+        }
+    }
+
+    /// The whole underlying buffer as mutable bytes, rejecting a resident output.
+    pub fn host_bytes_mut(&mut self) -> Result<&mut [u8], Fn3Error> {
+        match &mut self.backing {
+            TensorMutBacking::Host(buffer) => Ok(buffer.as_bytes_mut()),
+            TensorMutBacking::Device(_) => Err(device_resident_write("TensorMut::host_bytes_mut")),
+        }
+    }
+
+    /// The whole underlying buffer as bytes, rejecting a resident output.
+    pub fn host_bytes(&self) -> Result<&[u8], Fn3Error> {
+        match &self.backing {
+            TensorMutBacking::Host(buffer) => Ok(buffer.as_bytes()),
+            TensorMutBacking::Device(_) => Err(device_resident_write("TensorMut::host_bytes")),
+        }
     }
 
     /// The whole underlying buffer as mutable elements of `T`.
     pub fn storage_slice_mut<T: Pod>(&mut self) -> Result<&mut [T], Fn3Error> {
-        self.buffer.as_mut_slice::<T>()
+        match &mut self.backing {
+            TensorMutBacking::Host(buffer) => buffer.as_mut_slice::<T>(),
+            TensorMutBacking::Device(_) => {
+                Err(device_resident_write("TensorMut::storage_slice_mut"))
+            }
+        }
     }
 
     /// The view's window as elements of `T` (contiguous views only).
@@ -711,16 +873,21 @@ impl<'a> TensorMut<'a> {
                 axis: None,
                 detail: format!("window end {start} + {len} exceeds usize::MAX"),
             })?;
-        let byte_len = self.buffer.len();
-        let bytes =
-            self.buffer
-                .as_bytes_mut()
-                .get_mut(start..end)
-                .ok_or(Fn3Error::OutOfBounds {
-                    what: "TensorMut::as_mut_slice (storage bytes)",
-                    index: end as u64,
-                    len: byte_len as u64,
-                })?;
+        let buffer = match &mut self.backing {
+            TensorMutBacking::Host(buffer) => buffer,
+            TensorMutBacking::Device(_) => {
+                return Err(device_resident_write("TensorMut::as_mut_slice"))
+            }
+        };
+        let byte_len = buffer.len();
+        let bytes = buffer
+            .as_bytes_mut()
+            .get_mut(start..end)
+            .ok_or(Fn3Error::OutOfBounds {
+                what: "TensorMut::as_mut_slice (storage bytes)",
+                index: end as u64,
+                len: byte_len as u64,
+            })?;
         bytemuck::try_cast_slice_mut(bytes).map_err(|error| Fn3Error::StorageCast {
             element,
             byte_len: len,
@@ -753,15 +920,19 @@ impl<'a> TensorMut<'a> {
                 axis: None,
                 detail: format!("window end {start} + {len} exceeds usize::MAX"),
             })?;
-        let bytes =
-            self.buffer
-                .as_bytes()
-                .get(start..end)
-                .ok_or_else(|| Fn3Error::OutOfBounds {
-                    what: "TensorMut contiguous window (storage bytes)",
-                    index: end as u64,
-                    len: self.buffer.len() as u64,
-                })?;
+        let bytes = match &self.backing {
+            TensorMutBacking::Host(buffer) => {
+                buffer
+                    .as_bytes()
+                    .get(start..end)
+                    .ok_or_else(|| Fn3Error::OutOfBounds {
+                        what: "TensorMut contiguous window (storage bytes)",
+                        index: end as u64,
+                        len: buffer.len() as u64,
+                    })?
+            }
+            TensorMutBacking::Device(_) => return Err(device_resident_write(context)),
+        };
         bytemuck::try_cast_slice(bytes).map_err(|error| Fn3Error::StorageCast {
             element: std::any::type_name::<T>(),
             byte_len: bytes.len(),
@@ -800,10 +971,11 @@ impl Tensor {
     /// Wrap existing storage with validated metadata.
     ///
     /// The caller is responsible for the storage being valid on
-    /// `meta.device()`. Alpha tensor storage is host `AlignedBuffer` on every
-    /// device, so a Vulkan-tagged tensor describes host-staged memory; the
-    /// Vulkan backend uploads it per dispatch (FN3-11 / #57) until
-    /// device-resident storage lands with FN3-12 (#58).
+    /// `meta.device()`. Host `AlignedBuffer` storage tagged for a Vulkan device
+    /// is the staged path: the backend uploads it per dispatch, which is why
+    /// `FN3_VK_STAGED=1` still produces it. Device-resident storage
+    /// ([`crate::fn3::storage::Storage::from_resident`]) is the resident path
+    /// and is written by kernels in place (FN3-26 / #72).
     ///
     /// The storage must provide every byte this metadata addresses:
     /// `meta.required_bytes() <= storage.len()`. The offset itself is checked
@@ -818,6 +990,33 @@ impl Tensor {
             });
         }
         Ok(Tensor { meta, storage })
+    }
+
+    /// `true` when this tensor's bytes live in device memory.
+    ///
+    /// A resident tensor has no host bytes; read it with [`Tensor::to_host`].
+    pub fn is_device_resident(&self) -> bool {
+        self.storage.is_resident()
+    }
+
+    /// The device handle when this tensor is resident.
+    pub fn residency(&self) -> Option<&std::sync::Arc<dyn crate::fn3::storage::DeviceResidency>> {
+        self.storage.residency()
+    }
+
+    /// The tensor as host bytes, downloading first when it is resident.
+    ///
+    /// A host tensor returns a cheap storage-sharing clone (no copy). A
+    /// device-resident tensor is copied device → host once and returned as a
+    /// fresh host tensor with identical metadata, so the snapshot is never a
+    /// stale alias of device state.
+    pub fn to_host(&self) -> Result<Tensor, Fn3Error> {
+        if !self.storage.is_resident() {
+            return Tensor::from_storage(self.storage.clone(), self.meta.clone());
+        }
+        let mut bytes = vec![0u8; self.storage.len()];
+        self.storage.download(&mut bytes)?;
+        Tensor::from_storage(Storage::from_bytes(&bytes)?, self.meta.clone())
     }
 
     /// An owned contiguous tensor at `window`'s byte offset.
@@ -953,8 +1152,15 @@ impl Tensor {
     /// Fails with [`Fn3Error::StorageShared`] while any other handle to the
     /// storage is alive (for example a live [`TensorView`] or a weight shared
     /// with a `PreparedModel`).
+    ///
+    /// A device-resident tensor yields a resident [`TensorMut`]: the same
+    /// exclusivity rule, and the write happens on the device rather than
+    /// through host bytes.
     pub fn as_mut_view(&mut self) -> Result<TensorMut<'_>, Fn3Error> {
         let meta = self.meta.clone();
+        if self.storage.is_resident() {
+            return TensorMut::resident(&self.storage, meta);
+        }
         let buffer = self.storage.try_make_mut()?;
         TensorMut::new(buffer, meta)
     }
@@ -987,9 +1193,45 @@ impl Tensor {
     ///
     /// A contiguous tensor returns a cheap storage-sharing clone. A strided
     /// tensor is copied element by element in row-major order. An empty tensor
-    /// produces an empty tensor with no allocation.
+    /// produces an empty tensor with no allocation. A device-resident tensor is
+    /// downloaded first.
     pub fn to_contiguous(&self) -> Result<Tensor, Fn3Error> {
-        materialise_contiguous(&self.storage, &self.meta)
+        let host = self.to_host()?;
+        materialise_contiguous(host.storage(), host.meta())
+    }
+}
+
+/// The typed error for reading a device-resident allocation on the host.
+fn device_resident_read(context: &'static str) -> Fn3Error {
+    Fn3Error::NotImplemented {
+        what: match context {
+            "TensorView::as_slice" => {
+                "reading a device-resident tensor through the host slice API; download it with \
+                 Tensor::to_host"
+            }
+            _ => {
+                "reading a device-resident tensor through the host byte API; download it with \
+                 Tensor::to_host"
+            }
+        },
+        owner: "FN3-26 (#72)",
+    }
+}
+
+/// The typed error for writing a device-resident allocation on the host.
+fn device_resident_write(context: &'static str) -> Fn3Error {
+    Fn3Error::NotImplemented {
+        what: match context {
+            "TensorMut::as_mut_slice" | "TensorMut::storage_slice_mut" => {
+                "writing a device-resident tensor through the host slice API; its kernels write \
+                 it on the device"
+            }
+            _ => {
+                "writing a device-resident tensor through the host byte API; its kernels write \
+                 it on the device"
+            }
+        },
+        owner: "FN3-26 (#72)",
     }
 }
 
@@ -1006,6 +1248,9 @@ fn materialise_contiguous(storage: &Storage, meta: &TensorMeta) -> Result<Tensor
     }
     if meta.is_contiguous() {
         return Tensor::from_storage(storage.clone(), meta.clone());
+    }
+    if storage.is_resident() {
+        return Err(device_resident_read("materialise_contiguous"));
     }
 
     let element_bytes = meta.dtype().size_bytes();
@@ -1186,6 +1431,88 @@ mod tests {
             view.as_f32_slice(),
             Err(Fn3Error::NonContiguous { .. })
         ));
+    }
+
+    #[derive(Debug)]
+    struct FakeResident {
+        bytes: Vec<u8>,
+    }
+
+    impl crate::fn3::storage::DeviceResidency for FakeResident {
+        fn backend(&self) -> &'static str {
+            "fake"
+        }
+
+        fn bytes(&self) -> usize {
+            self.bytes.len()
+        }
+
+        fn describe(&self) -> String {
+            format!("{} fake bytes", self.bytes.len())
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn download(&self, offset: usize, dst: &mut [u8]) -> Result<(), Fn3Error> {
+            dst.copy_from_slice(&self.bytes[offset..offset + dst.len()]);
+            Ok(())
+        }
+    }
+
+    fn resident_tensor(values: &[f32]) -> Tensor {
+        let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let len = bytes.len();
+        let meta = TensorMeta::contiguous(
+            Shape::from_dims([values.len() as u64]),
+            DType::F32,
+            DeviceId::Vulkan(crate::fn3::device::PhysicalDeviceId::new(0)),
+        )
+        .unwrap();
+        let storage =
+            Storage::from_resident(len, std::sync::Arc::new(FakeResident { bytes })).unwrap();
+        Tensor::from_storage(storage, meta).unwrap()
+    }
+
+    #[test]
+    fn a_resident_tensor_is_unreadable_on_the_host_and_downloads_explicitly() {
+        let tensor = resident_tensor(&[1.0, 2.0, 3.0]);
+        assert!(tensor.is_device_resident());
+        assert_eq!(tensor.numel(), Ok(3));
+        let error = tensor.as_f32_slice().unwrap_err();
+        assert!(matches!(error, Fn3Error::NotImplemented { .. }), "{error}");
+        assert!(tensor.storage().as_bytes().is_empty());
+
+        let host = tensor.to_host().unwrap();
+        assert!(!host.is_device_resident());
+        assert_eq!(host.as_f32_slice().unwrap(), &[1.0, 2.0, 3.0]);
+        assert_eq!(host.device(), tensor.device());
+        assert_eq!(host.shape(), tensor.shape());
+
+        // A host tensor's `to_host` is a cheap sharing clone.
+        let again = host.to_host().unwrap();
+        assert!(again.storage().ptr_eq(host.storage()));
+    }
+
+    #[test]
+    fn a_resident_output_view_is_writable_only_in_exclusivity_and_on_the_device() {
+        let mut tensor = resident_tensor(&[1.0, 2.0]);
+        {
+            let mut view = tensor.as_mut_view().unwrap();
+            assert!(view.is_device_resident());
+            assert!(matches!(
+                view.as_mut_slice::<f32>(),
+                Err(Fn3Error::NotImplemented { .. })
+            ));
+            assert!(view.storage_slice_mut::<u8>().is_err());
+            assert!(view.host_bytes().is_err());
+        }
+        let shared = tensor.clone();
+        let error = tensor.as_mut_view().unwrap_err();
+        assert!(matches!(error, Fn3Error::StorageShared { .. }), "{error}");
+        drop(shared);
+        tensor.as_mut_view().unwrap();
     }
 
     #[test]

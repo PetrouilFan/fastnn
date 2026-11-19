@@ -54,10 +54,11 @@
 //!   deliberately ships one path only, so there is no second implementation to
 //!   drift.
 
-use super::super::context::{BindingArg, BindingRole, BufferDesc, KernelInvocation};
+use super::super::context::BindingRole;
 use super::super::error::{Error as VulkanError, Result as VulkanResult};
-use super::super::residency::ExecutionRecord;
 use super::super::VulkanBackend;
+use super::io::{self};
+use super::pointwise::Job;
 use super::{BindingSpec, GridInput, KernelSet, KernelSpec, OpKernel};
 use crate::fn3::backend::vulkan::VULKAN_BACKEND_NAME;
 use crate::fn3::backend::{check_arity, Backend, CapabilityFeatures, OpParams, Support};
@@ -66,6 +67,9 @@ use crate::fn3::error::{Fn3Error, Fn3Result};
 use crate::fn3::ops::OpId;
 use crate::fn3::shape::Shape;
 use crate::fn3::tensor::{TensorMut, TensorView};
+
+/// Owning issue named in this family's rejection messages.
+const KERNEL_OWNER: &str = "FN3-14 (#60)";
 
 /// Side of one output tile: a workgroup computes a `TILE x TILE` square.
 pub const TILE: u32 = 16;
@@ -402,125 +406,38 @@ pub fn launch_matmul(
         }
     }
 
-    // A zero-element operand (K == 0) has no bytes to upload, but a descriptor
-    // still needs a non-empty range, so it binds a scratch element the shader
+    // ---- operand sources: resident buffers bind in place --------------------
+    //
+    // A weight operand is device-resident after `prepare_persistent` (FN3-26),
+    // so the 28 MB of projections is not re-uploaded per step; a host operand
+    // follows the alpha's staged path through the shared `Job` executor, which
+    // also records the residency evidence. A zero-element operand (K == 0) has
+    // no bytes to upload, and `Job` binds a scratch-sized buffer the shader
     // never reads: the k loop does not execute and every output is +0.0.
-    let lhs_buffer =
-        backend.alloc_buffer(&BufferDesc::device_storage(lhs_bytes.max(4), "matmul.lhs"))?;
-    let rhs_buffer =
-        backend.alloc_buffer(&BufferDesc::device_storage(rhs_bytes.max(4), "matmul.rhs"))?;
-    let out_buffer =
-        backend.alloc_buffer(&BufferDesc::device_storage(out_bytes.max(4), "matmul.out"))?;
-
-    let staging = backend.staging();
-    let lhs_staging = staging.acquire(lhs_bytes.max(4)).map_err(|e| e.to_fn3())?;
-    let rhs_staging = staging.acquire(rhs_bytes.max(4)).map_err(|e| e.to_fn3())?;
-    let readback = staging.acquire(out_bytes).map_err(|e| e.to_fn3())?;
-    if lhs_bytes > 0 {
-        lhs_staging
-            .write(operand_window_bytes(
-                "lhs",
-                lhs,
-                lhs_layout.window_elements,
-            )?)
-            .map_err(|e| e.to_fn3())?;
-    }
-    if rhs_bytes > 0 {
-        rhs_staging
-            .write(operand_window_bytes(
-                "rhs",
-                rhs,
-                rhs_layout.window_elements,
-            )?)
-            .map_err(|e| e.to_fn3())?;
-    }
-
-    let bindings = [
-        BindingArg::whole(0, BindingRole::Input, &lhs_buffer),
-        BindingArg::whole(1, BindingRole::Input, &rhs_buffer),
-        BindingArg::whole(2, BindingRole::Output, &out_buffer),
-    ];
-
-    let mut submitter = backend.checkout_submitter()?;
-    let mut dispatch = None;
-    let submission = {
-        let lhs_staging_buffer = lhs_staging.buffer();
-        let rhs_staging_buffer = rhs_staging.buffer();
-        let readback_buffer = readback.buffer();
-        submitter
-            .record(|recorder| {
-                if lhs_bytes > 0 {
-                    recorder.copy_buffer(lhs_staging_buffer, 0, &lhs_buffer, 0, lhs_bytes)?;
-                }
-                if rhs_bytes > 0 {
-                    recorder.copy_buffer(rhs_staging_buffer, 0, &rhs_buffer, 0, rhs_bytes)?;
-                }
-                for buffer in [&lhs_buffer, &rhs_buffer] {
-                    recorder.barrier(
-                        buffer,
-                        ash::vk::PipelineStageFlags::TRANSFER,
-                        ash::vk::PipelineStageFlags::COMPUTE_SHADER,
-                        ash::vk::AccessFlags::TRANSFER_WRITE,
-                        ash::vk::AccessFlags::SHADER_READ,
-                    );
-                }
-                let info = recorder.dispatch(&KernelInvocation {
-                    kernel: &kernel,
-                    bindings: &bindings,
-                    push_constants: push_bytes,
-                    workgroups,
-                })?;
-                recorder.barrier(
-                    &out_buffer,
-                    ash::vk::PipelineStageFlags::COMPUTE_SHADER,
-                    ash::vk::PipelineStageFlags::TRANSFER,
-                    ash::vk::AccessFlags::SHADER_WRITE,
-                    ash::vk::AccessFlags::TRANSFER_READ,
-                );
-                recorder.copy_buffer(&out_buffer, 0, readback_buffer, 0, out_bytes)?;
-                dispatch = Some(info);
-                Ok(())
-            })
-            .map_err(|error| error.to_fn3())?
-    };
-    let report = submission.wait().map_err(|error| error.to_fn3())?;
-    drop(submitter);
-
-    let mut output_bytes = vec![0u8; out_bytes as usize];
-    readback
-        .read_into(&mut output_bytes)
-        .map_err(|error| error.to_fn3())?;
-    {
-        let out_slice = out.as_mut_slice::<f32>()?;
-        let out_slice_bytes = bytemuck::cast_slice_mut::<f32, u8>(out_slice);
-        if out_slice_bytes.len() != output_bytes.len() {
-            return Err(Fn3Error::CapacityExceeded {
-                what: "vulkan matmul output copy",
-                requested: output_bytes.len() as u64,
-                capacity: out_slice_bytes.len() as u64,
-            });
-        }
-        out_slice_bytes.copy_from_slice(&output_bytes);
-    }
-
-    let dispatch = dispatch.ok_or_else(|| Fn3Error::InvalidShape {
-        context: "vulkan matmul",
-        detail: "the recorder produced no dispatch information".to_string(),
-    })?;
-    let mut record = ExecutionRecord::new(0, OpId::MatMul, MATMUL_TILED.name, backend.device_id());
-    record.submissions = report.submissions;
-    record.workgroups = dispatch.workgroups;
-    record.bindings = dispatch.bindings;
-    record.upload_bytes = lhs_bytes + rhs_bytes;
-    record.readback_bytes = out_bytes;
-    record.inputs_read_back = false;
-    record.host_staged = true;
-    record.device_local_bytes = lhs_buffer.size() + rhs_buffer.size() + out_buffer.size();
-    record.host_ns = report.host_ns;
-    record.gpu_ns = report.gpu_ns;
-    record.gpu_ticks = report.timestamps;
-    backend.record_execution(record);
-
+    let lhs_operand = operand_source(backend, "matmul.lhs", lhs, lhs_layout.window_elements)?;
+    let rhs_operand = operand_source(backend, "matmul.rhs", rhs, rhs_layout.window_elements)?;
+    let out_operand = io::output(
+        KERNEL_OWNER,
+        backend,
+        OpId::MatMul,
+        "matmul.out",
+        out,
+        DType::F32,
+    )?;
+    let mut job = Job::new(backend, OpId::MatMul, &MATMUL_TILED)?;
+    let lhs_index = job.input_operand("matmul.lhs", &lhs_operand)?;
+    let rhs_index = job.input_operand("matmul.rhs", &rhs_operand)?;
+    let out_index = job.output_operand("matmul.out", out_operand)?;
+    job.step(
+        push_bytes.to_vec(),
+        workgroups,
+        vec![
+            (0, lhs_index, BindingRole::Input),
+            (1, rhs_index, BindingRole::Input),
+            (2, out_index, BindingRole::Output),
+        ],
+    );
+    job.run()?;
     Ok(())
 }
 
@@ -646,6 +563,28 @@ fn operand_layout(
         inner_stride,
         batch_strides,
     })
+}
+
+/// Resolve one read-only matrix operand.
+///
+/// `MatMul` is the one kernel whose documented contract accepts strided and
+/// broadcast read-only operands (the shader walks explicit strides), so this
+/// resolver is deliberately *not* [`io::input`]: a whole contiguous buffer is
+/// bound resident, and anything else keeps the alpha's addressed-window upload.
+fn operand_source<'a>(
+    backend: &VulkanBackend,
+    name: &'static str,
+    view: &TensorView<'a>,
+    window_elements: u64,
+) -> Fn3Result<io::Operand<'a>> {
+    if view.is_contiguous() && view.meta().offset() == 0 {
+        if let Some(buffer) = backend.resident_input(view)? {
+            return Ok(io::Operand::Resident { buffer });
+        }
+    }
+    let bytes = operand_window_bytes(name, view, window_elements)?;
+    backend.check_staged_input(Some(view), bytes.len() as u64)?;
+    Ok(io::Operand::Host { bytes })
 }
 
 /// The addressed window of `view` as little-endian `f32` bytes.

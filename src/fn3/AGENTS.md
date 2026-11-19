@@ -13,6 +13,8 @@ authority is `docs/roadmap/fn3-architecture.md`.
 - `backend/mod.rs`: `Backend`, `Capabilities`, `Support`, `OpParams`.
 - `backend/cpu/`: the portable reference backend.
 - `backend/vulkan/`: the Vulkan platform and kernel families.
+  `resident.rs` owns device-resident tensors, the persistent-tensor table and
+  the residency counters (FN3-26 / #72).
 - `import/`: strict ONNX reader and graph construction.
 - `model/mod.rs`: `ExecutionPlan`, `ModelWeights`, `PreparedModel`.
 - `model/kv.rs`: `KvCacheConfig`, `KvCacheLayout`, `KvCacheState` — bounded
@@ -52,8 +54,27 @@ authority is `docs/roadmap/fn3-architecture.md`.
   changes neither the KV live extent nor the step counter.
 - A `Session` executes every instruction through the one backend it was opened
   with; a backend whose device differs from the model's is rejected before any
-  work. KV buffers and value slots for a Vulkan device are host-staged
-  (`host_staged = true`); that is not a CPU compute path.
+  work. Value slots and the KV cache are device-resident when the backend can
+  allocate there (`SessionOptions::default()`, `host_staged = false` for a
+  fully resident op) and host-staged otherwise (`SessionOptions::staged()` or
+  `FN3_VK_STAGED=1`, `host_staged = true`). Neither is a CPU compute path.
+- A `Storage` is either host-backed or device-resident
+  (`Storage::from_resident`). A resident storage has **no host bytes**: every
+  host byte accessor returns `Fn3Error::NotImplemented` and
+  `Tensor::to_host`/`Storage::download` is the only materialisation path, so
+  stale bytes cannot be observed. CPU tensors are never resident.
+- A resident step is **one submission**: `begin_step(label, batch)` opens one
+  command buffer, every instruction records into it, and `end_step` submits and
+  waits once. Inside that buffer the driver infers no inter-dispatch ordering,
+  so each kernel records an explicit compute→compute barrier over its bindings.
+  A batched op may not read a host output (the batch has not run yet); it
+  returns a typed error instead of reading stale bytes. The staged path does
+  not batch. `VulkanBackend::queue_submissions` is the authoritative
+  `vkQueueSubmit` counter.
+- Immutable model data is uploaded once (`Backend::prepare_persistent`) and
+  bound by handle afterwards. A prepared tensor that reaches a host upload is a
+  hard error (`VulkanBackend::check_staged_input`), never a silent re-upload.
+  The host tensors stay valid for the CPU/fallback path.
 - Unsafe code is confined to `storage.rs` and every block carries a `SAFETY:`
   comment covering alignment, bounds, aliasing and lifetime.
 

@@ -78,6 +78,8 @@ pub struct Device {
     queue: vk::Queue,
     /// Serialises `vkQueueSubmit` (the queue is externally synchronised).
     queue_lock: Mutex<()>,
+    /// Monotonic `vkQueueSubmit` count, for the #72 submission accounting.
+    queue_submissions: std::sync::atomic::AtomicU64,
     memory: Mutex<MemoryAllocator>,
     pipeline_cache: vk::PipelineCache,
     ledger: HandleLedger,
@@ -203,6 +205,7 @@ impl Device {
             queue_family: family_index,
             queue,
             queue_lock: Mutex::new(()),
+            queue_submissions: std::sync::atomic::AtomicU64::new(0),
             memory: Mutex::new(memory),
             pipeline_cache,
             ledger,
@@ -288,6 +291,8 @@ impl Device {
             .queue_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.queue_submissions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // SAFETY: the command buffers in `submits` are recording-complete and
         // owned by the caller's per-thread submitter; the fence belongs to the
         // same submission; the queue was created for this device and is
@@ -300,6 +305,16 @@ impl Device {
     }
 
     /// Wait for a fence. A timeout is a hang detector, not the normal path.
+    /// Number of `vkQueueSubmit` calls this device has made.
+    ///
+    /// This is the authoritative submission counter: it counts the batches,
+    /// the per-op recordings, the transfers and every explicit download, so a
+    /// report cannot undercount by reading only the op ledger.
+    pub fn queue_submissions(&self) -> u64 {
+        self.queue_submissions
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub(crate) fn wait_fence(&self, fence: vk::Fence) -> Result<()> {
         // SAFETY: the fence was created by this device and submitted above; the
         // wait is for that exact fence.

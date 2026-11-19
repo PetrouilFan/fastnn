@@ -77,10 +77,8 @@
 
 use super::super::error::{Error, Result};
 use super::super::VulkanBackend;
-use super::norm::{
-    contiguous_f32, contiguous_f32_bytes_mut, execute_staged, require_shape, unsupported,
-    BufferSource, ParamWriter,
-};
+use super::io;
+use super::norm::{execute_staged, require_shape, unsupported, BufferSource, ParamWriter};
 use super::{BindingSpec, GridInput, KernelSet, KernelSpec, OpKernel};
 use crate::fn3::backend::{CapabilityFeatures, OpParams, Support};
 use crate::fn3::dtype::DType;
@@ -88,6 +86,9 @@ use crate::fn3::error::{Fn3Error, Fn3Result};
 use crate::fn3::ops::OpId;
 use crate::fn3::shape::Shape;
 use crate::fn3::tensor::{TensorMut, TensorView};
+
+/// Owning issue named in this family's rejection messages.
+const KERNEL_OWNER: &str = "FN3-15 (#61)";
 
 /// The key extent the shared-memory score row supports (`4096 * 4 = 16 KiB`,
 /// the Vulkan minimum `maxComputeSharedMemorySize`).
@@ -289,11 +290,18 @@ pub fn launch_attention(
         require_shape(op, &probs_shape, outputs[1].shape())?;
     }
 
-    let q_values = contiguous_f32(op, q, "attention q")?;
-    let k_values = contiguous_f32(op, k, "attention k")?;
-    let v_values = contiguous_f32(op, v, "attention v")?;
-    let mask_values = match inputs.get(3) {
-        Some(mask) => Some(contiguous_f32(op, mask, "attention mask")?),
+    let q_operand = io::input(KERNEL_OWNER, backend, op, "attention.q", q, DType::F32)?;
+    let k_operand = io::input(KERNEL_OWNER, backend, op, "attention.k", k, DType::F32)?;
+    let v_operand = io::input(KERNEL_OWNER, backend, op, "attention.v", v, DType::F32)?;
+    let mask_operand = match inputs.get(3) {
+        Some(mask) => Some(io::input(
+            KERNEL_OWNER,
+            backend,
+            op,
+            "attention.mask",
+            mask,
+            DType::F32,
+        )?),
         None => None,
     };
 
@@ -350,12 +358,22 @@ pub fn launch_attention(
     }
 
     let (out_slot, probs_slot) = outputs.split_at_mut(1);
-    let out_bytes = contiguous_f32_bytes_mut(op, &mut out_slot[0], "attention output")?;
-    let probs_bytes = match probs_slot.first_mut() {
-        Some(probs) => Some(contiguous_f32_bytes_mut(
+    let out_operand = io::output(
+        KERNEL_OWNER,
+        backend,
+        op,
+        "attention.out",
+        &mut out_slot[0],
+        DType::F32,
+    )?;
+    let probs_operand = match probs_slot.first_mut() {
+        Some(probs) => Some(io::output(
+            KERNEL_OWNER,
+            backend,
             op,
+            "attention.probs",
             probs,
-            "attention probs output",
+            DType::F32,
         )?),
         None => None,
     };
@@ -370,9 +388,9 @@ pub fn launch_attention(
         .u32(head_dim32)
         .u32(u32::try_from(mask_batch).expect("mask batch <= batch"))
         .u32(u32::try_from(mask_heads).expect("mask heads <= heads"))
-        .u32(u32::from(mask_values.is_some()))
+        .u32(u32::from(mask_operand.is_some()))
         .u32(u32::from(causal))
-        .u32(u32::from(probs_bytes.is_some()))
+        .u32(u32::from(probs_operand.is_some()))
         .f32((head_dim as f32).sqrt());
     let params_bytes = block.finish();
     debug_assert_eq!(params_bytes.len(), ATTENTION_PARAMS_BYTES);
@@ -380,47 +398,30 @@ pub fn launch_attention(
     let workgroups = ATTENTION_FUSED
         .workgroups(q.numel()?, out_shape.dims())
         .map_err(|error| error.to_fn3())?;
-    let probs_source = match probs_bytes {
-        Some(bytes) => BufferSource::Readback {
-            name: "attention.probs",
-            bytes,
-        },
+    let probs_source = match probs_operand {
+        Some(operand) => BufferSource::output("attention.probs", operand),
         None => BufferSource::Scratch {
             name: "attention.probs.suppressed",
             size: 4,
         },
     };
+    let mask_source = match mask_operand {
+        Some(operand) => BufferSource::input("attention.mask", operand),
+        None => BufferSource::Upload {
+            name: "attention.mask.absent",
+            bytes: &ZERO_MASK,
+        },
+    };
     let mut sources = [
-        BufferSource::Upload {
-            name: "attention.q",
-            bytes: bytemuck::cast_slice(q_values),
-        },
-        BufferSource::Upload {
-            name: "attention.k",
-            bytes: bytemuck::cast_slice(k_values),
-        },
-        BufferSource::Upload {
-            name: "attention.v",
-            bytes: bytemuck::cast_slice(v_values),
-        },
-        match mask_values {
-            Some(values) => BufferSource::Upload {
-                name: "attention.mask",
-                bytes: bytemuck::cast_slice(values),
-            },
-            None => BufferSource::Upload {
-                name: "attention.mask.absent",
-                bytes: &ZERO_MASK,
-            },
-        },
+        BufferSource::input("attention.q", q_operand),
+        BufferSource::input("attention.k", k_operand),
+        BufferSource::input("attention.v", v_operand),
+        mask_source,
         BufferSource::Upload {
             name: "attention.params",
             bytes: &params_bytes,
         },
-        BufferSource::Readback {
-            name: "attention.out",
-            bytes: out_bytes,
-        },
+        BufferSource::output("attention.out", out_operand),
         probs_source,
     ];
     execute_staged(op, backend, &ATTENTION_FUSED, &mut sources, &[], workgroups)

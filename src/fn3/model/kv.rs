@@ -44,14 +44,15 @@
 //!
 //! # Storage
 //!
-//! Alpha tensor storage is host memory on every device (see
-//! [`crate::fn3::tensor::Tensor::from_storage`]), so a cache built for a Vulkan
-//! device is host-staged: the bytes live in an [`crate::fn3::storage::AlignedBuffer`]
-//! and the Vulkan backend stages each op that reads them. That is recorded by
-//! the backend as `host_staged = true`; it is not a CPU fallback, because no
-//! kernel runs on the host. Device-resident cache storage is the follow-up
-//! described in `docs/reports/fn3-12-session-kv.md`.
+//! A cache is either host-staged ([`KvCacheState::new`], the alpha behaviour,
+//! `host_staged = true`) or device-resident
+//! ([`KvCacheState::new_resident`], FN3-26): the live prefix is refreshed with
+//! [`KvCacheState::live_with`] and appended with
+//! [`KvCacheState::append_with`], both device-to-device, so a resident step
+//! moves no KV byte through the host. The host accessors still work: they
+//! download explicitly rather than returning stale bytes.
 
+use crate::fn3::backend::Backend;
 use crate::fn3::device::DeviceId;
 use crate::fn3::dtype::DType;
 use crate::fn3::error::Fn3Error;
@@ -224,6 +225,10 @@ pub struct KvCacheState {
     keys: Tensor,
     values: Tensor,
     live_len: u64,
+    /// Device copy of the live key prefix at full capacity (resident mode only).
+    past_keys: Option<Tensor>,
+    /// Device copy of the live value prefix at full capacity (resident mode only).
+    past_values: Option<Tensor>,
 }
 
 impl KvCacheState {
@@ -241,7 +246,47 @@ impl KvCacheState {
             keys,
             values,
             live_len: 0,
+            past_keys: None,
+            past_values: None,
         })
+    }
+
+    /// Allocate the cache in device-local memory (FN3-26 / #72).
+    ///
+    /// Identical geometry and contract to [`KvCacheState::new`], but the
+    /// buffers live on the device. [`KvCacheState::live_with`] then copies the
+    /// live prefix device → device and [`KvCacheState::append_with`] appends
+    /// device → device, so a step moves no KV byte through the host. The host
+    /// accessors ([`KvCacheState::live_keys`] and the readback of a `present`
+    /// slice) keep working by downloading explicitly.
+    pub fn new_resident(
+        config: KvCacheConfig,
+        device: DeviceId,
+        backend: &dyn Backend,
+    ) -> Result<KvCacheState, Fn3Error> {
+        if backend.device() != device {
+            return Err(Fn3Error::DeviceMismatch {
+                op: None,
+                expected: device,
+                actual: backend.device(),
+            });
+        }
+        let shape = config.shape();
+        let keys = backend.allocate_resident(&shape, config.dtype)?;
+        let values = backend.allocate_resident(&shape, config.dtype)?;
+        Ok(KvCacheState {
+            config,
+            keys,
+            values,
+            live_len: 0,
+            past_keys: None,
+            past_values: None,
+        })
+    }
+
+    /// `true` when the cache buffers live in device memory.
+    pub fn is_device_resident(&self) -> bool {
+        self.keys.is_device_resident()
     }
 
     /// Configuration.
@@ -415,6 +460,22 @@ impl KvCacheState {
         keys: &TensorView<'_>,
         values: &TensorView<'_>,
     ) -> Result<u64, Fn3Error> {
+        self.append_with(None, keys, values)
+    }
+
+    /// Append a `present` slice, on the device when both sides are resident.
+    ///
+    /// `backend` is `None` for the host path (the alpha's memcpy), and
+    /// `Some(backend)` for a resident cache: the same validated row pairs
+    /// become `vkCmdCopyBuffer` regions in one submission. Nothing else about
+    /// the append protocol changes — the checks, the commit order and the
+    /// failure atomicity are shared by both paths.
+    pub fn append_with(
+        &mut self,
+        backend: Option<&dyn Backend>,
+        keys: &TensorView<'_>,
+        values: &TensorView<'_>,
+    ) -> Result<u64, Fn3Error> {
         let tokens = self.check_present(keys, values)?;
         self.check_append(tokens)?;
         let start = self.live_len;
@@ -422,8 +483,19 @@ impl KvCacheState {
         // buffers are borrowed mutably and written.
         let key_rows = self.append_rows(&self.keys, keys, tokens)?;
         let value_rows = self.append_rows(&self.values, values, tokens)?;
-        write_rows(&mut self.keys, keys, &key_rows)?;
-        write_rows(&mut self.values, values, &value_rows)?;
+        match backend {
+            Some(backend) if self.keys.is_device_resident() && keys.is_device_resident() => {
+                let head_dim = self.config.head_dim as usize;
+                let regions = row_regions(&key_rows, head_dim);
+                backend.copy_resident_regions(self.keys.storage(), keys.storage(), &regions)?;
+                let regions = row_regions(&value_rows, head_dim);
+                backend.copy_resident_regions(self.values.storage(), values.storage(), &regions)?;
+            }
+            _ => {
+                write_rows(&mut self.keys, keys, &key_rows)?;
+                write_rows(&mut self.values, values, &value_rows)?;
+            }
+        }
         self.live_len = start + tokens;
         Ok(self.live_len)
     }
@@ -445,6 +517,54 @@ impl KvCacheState {
         self.live_prefix(&self.values)
     }
 
+    /// The live prefix as device-resident tensors, ready to bind.
+    ///
+    /// The attention kernels need one contiguous `[batch, heads, live,
+    /// head_dim]` buffer, and a prefix of the capacity-shaped cache is not
+    /// contiguous. A resident session therefore keeps one capacity-sized
+    /// *past* buffer per operand and refreshes the live rows with a single
+    /// device-to-device copy per operand per step. Nothing crosses the host
+    /// bridge. A host-staged cache falls back to the alpha's host copy, so the
+    /// staged path is byte-for-byte what it was.
+    pub fn live_with(&mut self, backend: &dyn Backend) -> Result<(Tensor, Tensor), Fn3Error> {
+        if !self.keys.is_device_resident() {
+            return Ok((self.live_keys()?, self.live_values()?));
+        }
+        let device = self.keys.device();
+        let shape = self.config.shape();
+        if self.past_keys.is_none() {
+            self.past_keys = Some(backend.allocate_resident(&shape, self.config.dtype)?);
+            self.past_values = Some(backend.allocate_resident(&shape, self.config.dtype)?);
+        }
+        let keys = self.past_keys.as_ref().expect("just allocated").clone();
+        let values = self.past_values.as_ref().expect("just allocated").clone();
+        let head_dim = self.config.head_dim as usize;
+        let key_rows = self.live_rows(&self.keys)?;
+        let value_rows = self.live_rows(&self.values)?;
+        if self.live_len > 0 {
+            backend.copy_resident_regions(
+                keys.storage(),
+                self.keys.storage(),
+                &row_regions(&key_rows, head_dim),
+            )?;
+            backend.copy_resident_regions(
+                values.storage(),
+                self.values.storage(),
+                &row_regions(&value_rows, head_dim),
+            )?;
+        }
+        let live = self.config.shape_for(self.live_len);
+        let key_view = Tensor::from_storage(
+            keys.storage().clone(),
+            TensorMeta::contiguous(live.clone(), self.config.dtype, device)?,
+        )?;
+        let value_view = Tensor::from_storage(
+            values.storage().clone(),
+            TensorMeta::contiguous(live, self.config.dtype, device)?,
+        )?;
+        Ok((key_view, value_view))
+    }
+
     fn live_prefix(&self, buffer: &Tensor) -> Result<Tensor, Fn3Error> {
         let shape = self.config.shape_for(self.live_len);
         let mut out = allocate(shape, self.config.dtype, buffer.device())?;
@@ -453,6 +573,21 @@ impl KvCacheState {
         }
         let head_dim = self.config.head_dim as usize;
         let rows = self.live_rows(buffer)?;
+        if buffer.is_device_resident() {
+            // Explicit download: the device copy is authoritative, and a host
+            // reader asked for the bytes.
+            let mut scratch = vec![0u8; head_dim * 4];
+            let mut view = out.as_mut_view()?;
+            let destination = view.storage_slice_mut::<f32>()?;
+            for &(source_row, destination_row) in &rows {
+                buffer
+                    .storage()
+                    .download_range(source_row * 4, &mut scratch)?;
+                let values: &[f32] = bytemuck::cast_slice(&scratch);
+                destination[destination_row..destination_row + head_dim].copy_from_slice(values);
+            }
+            return Ok(out);
+        }
         let source = buffer.as_view()?;
         let source = source.storage_slice::<f32>()?;
         let mut view = out.as_mut_view()?;
@@ -533,6 +668,16 @@ impl KvCacheState {
         }
         Ok(pairs)
     }
+}
+
+/// Turn validated `(source_row, destination_row)` element pairs into byte regions.
+fn row_regions(rows: &[(usize, usize)], head_dim: usize) -> Vec<(u64, u64, u64)> {
+    let bytes = (head_dim * 4) as u64;
+    rows.iter()
+        .map(|&(source_row, destination_row)| {
+            (destination_row as u64 * 4, source_row as u64 * 4, bytes)
+        })
+        .collect()
 }
 
 /// Copy validated rows into `buffer`.

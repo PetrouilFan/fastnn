@@ -41,6 +41,29 @@
 //! A zero-length [`AlignedBuffer`] owns no allocation at all: it holds a
 //! dangling, correctly aligned, non-null pointer and `Drop` deallocates
 //! nothing. The allocator is never called with a zero-size layout.
+//!
+//! # Device-resident storage (FN3-26 / #72)
+//!
+//! [`Storage`] can describe an allocation whose authoritative bytes live in
+//! *device* memory instead of host memory. That is the residency attachment:
+//! `Storage::from_resident` takes a [`DeviceResidency`] (an opaque handle owned
+//! by the backend that allocated the buffer) and the logical byte length.
+//!
+//! A resident storage has **no host bytes**. Its host `AlignedBuffer` is empty,
+//! so there is nothing stale to return and no hidden copy of the data:
+//!
+//! - every host byte accessor ([`Storage::as_bytes`], [`Storage::as_slice`],
+//!   [`Storage::byte_range`], [`StorageWindow::as_bytes`],
+//!   [`Storage::try_make_mut`], [`Storage::try_into_buffer`]) is either empty
+//!   or returns [`Fn3Error::NotImplemented`], which names the remedy
+//!   ([`Storage::download`] or, at tensor level, `Tensor::to_host`);
+//! - [`Storage::download`] is the one explicit materialisation path, and it
+//!   asks the owning backend for the bytes.
+//!
+//! This makes "never return stale bytes" structural: a device-resident tensor
+//! cannot be read through the host API at all, and a caller that wants the
+//! bytes must pay for an explicit transfer. `Storage::len` stays the *logical*
+//! length on both kinds so window and bounds checks are identical.
 
 use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::fmt;
@@ -51,6 +74,65 @@ use bytemuck::Pod;
 
 use crate::fn3::dtype::DType;
 use crate::fn3::error::Fn3Error;
+
+/// What a resident storage tells its owner.
+///
+/// Implemented by a backend (the Vulkan platform layer is the first) so that
+/// `storage.rs` keeps no dependency on `ash`. The object must be immutable: a
+/// resident storage is never resized or moved, and the backend destroys the
+/// device buffer when the last `Arc` to this handle drops.
+///
+/// # Contract
+///
+/// - [`DeviceResidency::bytes`] never changes and always equals the
+///   [`Storage`]'s logical byte length.
+/// - [`DeviceResidency::download`] copies current device bytes into `dst`; it
+///   is the only way host code may observe a resident allocation.
+/// - `as_any` returns the concrete handle so the owning backend can recover the
+///   buffer it created; no other caller may assume a concrete type.
+pub trait DeviceResidency: fmt::Debug + Send + Sync {
+    /// Backend that owns the buffer (`"vulkan"`).
+    fn backend(&self) -> &'static str;
+
+    /// Logical byte length of the device allocation.
+    fn bytes(&self) -> usize;
+
+    /// One-line description used in diagnostics and error messages.
+    fn describe(&self) -> String;
+
+    /// The concrete handle, for the backend that created it.
+    fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Copy `dst.len()` device bytes starting at `offset` into `dst`.
+    ///
+    /// `offset + dst.len()` must lie inside [`DeviceResidency::bytes`]; a
+    /// caller that violates that gets an error, never a truncated copy.
+    fn download(&self, offset: usize, dst: &mut [u8]) -> Result<(), Fn3Error>;
+}
+
+/// The typed error for a host byte access to device-resident storage.
+///
+/// It is a hard error, never a panic and never an empty slice read as data: the
+/// remedy is an explicit [`Storage::download`] (or `Tensor::to_host`, which
+/// wraps it). `what` names that remedy because `Fn3Error::NotImplemented`
+/// carries no detail field; the concrete buffer is visible through
+/// [`Storage::residency_label`].
+fn host_access_denied(what: &'static str) -> Fn3Error {
+    Fn3Error::NotImplemented {
+        what: match what {
+            "read" => {
+                "reading device-resident storage through the host byte API; download it \
+                 explicitly with Storage::download or Tensor::to_host"
+            }
+            "write" => {
+                "writing device-resident storage through the host byte API; device kernels \
+                 write it on the device"
+            }
+            _ => "host byte access to device-resident storage",
+        },
+        owner: "FN3-26 (#72)",
+    }
+}
 
 /// Alignment of every [`AlignedBuffer`] allocation, in bytes.
 pub const STORAGE_ALIGNMENT: usize = 64;
@@ -296,51 +378,162 @@ impl Drop for AlignedBuffer {
     }
 }
 
-/// A shared, read-only handle to an [`AlignedBuffer`].
+/// A shared, read-only handle to an [`AlignedBuffer`], or to a device buffer.
 ///
 /// Cloning is cheap (`Arc`). Writes require [`Storage::try_make_mut`], which
 /// only succeeds when this is the last handle. See the module-level aliasing
 /// rule.
+///
+/// A handle is either host-backed ([`Storage::new`]) or device-resident
+/// ([`Storage::from_resident`]). Both report the same logical length, so
+/// window and bounds checks do not branch; only the byte accessors do. A
+/// device-resident handle has no host bytes and returns
+/// [`Fn3Error::NotImplemented`] from every host byte accessor — the data is
+/// never stale, it is simply not visible without [`Storage::download`].
 #[derive(Clone)]
 pub struct Storage {
     buffer: Arc<AlignedBuffer>,
+    residency: Option<Arc<dyn DeviceResidency>>,
+    len: usize,
 }
 
 impl Storage {
-    /// Take ownership of a buffer.
+    /// Take ownership of a host buffer.
     pub fn new(buffer: AlignedBuffer) -> Storage {
         Storage {
+            len: buffer.len(),
             buffer: Arc::new(buffer),
+            residency: None,
         }
     }
 
-    /// Allocate `len` zeroed bytes.
+    /// Take ownership of a device allocation of `len` bytes.
+    ///
+    /// `residency` is the backend's handle; it must describe exactly `len`
+    /// bytes ([`DeviceResidency::bytes`] is checked). The handle owns the
+    /// device buffer, so it is released when the last [`Storage`] clone drops.
+    pub fn from_resident(
+        len: usize,
+        residency: Arc<dyn DeviceResidency>,
+    ) -> Result<Storage, Fn3Error> {
+        if residency.bytes() != len {
+            return Err(Fn3Error::OutOfBounds {
+                what: "Storage::from_resident (device bytes)",
+                index: residency.bytes() as u64,
+                len: len as u64,
+            });
+        }
+        Ok(Storage {
+            buffer: Arc::new(AlignedBuffer::zeroed(0)?),
+            residency: Some(residency),
+            len,
+        })
+    }
+
+    /// Allocate `len` zeroed host bytes.
     pub fn zeroed(len: usize) -> Result<Storage, Fn3Error> {
         Ok(Storage::new(AlignedBuffer::zeroed(len)?))
     }
 
-    /// Copy `bytes` into new storage.
+    /// Copy `bytes` into new host storage.
     pub fn from_bytes(bytes: &[u8]) -> Result<Storage, Fn3Error> {
         Ok(Storage::new(AlignedBuffer::from_bytes(bytes)?))
     }
 
-    /// Length in bytes.
+    /// Length in bytes. Identical for host and device storage.
     pub fn len(&self) -> usize {
-        self.buffer.len()
+        self.len
     }
 
     /// `true` for zero-length storage.
     pub fn is_empty(&self) -> bool {
-        self.buffer.is_empty()
+        self.len == 0
+    }
+
+    /// `true` when the authoritative bytes live in device memory.
+    pub fn is_resident(&self) -> bool {
+        self.residency.is_some()
+    }
+
+    /// The device handle, when this storage is device-resident.
+    pub fn residency(&self) -> Option<&Arc<dyn DeviceResidency>> {
+        self.residency.as_ref()
+    }
+
+    /// Backend name of a resident storage (`"host"` otherwise).
+    pub fn residency_label(&self) -> &'static str {
+        self.residency
+            .as_ref()
+            .map(|residency| residency.backend())
+            .unwrap_or("host")
+    }
+
+    /// A process-unique identity for the allocation.
+    ///
+    /// Two handles with the same identity address the same bytes; a backend
+    /// uses it to key persistent uploads. It is stable for the life of the
+    /// allocation and is never reused for a different buffer.
+    pub fn identity(&self) -> usize {
+        Arc::as_ptr(&self.buffer) as *const u8 as usize
     }
 
     /// Read the whole buffer as bytes.
+    ///
+    /// Empty for device-resident storage; use [`Storage::is_resident`] or
+    /// [`Storage::download`]. Host byte accessors on a resident handle are
+    /// rejected by [`Storage::host_bytes`] and the tensor layer, never silently
+    /// satisfied with a stale copy.
     pub fn as_bytes(&self) -> &[u8] {
         self.buffer.as_bytes()
     }
 
+    /// Read the whole buffer as bytes, rejecting device-resident storage.
+    pub fn host_bytes(&self) -> Result<&[u8], Fn3Error> {
+        if self.residency.is_some() {
+            return Err(host_access_denied("read"));
+        }
+        Ok(self.buffer.as_bytes())
+    }
+
+    /// Copy the whole allocation into `dst`, which must be exactly [`Storage::len`].
+    ///
+    /// This is the one explicit materialisation path for a device-resident
+    /// storage. A host-backed storage copies from its buffer; both forms cost
+    /// exactly one copy and never share bytes with the storage.
+    pub fn download(&self, dst: &mut [u8]) -> Result<(), Fn3Error> {
+        if dst.len() != self.len {
+            return Err(Fn3Error::CapacityExceeded {
+                what: "Storage::download",
+                requested: dst.len() as u64,
+                capacity: self.len as u64,
+            });
+        }
+        self.download_range(0, dst)
+    }
+
+    /// Copy `dst.len()` bytes starting at `offset` into `dst`.
+    ///
+    /// The ranged form of [`Storage::download`]: it is what a caller uses to
+    /// materialise one row of a large resident tensor (the final logits, for
+    /// example) without transferring the rest of it. The range is checked
+    /// against [`Storage::len`] on both widths.
+    pub fn download_range(&self, offset: usize, dst: &mut [u8]) -> Result<(), Fn3Error> {
+        let end = checked_window_end("Storage::download_range", offset, dst.len(), self.len)?;
+        let _ = end;
+        match &self.residency {
+            None => {
+                dst.copy_from_slice(&self.buffer.as_bytes()[offset..offset + dst.len()]);
+                Ok(())
+            }
+            Some(residency) => residency.download(offset, dst),
+        }
+    }
+
     /// Read the whole buffer as elements of `T`.
     pub fn as_slice<T: Pod>(&self) -> Result<&[T], Fn3Error> {
+        if self.residency.is_some() {
+            return Err(host_access_denied("read"));
+        }
         self.buffer.as_slice()
     }
 
@@ -370,6 +563,9 @@ impl Storage {
     /// (for example a serialized weight blob) is a byte operation.
     pub fn byte_range(&self, offset: usize, len: usize) -> Result<&[u8], Fn3Error> {
         let end = checked_window_end("Storage::byte_range", offset, len, self.len())?;
+        if self.residency.is_some() {
+            return Err(host_access_denied("read"));
+        }
         self.as_bytes()
             .get(offset..end)
             .ok_or_else(|| Fn3Error::StorageWindow {
@@ -421,15 +617,27 @@ impl Storage {
 
     /// Exclusive access to the buffer, or [`Fn3Error::StorageShared`].
     ///
-    /// This is the only write path through a shared handle.
+    /// This is the only write path through a shared handle. Device-resident
+    /// storage is not host-writable and returns
+    /// [`Fn3Error::NotImplemented`]; a resident output is written by a device
+    /// kernel, not by a host byte copy.
     pub fn try_make_mut(&mut self) -> Result<&mut AlignedBuffer, Fn3Error> {
+        if self.residency.is_some() {
+            return Err(host_access_denied("write"));
+        }
         let bytes = self.buffer.len();
         let handles = Arc::strong_count(&self.buffer);
         Arc::get_mut(&mut self.buffer).ok_or(Fn3Error::StorageShared { bytes, handles })
     }
 
     /// Consume the handle and return the buffer when it is the last one.
+    ///
+    /// Device-resident storage has no host buffer and returns
+    /// [`Fn3Error::NotImplemented`].
     pub fn try_into_buffer(self) -> Result<AlignedBuffer, Fn3Error> {
+        if self.residency.is_some() {
+            return Err(host_access_denied("read"));
+        }
         let bytes = self.buffer.len();
         let handles = Arc::strong_count(&self.buffer);
         Arc::try_unwrap(self.buffer).map_err(|_| Fn3Error::StorageShared { bytes, handles })
@@ -509,18 +717,37 @@ impl StorageWindow {
     }
 
     /// The window as bytes.
+    ///
+    /// A window over device-resident storage has no host bytes and returns
+    /// [`Fn3Error::NotImplemented`]; see [`StorageWindow::try_as_bytes`] for the
+    /// fallible form used by callers that must handle both kinds.
     pub fn as_bytes(&self) -> &[u8] {
         // The range was validated in `Storage::window`, and storage length and
-        // pointer never change after construction.
+        // pointer never change after construction. A resident storage's host
+        // buffer is empty, so the slice is empty rather than stale.
+        if self.storage.is_resident() {
+            return &[];
+        }
         self.storage
             .as_bytes()
             .get(self.offset..self.end())
             .expect("StorageWindow bounds are validated at construction")
     }
 
+    /// The window as bytes, rejecting device-resident storage.
+    pub fn try_as_bytes(&self) -> Result<&[u8], Fn3Error> {
+        if self.storage.is_resident() {
+            return Err(host_access_denied("read"));
+        }
+        Ok(self.as_bytes())
+    }
+
     /// The window as elements of `T`, with the same checks as
     /// [`AlignedBuffer::as_slice`].
     pub fn as_slice<T: Pod>(&self) -> Result<&[T], Fn3Error> {
+        if self.storage.is_resident() {
+            return Err(host_access_denied("read"));
+        }
         let element = std::any::type_name::<T>();
         let byte_len = self.len;
         check_element_layout::<T>(self.as_bytes().as_ptr(), byte_len).map_err(|detail| {
@@ -583,6 +810,7 @@ impl fmt::Debug for Storage {
         f.debug_struct("Storage")
             .field("len", &self.len())
             .field("handles", &self.handle_count())
+            .field("residency", &self.residency_label())
             .finish_non_exhaustive()
     }
 }
@@ -686,6 +914,107 @@ mod tests {
         let error = storage.window(usize::MAX, 1, DType::Bool).unwrap_err();
         assert!(matches!(error, Fn3Error::StorageWindow { .. }));
         assert!(error.to_string().contains("overflows"), "{error}");
+    }
+
+    /// A stand-in for a backend's device allocation: bytes plus the download
+    /// contract, no Vulkan needed.
+    #[derive(Debug)]
+    struct FakeResident {
+        bytes: Vec<u8>,
+    }
+
+    impl DeviceResidency for FakeResident {
+        fn backend(&self) -> &'static str {
+            "fake"
+        }
+
+        fn bytes(&self) -> usize {
+            self.bytes.len()
+        }
+
+        fn describe(&self) -> String {
+            format!("{} fake bytes", self.bytes.len())
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn download(&self, offset: usize, dst: &mut [u8]) -> Result<(), Fn3Error> {
+            let end = offset.checked_add(dst.len()).ok_or(Fn3Error::OutOfBounds {
+                what: "FakeResident::download",
+                index: offset as u64,
+                len: dst.len() as u64,
+            })?;
+            let source = self.bytes.get(offset..end).ok_or(Fn3Error::OutOfBounds {
+                what: "FakeResident::download",
+                index: end as u64,
+                len: self.bytes.len() as u64,
+            })?;
+            dst.copy_from_slice(source);
+            Ok(())
+        }
+    }
+
+    fn resident_storage(values: &[f32]) -> Storage {
+        let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let len = bytes.len();
+        Storage::from_resident(len, Arc::new(FakeResident { bytes })).unwrap()
+    }
+
+    #[test]
+    fn resident_storage_has_no_host_bytes_and_downloads_explicitly() {
+        let mut storage = resident_storage(&[1.5, -2.0, 3.25, 4.0]);
+        assert!(storage.is_resident());
+        assert_eq!(storage.len(), 16);
+        assert_eq!(storage.residency_label(), "fake");
+        assert!(
+            storage.as_bytes().is_empty(),
+            "no host copy, so no stale read"
+        );
+        let error = storage.host_bytes().unwrap_err();
+        assert!(matches!(error, Fn3Error::NotImplemented { .. }), "{error}");
+        assert!(error.to_string().contains("to_host"), "{error}");
+        assert!(storage.as_slice::<f32>().is_err());
+        assert!(storage.byte_range(0, 4).is_err());
+        assert!(storage.try_make_mut().is_err());
+
+        let mut bytes = [0u8; 16];
+        storage.download(&mut bytes).unwrap();
+        let values: Vec<f32> = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| f32::from_le_bytes(*word))
+            .collect();
+        assert_eq!(values, vec![1.5, -2.0, 3.25, 4.0]);
+
+        // A download of the wrong length is refused, never truncated.
+        assert!(matches!(
+            storage.download(&mut [0u8; 8]),
+            Err(Fn3Error::CapacityExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn a_resident_window_keeps_bounds_and_refuses_host_bytes() {
+        let storage = resident_storage(&[1.0, 2.0, 3.0, 4.0]);
+        let window = storage.window(4, 8, DType::F32).unwrap();
+        assert_eq!(window.len(), 8);
+        assert_eq!(window.element_offset(DType::F32).unwrap(), 1);
+        assert!(window.try_as_bytes().is_err());
+        assert!(window.as_slice::<f32>().is_err());
+        // Bounds and alignment behave exactly as on host storage.
+        assert!(storage.window(6, 8, DType::F32).is_err());
+        assert!(storage.window(4, 16, DType::F32).is_err());
+        assert_eq!(window.into_storage().len(), 16);
+    }
+
+    #[test]
+    fn from_resident_rejects_a_length_that_disagrees_with_the_handle() {
+        let residency = Arc::new(FakeResident { bytes: vec![0; 8] });
+        let error = Storage::from_resident(4, residency).unwrap_err();
+        assert!(matches!(error, Fn3Error::OutOfBounds { .. }), "{error}");
     }
 
     #[test]
