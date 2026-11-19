@@ -19,7 +19,7 @@ release-ready SHA.
 | #74 evaluation | Measured at `17eee5f`: trained 64/256/1024-token FP32 and INT8 on CPU and the physical GTX 1080 Ti, staged control, memory, queue and support matrix → `docs/reports/fn3-74-support-matrix.md` |
 | #75 cleanup | Caller-backed legacy classification and retirement, active docs and migration notes |
 | #76 packaging and gates | Actual artifacts, strict source-free clean install, checks and hosted/physical runs on the exact candidate SHA |
-| Vulkan runtime | Persistent transaction is unmerged; discarded-batch and OOM reporting need regression coverage; unknown fence completion can release still-in-use resources and remains deferred, not passed |
+| Vulkan runtime | Persistent transaction is unmerged; discarded-batch and OOM reporting need regression coverage; unknown fence completion now quarantines every in-flight resource until a proof wait or a quiesce-first teardown (`tests/fn3_vulkan_quarantine.rs`) |
 
 One integrator owns `rewrite/fastnn-3`; review correctness, cleanup, and
 performance separately. Keep CUDA and training deferred and leave publication,
@@ -744,8 +744,10 @@ The candidate is the tip of this branch. Merging to `main`, tagging, the GitHub
 release and any package publication remain owner actions; `main` is still at
 `a2c0759` and no tag or release exists.
 
-Deferred and recorded in the release report, not passed: unknown fence
-completion can release resources still in use (owner deferred), concurrent
-prepare races with an executing step, `end_step` reports `Ok(0)` for a discarded
-batch, `Submission::Drop` re-waits a poisoned device, and `PersistentKey` is an
-allocation address held alive by a pinned `Storage`.
+Deferred and recorded in the release report, not passed: concurrent prepare
+races with an executing step, `end_step` reports `Ok(0)` for a discarded
+batch, and `PersistentKey` is an allocation address held alive by a pinned
+`Storage`. Unknown fence completion no longer releases resources still in use:
+the device quarantine holds every in-flight buffer, staging block, command and
+descriptor pool and fence until a proof wait or a quiesce-first teardown, and
+a failed quiesce leaks deliberately instead of freeing.
