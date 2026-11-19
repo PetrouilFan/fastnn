@@ -51,7 +51,7 @@ use super::super::error::Error;
 use super::super::residency::ExecutionRecord;
 use super::super::staging::StagingLease;
 use super::super::VulkanBackend;
-use super::io::{self, Operand, OperandMut, ResolvedBuffer};
+use super::io::{self, Operand, OperandMut};
 use super::{BindingKind, BindingSpec, KernelSet, KernelSpec, OpKernel};
 use crate::fn3::backend::vulkan::VULKAN_BACKEND_NAME;
 use crate::fn3::backend::{check_arity, Backend, CapabilityFeatures, OpParams, Support};
@@ -269,13 +269,11 @@ pub(super) fn execute_staged(
     }
 
     let kernel = backend.kernel(spec)?;
-    let mut buffers: Vec<ResolvedBuffer> = Vec::with_capacity(sources.len());
+    let mut buffers: Vec<Arc<Buffer>> = Vec::with_capacity(sources.len());
     for source in sources.iter() {
         match source {
-            BufferSource::Resident { buffer, .. } => {
-                buffers.push(ResolvedBuffer::Shared(Arc::clone(buffer)))
-            }
-            _ => buffers.push(ResolvedBuffer::Owned(backend.alloc_buffer(
+            BufferSource::Resident { buffer, .. } => buffers.push(Arc::clone(buffer)),
+            _ => buffers.push(Arc::new(backend.alloc_buffer(
                 &BufferDesc::device_storage(source.size(), source.name()),
             )?)),
         }
@@ -311,12 +309,24 @@ pub(super) fn execute_staged(
             BindingArg::whole(
                 spec.bindings[index].binding,
                 sources[index].role(),
-                buffer.buffer(),
+                buffer.as_ref(),
             )
         })
         .collect();
 
     let mut submitter = backend.checkout_submitter()?;
+    let batching = submitter.is_batching();
+    if batching
+        && sources
+            .iter()
+            .any(|s| matches!(s, BufferSource::Readback { .. }))
+    {
+        return Err(Error::internal(format!(
+            "{}: a batched step cannot satisfy a readback; the output must be device-resident",
+            spec.name
+        ))
+        .to_fn3());
+    }
     let mut dispatch = None;
     let (submission_report, dispatch_info) = {
         let report = submitter
@@ -326,7 +336,7 @@ pub(super) fn execute_staged(
                         recorder.copy_buffer(
                             leases[index].as_ref().expect("upload lease").buffer(),
                             0,
-                            buffers[index].buffer(),
+                            buffers[index].as_ref(),
                             0,
                             source.size(),
                         )?;
@@ -335,11 +345,25 @@ pub(super) fn execute_staged(
                 for (index, source) in sources.iter().enumerate() {
                     if matches!(source, BufferSource::Upload { .. }) {
                         recorder.barrier(
-                            buffers[index].buffer(),
+                            buffers[index].as_ref(),
                             vk::PipelineStageFlags::TRANSFER,
                             vk::PipelineStageFlags::COMPUTE_SHADER,
                             vk::AccessFlags::TRANSFER_WRITE,
                             vk::AccessFlags::SHADER_READ,
+                        );
+                    }
+                }
+                if batching {
+                    // One submission cannot rely on submission order to order
+                    // two dispatches: a later op reads what an earlier one
+                    // wrote, so order every binding compute -> compute first.
+                    for binding in &bindings {
+                        recorder.barrier(
+                            binding.buffer,
+                            vk::PipelineStageFlags::COMPUTE_SHADER,
+                            vk::PipelineStageFlags::COMPUTE_SHADER,
+                            vk::AccessFlags::SHADER_WRITE,
+                            vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
                         );
                     }
                 }
@@ -352,14 +376,14 @@ pub(super) fn execute_staged(
                 for (index, source) in sources.iter().enumerate() {
                     if matches!(source, BufferSource::Readback { .. }) {
                         recorder.barrier(
-                            buffers[index].buffer(),
+                            buffers[index].as_ref(),
                             vk::PipelineStageFlags::COMPUTE_SHADER,
                             vk::PipelineStageFlags::TRANSFER,
                             vk::AccessFlags::SHADER_WRITE,
                             vk::AccessFlags::TRANSFER_READ,
                         );
                         recorder.copy_buffer(
-                            buffers[index].buffer(),
+                            buffers[index].as_ref(),
                             0,
                             leases[index].as_ref().expect("readback lease").buffer(),
                             0,
@@ -380,12 +404,22 @@ pub(super) fn execute_staged(
         })?;
         (report, info)
     };
+    if batching {
+        // Every buffer a recorded dispatch references must outlive the batch.
+        for buffer in &buffers {
+            submitter.retain_block(Arc::clone(buffer));
+        }
+        for lease in std::mem::take(&mut leases).into_iter().flatten() {
+            submitter.retain_block(lease.detach());
+        }
+    }
     drop(submitter);
 
     for (index, source) in sources.iter_mut().enumerate() {
         if let BufferSource::Readback { bytes, .. } = source {
-            leases[index]
-                .as_ref()
+            leases
+                .get(index)
+                .and_then(|lease| lease.as_ref())
                 .expect("readback lease")
                 .read_into(bytes)
                 .map_err(|error| error.to_fn3())?;
@@ -414,6 +448,8 @@ pub(super) fn execute_staged(
 
     let mut record = ExecutionRecord::new(0, op, spec.name, backend.device_id());
     record.submissions = submission_report.submissions;
+    record.batch = submission_report.batch;
+    record.batch_query = submission_report.batch_query;
     record.workgroups = dispatch_info.workgroups;
     record.bindings = dispatch_info.bindings;
     record.upload_bytes = upload_bytes;

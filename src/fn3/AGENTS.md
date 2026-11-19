@@ -63,6 +63,14 @@ authority is `docs/roadmap/fn3-architecture.md`.
   host byte accessor returns `Fn3Error::NotImplemented` and
   `Tensor::to_host`/`Storage::download` is the only materialisation path, so
   stale bytes cannot be observed. CPU tensors are never resident.
+- A resident step is **one submission**: `begin_step(label, batch)` opens one
+  command buffer, every instruction records into it, and `end_step` submits and
+  waits once. Inside that buffer the driver infers no inter-dispatch ordering,
+  so each kernel records an explicit compute→compute barrier over its bindings.
+  A batched op may not read a host output (the batch has not run yet); it
+  returns a typed error instead of reading stale bytes. The staged path does
+  not batch. `VulkanBackend::queue_submissions` is the authoritative
+  `vkQueueSubmit` counter.
 - Immutable model data is uploaded once (`Backend::prepare_persistent`) and
   bound by handle afterwards. A prepared tensor that reaches a host upload is a
   hard error (`VulkanBackend::check_staged_input`), never a silent re-upload.

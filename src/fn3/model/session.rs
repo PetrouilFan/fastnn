@@ -976,7 +976,11 @@ impl<'model> Session<'model> {
         // always closed, including on failure, so a failed step cannot leak a
         // recording context into the next one.
         let label = if past == 0 { "prefill" } else { "decode" };
-        backend.begin_step(label)?;
+        // A resident step is one submission: every operand of every op is a
+        // device buffer, so nothing needs to reach the host before the batch
+        // completes. A staged step submits per op (it reads each output back),
+        // so it does not batch.
+        backend.begin_step(label, runtime.resident)?;
         let executed = plan.execute(backend, &mut slots);
         let closed = backend.end_step();
         executed?;

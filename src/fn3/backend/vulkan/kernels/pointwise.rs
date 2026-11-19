@@ -57,9 +57,11 @@ use std::sync::Arc;
 
 use ash::vk;
 
-use super::io::{self, Operand, OperandMut, ResolvedBuffer};
+use super::io::{self, Operand, OperandMut};
 use crate::fn3::backend::check_arity;
-use crate::fn3::backend::vulkan::context::{BindingArg, BindingRole, BufferDesc, KernelInvocation};
+use crate::fn3::backend::vulkan::context::{
+    BindingArg, BindingRole, Buffer, BufferDesc, KernelInvocation,
+};
 use crate::fn3::backend::vulkan::error::Error;
 use crate::fn3::backend::vulkan::kernels::{grid, BindingSpec, KernelSet, KernelSpec, OpKernel};
 use crate::fn3::backend::vulkan::pipeline::Kernel;
@@ -309,7 +311,7 @@ pub(super) struct Job<'a> {
     op: OpId,
     spec: &'static KernelSpec,
     kernel: Arc<Kernel>,
-    buffers: Vec<ResolvedBuffer>,
+    buffers: Vec<Arc<Buffer>>,
     uploads: Vec<(usize, Vec<u8>)>,
     readbacks: Vec<(usize, usize, usize)>,
     outputs: Vec<OutputSlot<'a>>,
@@ -346,8 +348,7 @@ impl<'a> Job<'a> {
         match operand {
             Operand::Resident { buffer, .. } => {
                 let index = self.buffers.len();
-                self.buffers
-                    .push(ResolvedBuffer::Shared(Arc::clone(buffer)));
+                self.buffers.push(Arc::clone(buffer));
                 Ok(index)
             }
             Operand::Host { bytes } => self.stage_input(bytes, name),
@@ -364,7 +365,7 @@ impl<'a> Job<'a> {
         padded.extend_from_slice(bytes);
         padded.resize(size as usize, 0);
         let index = self.buffers.len();
-        self.buffers.push(ResolvedBuffer::Owned(buffer));
+        self.buffers.push(Arc::new(buffer));
         self.uploads.push((index, padded));
         Ok(index)
     }
@@ -378,7 +379,7 @@ impl<'a> Job<'a> {
         match operand {
             OperandMut::Resident { buffer, .. } => {
                 let index = self.buffers.len();
-                self.buffers.push(ResolvedBuffer::Shared(buffer));
+                self.buffers.push(buffer);
                 self.outputs.push(OutputSlot::Resident);
                 Ok(index)
             }
@@ -389,7 +390,7 @@ impl<'a> Job<'a> {
                     .backend
                     .alloc_buffer(&BufferDesc::device_storage(size.max(4), name))?;
                 let index = self.buffers.len();
-                self.buffers.push(ResolvedBuffer::Owned(buffer));
+                self.buffers.push(Arc::new(buffer));
                 let slot = self.outputs.len();
                 self.outputs.push(OutputSlot::Host(bytes));
                 // The record and the copy use the logical length; the buffer is
@@ -453,6 +454,15 @@ impl<'a> Job<'a> {
         }
 
         let mut submitter = self.backend.checkout_submitter()?;
+        let batching = submitter.is_batching();
+        if batching && !self.readbacks.is_empty() {
+            return Err(Error::internal(format!(
+                "op {} has a host output, and a batched step cannot satisfy a readback; the \
+                 output must be device-resident",
+                self.op
+            ))
+            .to_fn3());
+        }
         let mut first: Option<DispatchInfo> = None;
         let report = {
             submitter
@@ -461,7 +471,7 @@ impl<'a> Job<'a> {
                         let Some(lease) = lease else {
                             continue;
                         };
-                        let buffer = self.buffers[*index].buffer();
+                        let buffer = self.buffers[*index].as_ref();
                         recorder.copy_buffer(lease.buffer(), 0, buffer, 0, buffer.size())?;
                     }
                     for ((index, _), lease) in self.uploads.iter().zip(upload_leases.iter()) {
@@ -469,7 +479,7 @@ impl<'a> Job<'a> {
                             continue;
                         }
                         recorder.barrier(
-                            self.buffers[*index].buffer(),
+                            self.buffers[*index].as_ref(),
                             vk::PipelineStageFlags::TRANSFER,
                             vk::PipelineStageFlags::COMPUTE_SHADER,
                             vk::AccessFlags::TRANSFER_WRITE,
@@ -477,11 +487,26 @@ impl<'a> Job<'a> {
                         );
                     }
                     for (position, step) in self.steps.iter().enumerate() {
+                        if batching {
+                            // Inside one submission the driver cannot infer an
+                            // inter-dispatch dependency: a later op reads what
+                            // an earlier one wrote, so order every binding
+                            // compute -> compute before this dispatch.
+                            for (_, index, _) in &step.bindings {
+                                recorder.barrier(
+                                    self.buffers[*index].as_ref(),
+                                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                                    vk::AccessFlags::SHADER_WRITE,
+                                    vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+                                );
+                            }
+                        }
                         let arguments: Vec<BindingArg<'_>> = step
                             .bindings
                             .iter()
                             .map(|(binding, index, role)| {
-                                let buffer = self.buffers[*index].buffer();
+                                let buffer = self.buffers[*index].as_ref();
                                 BindingArg::range(*binding, *role, buffer, 0, buffer.size())
                             })
                             .collect();
@@ -505,7 +530,7 @@ impl<'a> Job<'a> {
                                 if *role == BindingRole::Output {
                                     let _ = binding;
                                     recorder.barrier(
-                                        self.buffers[*index].buffer(),
+                                        self.buffers[*index].as_ref(),
                                         vk::PipelineStageFlags::COMPUTE_SHADER,
                                         vk::PipelineStageFlags::COMPUTE_SHADER,
                                         vk::AccessFlags::SHADER_WRITE,
@@ -520,7 +545,7 @@ impl<'a> Job<'a> {
                         let Some(lease) = lease else {
                             continue;
                         };
-                        let buffer = self.buffers[*index].buffer();
+                        let buffer = self.buffers[*index].as_ref();
                         recorder.barrier(
                             buffer,
                             vk::PipelineStageFlags::COMPUTE_SHADER,
@@ -536,6 +561,18 @@ impl<'a> Job<'a> {
                 .wait()
                 .map_err(|error| error.to_fn3())?
         };
+        // A batched recording's staging blocks stay alive until the batch's
+        // fence: the recorded copies still read them.
+        if submitter.is_batching() {
+            // The recorded dispatches still reference these buffers and the
+            // batch has not run yet: the batch owns them until its fence.
+            for buffer in &self.buffers {
+                submitter.retain_block(Arc::clone(buffer));
+            }
+            for lease in std::mem::take(&mut upload_leases).into_iter().flatten() {
+                submitter.retain_block(lease.detach());
+            }
+        }
         drop(submitter);
 
         for ((index, host_len, slot), lease) in self.readbacks.iter().zip(readback_leases.iter()) {
@@ -570,6 +607,8 @@ impl<'a> Job<'a> {
         })?;
         let mut record = ExecutionRecord::new(0, self.op, self.spec.name, self.backend.device_id());
         record.submissions = report.submissions;
+        let batch = report.batch;
+        let batch_query = report.batch_query;
         record.workgroups = dispatch.workgroups;
         record.bindings = dispatch.bindings;
         record.upload_bytes = self
@@ -583,10 +622,12 @@ impl<'a> Job<'a> {
             .map(|(index, _, _)| self.buffers[*index].size())
             .sum();
         record.inputs_read_back = false;
+        record.batch = batch;
+        record.batch_query = batch_query;
         // A resident op moves nothing: no upload, no readback. The staged path
         // keeps the alpha's honest `true`.
         record.host_staged = !self.uploads.is_empty() || !self.readbacks.is_empty();
-        record.device_local_bytes = self.buffers.iter().map(ResolvedBuffer::size).sum();
+        record.device_local_bytes = self.buffers.iter().map(|buffer| buffer.size()).sum();
         record.host_ns = report.host_ns;
         record.gpu_ns = report.gpu_ns;
         record.gpu_ticks = report.timestamps;

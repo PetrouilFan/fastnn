@@ -187,26 +187,3 @@ pub(super) fn output<'a>(
     let bytes = host_window_mut(out)?;
     Ok(OperandMut::Host { bytes })
 }
-
-/// A binding target: a buffer this module owns, or one it borrows.
-pub(super) enum ResolvedBuffer {
-    /// A device buffer allocated for this dispatch.
-    Owned(Buffer),
-    /// A resident buffer owned by a tensor or the persistent table.
-    Shared(Arc<Buffer>),
-}
-
-impl ResolvedBuffer {
-    /// The buffer to bind.
-    pub(super) fn buffer(&self) -> &Buffer {
-        match self {
-            ResolvedBuffer::Owned(buffer) => buffer,
-            ResolvedBuffer::Shared(buffer) => buffer,
-        }
-    }
-
-    /// Its logical byte length.
-    pub(super) fn size(&self) -> u64 {
-        self.buffer().size()
-    }
-}

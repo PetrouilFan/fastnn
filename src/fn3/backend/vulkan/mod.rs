@@ -620,6 +620,14 @@ impl VulkanBackend {
         &self.residency
     }
 
+    /// Number of `vkQueueSubmit` calls this backend has made.
+    ///
+    /// The authoritative submission count for #72: it includes step batches,
+    /// per-op recordings, transfers and explicit downloads.
+    pub fn queue_submissions(&self) -> u64 {
+        self.device.queue_submissions()
+    }
+
     /// Allocator counters (chunk sizes, live/peak bytes, allocation count).
     pub fn memory_stats(&self) -> MemoryStats {
         self.device.memory_stats()
@@ -747,17 +755,40 @@ impl Backend for VulkanBackend {
         self.copy_resident_storage_regions(dst, src, regions)
     }
 
-    fn begin_step(&self, label: &'static str) -> Fn3Result<()> {
+    fn begin_step(&self, label: &'static str, batch: bool) -> Fn3Result<()> {
         self.set_phase(match label {
             "prefill" => resident::ResidencyPhase::Prefill,
             "decode" => resident::ResidencyPhase::Decode,
             _ => resident::ResidencyPhase::Prepare,
         });
+        if !batch {
+            return Ok(());
+        }
+        let mut submitter = self.checkout_submitter()?;
+        submitter.begin_batch().map_err(|error| error.to_fn3())?;
+        drop(submitter);
         Ok(())
     }
 
     fn end_step(&self) -> Fn3Result<u32> {
-        Ok(0)
+        let mut submitter = self.checkout_submitter()?;
+        let batch_id = submitter.batch_id();
+        if !submitter.is_batching() {
+            return Ok(0);
+        }
+        let report = submitter.end_batch().map_err(|error| error.to_fn3())?;
+        drop(submitter);
+        if report.submissions == 0 {
+            return Ok(0);
+        }
+        self.residency.note_batch_submission();
+        let period = f64::from(self.vulkan_device().limits().timestamp_period);
+        if let Some(batch) = batch_id {
+            self.residency
+                .complete_batch(batch, &report.timings, period);
+        }
+        self.residency_counters.note_batch(report.submissions);
+        Ok(report.submissions)
     }
 }
 

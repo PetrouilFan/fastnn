@@ -162,9 +162,11 @@ fn persistent_weights_upload_once_and_are_rebound_by_handle() {
 
     // ---- prefill ---------------------------------------------------------
     backend.reset_residency_stats();
+    let submissions_before = backend.queue_submissions();
     let logits = session
         .prefill(&tokens[..PROMPT])
         .expect("prefill with persistent weights");
+    let prefill_submissions = backend.queue_submissions() - submissions_before;
     let prefill = backend.residency_stats();
     assert_eq!(
         prefill.persistent_prepare_bytes, 0,
@@ -187,8 +189,9 @@ fn persistent_weights_upload_once_and_are_rebound_by_handle() {
     assert_eq!(summary.input_readbacks, 0);
     assert_eq!(summary.proven_device_executions, summary.executions);
     println!(
-        "[fn3-26][prefill] persistent_hits={} staged_uploads={} staged_upload_bytes={} \
-         late={} executions={} submissions={} upload_bytes={} readback_bytes={}",
+        "[fn3-26][prefill] queue_submissions={prefill_submissions} persistent_hits={} \
+         staged_uploads={} staged_upload_bytes={} late={} executions={} ledger_submissions={} \
+         upload_bytes={} readback_bytes={}",
         prefill.persistent_hits[ResidencyPhase::Prefill.index()],
         prefill.staged_uploads[ResidencyPhase::Prefill.index()],
         prefill.staged_upload_bytes[ResidencyPhase::Prefill.index()],
@@ -202,6 +205,7 @@ fn persistent_weights_upload_once_and_are_rebound_by_handle() {
     // ---- decode ----------------------------------------------------------
     backend.residency().clear();
     backend.reset_residency_stats();
+    let submissions_before = backend.queue_submissions();
     let mut decoded = Vec::new();
     for token in [640u32, 11, 612] {
         let logits = session
@@ -209,6 +213,7 @@ fn persistent_weights_upload_once_and_are_rebound_by_handle() {
             .expect("decode with persistent weights");
         decoded.push(logits);
     }
+    let decode_submissions = backend.queue_submissions() - submissions_before;
     let decode = backend.residency_stats();
     assert_eq!(
         decode.persistent_prepare_bytes, 0,
@@ -228,8 +233,9 @@ fn persistent_weights_upload_once_and_are_rebound_by_handle() {
     assert_eq!(summary.input_readbacks, 0);
     assert_eq!(summary.proven_device_executions, summary.executions);
     println!(
-        "[fn3-26][decode] persistent_hits={} staged_uploads={} staged_upload_bytes={} late={} \
-         executions={} submissions={} upload_bytes={} readback_bytes={}",
+        "[fn3-26][decode] queue_submissions={decode_submissions} persistent_hits={} \
+         staged_uploads={} staged_upload_bytes={} late={} executions={} ledger_submissions={} \
+         upload_bytes={} readback_bytes={}",
         decode.persistent_hits[ResidencyPhase::Decode.index()],
         decode.staged_uploads[ResidencyPhase::Decode.index()],
         decode.staged_upload_bytes[ResidencyPhase::Decode.index()],

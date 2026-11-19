@@ -417,9 +417,12 @@ pub trait Backend: Send + Sync + fmt::Debug {
     /// A backend that batches records every dispatch between `begin_step` and
     /// [`Backend::end_step`] into one submission. The default bodies are
     /// no-ops, so per-op backends (the CPU reference) are unaffected. Scopes do
-    /// not nest within one thread; `label` is a diagnostic ("prefill", "decode").
-    fn begin_step(&self, label: &'static str) -> Result<(), Fn3Error> {
-        let _ = label;
+    /// not nest within one thread; `label` is a diagnostic ("prefill", "decode")
+    /// and `batch` is the session's decision: it is `true` only when the whole
+    /// step's operands and results stay on the device, because a deferred
+    /// submission cannot satisfy a host read.
+    fn begin_step(&self, label: &'static str, batch: bool) -> Result<(), Fn3Error> {
+        let _ = (label, batch);
         Ok(())
     }
 

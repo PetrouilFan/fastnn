@@ -173,10 +173,21 @@ fn assert_device_execution(
         assert_eq!(record.backend, "vulkan", "{label}: record backend");
         assert_eq!(record.device, backend.device_id(), "{label}: record device");
         assert!(
-            record.submissions >= 1,
-            "{label}: record {} submitted nothing",
+            record.submissions >= 1 || record.batch.is_some(),
+            "{label}: record {} neither submitted nor joined a batch",
             record.sequence
         );
+        match mode {
+            StorageMode::Resident => assert!(
+                record.batch.is_some(),
+                "{label}: record {} was not batched into its step",
+                record.sequence
+            ),
+            StorageMode::Staged => assert!(
+                record.batch.is_none(),
+                "{label}: the staged arm must submit per op"
+            ),
+        }
         assert!(
             record.workgroups.iter().all(|count| *count > 0),
             "{label}: record {} dispatched no workgroup",
@@ -239,10 +250,18 @@ fn assert_device_execution(
         "{label}: proven executions"
     );
     assert_eq!(summary.input_readbacks, 0, "{label}: input readbacks");
-    assert!(
-        summary.submissions >= census.with_bytes as u64,
-        "{label}: submissions"
-    );
+    match mode {
+        // One command buffer per step: the plan's dispatches, the past-prefix
+        // copies and the step's inputs all travel in one submission.
+        StorageMode::Resident => assert_eq!(
+            summary.submissions, steps,
+            "{label}: one queue submission per step"
+        ),
+        StorageMode::Staged => assert!(
+            summary.submissions >= census.with_bytes as u64,
+            "{label}: submissions"
+        ),
+    }
     // ---- the storage-model assertions ------------------------------------
     let stats = backend.residency_stats();
     let resident_binds: u64 = stats.resident_binds.iter().sum();
