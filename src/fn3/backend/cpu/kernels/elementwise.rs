@@ -629,7 +629,7 @@ mod tests {
         assert_eq!(Scalar::F32(f32::NAN).to_i64(), 0);
         assert_eq!(Scalar::F32(1.0e30).to_i64(), i64::MAX);
         assert_eq!(Scalar::F32(-1.0e30).to_i64(), i64::MIN);
-        assert!(Scalar::F32(-0.0).to_bool() == false);
+        assert!(!Scalar::F32(-0.0).to_bool());
         assert!(Scalar::F32(0.5).to_bool());
         assert_eq!(Scalar::Bool(true).to_f32(), 1.0);
     }

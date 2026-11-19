@@ -747,7 +747,9 @@ fn fixture_masked_attention_decomposition() {
 
     // Batch 1, every head, query row 2 is fully masked by the fixture.
     for head in 0..2 {
-        let base = (1 * 2 + head) * 4 * 4 + 2 * 4;
+        let batch = 1;
+        let heads = 2;
+        let base = (batch * heads + head) * 4 * 4 + 2 * 4;
         assert_eq!(
             &probability_values[base..base + 4],
             &[0.25f32, 0.25, 0.25, 0.25],
@@ -999,8 +1001,8 @@ fn real_shape_batched_attention_scores() {
 fn batched_matmul_broadcasts_batch_axes() {
     // The attention projections and the KV-cache concat produce batch axes that
     // broadcast: `[2,1,3,4] @ [1,5,4,6] -> [2,5,3,6]`.
-    let a_values = pseudo_values(2 * 1 * 3 * 4, 0x56_0001, -1.0, 1.0);
-    let b_values = pseudo_values(1 * 5 * 4 * 6, 0x56_0002, -1.0, 1.0);
+    let a_values = pseudo_values(2 * 3 * 4, 0x56_0001, -1.0, 1.0);
+    let b_values = pseudo_values(5 * 4 * 6, 0x56_0002, -1.0, 1.0);
     let a = f32_tensor(&[2, 1, 3, 4], &a_values);
     let b = f32_tensor(&[1, 5, 4, 6], &b_values);
     let mut out = zeros_f32(&[2, 5, 3, 6]);
@@ -1357,11 +1359,11 @@ fn every_supported_op_executes() {
         (OpId::Neg, [-0.0, -0.25, -1.0, -4.0]),
         (OpId::Sqrt, [0.0, 0.5, 1.0, 2.0]),
         (OpId::Erf, [0.0, 0.276_326_4, 0.842_700_8, 1.0]),
-        (OpId::Tanh, [0.0, 0.244_918_66, 0.761_594_18, 0.999_329_33]),
+        (OpId::Tanh, [0.0, 0.244_918_66, 0.761_594_2, 0.999_329_3]),
         (OpId::Gelu, [0.0, 0.149_676_58, 0.841_344_8, 3.999_873_4]),
         (OpId::Relu, [0.0, 0.25, 1.0, 4.0]),
         (OpId::Sin, [0.0, 0.247_403_96, 0.841_470_96, -0.756_802_5]),
-        (OpId::Cos, [1.0, 0.968_912_42, 0.540_302_3, -0.653_643_6]),
+        (OpId::Cos, [1.0, 0.968_912_4, 0.540_302_3, -0.653_643_6]),
     ];
     for (op, expected) in cases {
         let mut out = zeros_f32(&[4]);
@@ -2107,7 +2109,7 @@ fn fixture_manifests_are_self_consistent() {
             "[fixture] suite {name}: {} tensors, {bytes} stored bytes",
             suite.names().len()
         );
-        assert!(suite.names().len() > 0);
+        assert!(!suite.names().is_empty());
         // Every stored tensor's payload digest is verified by `bytes()`.
         for tensor in suite.tensors() {
             let shape = tensor.shape();

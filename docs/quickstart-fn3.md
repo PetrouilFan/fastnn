@@ -255,7 +255,7 @@ cargo build --release --no-default-features --features cli,vulkan
 ```
 
 ```text
-fn3-infer 2.6.0 — build/device/backend diagnosis
+fn3-infer 3.0.0-alpha.1 — build/device/backend diagnosis
   vulkan feature: enabled
 
 device matrix:
@@ -286,17 +286,54 @@ The equivalent run command on a physical GPU is:
   --top-k 3
 ```
 
-On this host it opens the GTX 1080 Ti and then refuses to plan the full decoder
-graph, which is the known alpha blocker:
+On this host it opens the GTX 1080 Ti and runs the full decoder plan:
 
 ```text
 [fn3vk] backend=vulkan adapter="NVIDIA GeForce GTX 1080 Ti" type=DISCRETE_GPU uuid=471b2bda-51e1-6451-e692-ff5d1e146f1e api=1.4.312 driver=580.196.7.0 queue_family=2 validation=false software=false maxMemoryAllocationSize=4292870144 maxStorageBufferRange=4294967295 chunk_cap=536870912
-error: the vulkan backend cannot build the full decoder plan on vulkan(0): op transpose (axis permutation view) is unsupported by backend vulkan: only partially supported: 4- and 8-byte elements (F32/I32/I64); a Bool tensor is rejected with UnsupportedOp naming #59 (at plan instruction 1, op transpose)
-next: full-model Vulkan execution is a known alpha blocker: the kernels exist, but the session's complete decoder plan is not yet validated on Vulkan. Run `--device cpu` for a working inference path; `fn3-infer diagnose` shows what the GPU did open
+fn3-infer inference
+  artifact: /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3
+    bytes:  27,879,928  sha256: 33cf409006d9d9538712486d45e9d3cdf1e3cf9176fdfe3c9af477630ca30122
+    payload crc32: 0xe02e9330
+  onnx: /tmp/opencode/parity-fresh/models/tiny-gpt2/onnx/model.onnx (sha256 e18370ba6247c564a4aef7b6a83aa86d5d036f47a73c0935e51bbcfe178141a1, verified: metadata, geometry and 50 weight payloads match)
+  device: requested vulkan, resolved vulkan(0), backend vulkan (adapter=NVIDIA GeForce GTX 1080 Ti software=false validation=false)
+  envelope: batch 1..=1 seq 1..=128 past 0..=1023 total 1..=1024
+  kv: capacity=1024 tokens, 2 layers x 2 KV heads x 64 head_dim = 2,097,152 bytes
+  prompt: 10 token IDs [464, 2068, 7586, 21831, 18045, 625, 262, 16931, 3290, 13]
+  input: token IDs (this alpha has no text tokenizer)
+  session: phase=empty cache=0 kv_bytes=2,097,152
+  execution: vulkan on vulkan(0)
+  prefill: seq=10 past=0 cache=10 plan=bc15e5dfdd8171156113b43736e55066 plan-cache=0hit/1miss wall=164.63ms
+  logits: shape=[1, 1, 50257] f32 finite=50,257 min=-0.9519 max=1.0020 mean=0.000426
+  top-3: 46737 (1.0020), 28597 (0.9756), 16571 (0.9148)
+  argmax: 46737 (logit 1.0020)
+  predicted next token: 46737 (logit 1.0020)
 ```
 
-Exit code 5. An explicit Vulkan request never becomes a CPU run. On a machine
-without a usable driver the failure is earlier and is exit code 4:
+The cached decode path runs on the same device (the full gate is
+`tests/fn3_e2e.rs` with `--features vulkan`):
+
+```bash
+./target/release/fn3-infer generate \
+  --model /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3 \
+  --onnx "$MODEL" \
+  --tokens "$TOKENS" \
+  --max-new-tokens 3 \
+  --device vulkan \
+  --top-k 3 \
+  --steps
+```
+
+```text
+  decode 1: token=46737 past=10 seq=1 cache=11 plan=c35b87ea3285e6d2e486c099b8d2879e plan-cache=0hit/1miss wall=122.37ms slots=295/1 phase=ready
+  decode 2: token=46737 past=11 seq=1 cache=12 plan=484c7ad6e270ab6c03373fb2e49c572b plan-cache=0hit/1miss wall=122.76ms slots=323/121 phase=ready
+  decode 3: token=46737 past=12 seq=1 cache=13 plan=b18c41f9289b0daf0c333112b1f99f0c plan-cache=0hit/1miss wall=121.55ms slots=351/241 phase=ready
+  generated token IDs: [46737, 46737, 46737]
+```
+
+An explicit Vulkan request never becomes a CPU run. If a plan contains an
+operation the backend does not implement for these operand types, the command
+fails with exit code 5 rather than falling back. On a machine without a usable
+driver the failure is earlier and is exit code 4:
 
 ```bash
 VK_ICD_FILENAMES=/nonexistent/icd.json VK_DRIVER_FILES=/nonexistent/icd.json \

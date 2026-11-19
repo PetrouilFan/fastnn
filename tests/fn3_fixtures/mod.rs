@@ -466,8 +466,10 @@ impl<'a> RefTensor<'a> {
             self.name()
         );
         bytes
-            .chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
             .collect()
     }
 
@@ -487,12 +489,10 @@ impl<'a> RefTensor<'a> {
             self.name()
         );
         bytes
-            .chunks_exact(8)
-            .map(|chunk| {
-                i64::from_le_bytes([
-                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-                ])
-            })
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|chunk| i64::from_le_bytes(*chunk))
             .collect()
     }
 
@@ -998,9 +998,9 @@ pub fn sha256(bytes: &[u8]) -> [u8; 32] {
     }
     padded.extend_from_slice(&bit_length.to_be_bytes());
 
-    for block in padded.chunks_exact(64) {
+    for block in padded.as_chunks::<64>().0 {
         let mut words = [0u32; 64];
-        for (position, chunk) in block.chunks_exact(4).enumerate() {
+        for (position, chunk) in block.as_chunks::<4>().0.iter().enumerate() {
             words[position] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         }
         for position in 16..64 {

@@ -250,6 +250,10 @@ struct Agreement {
 }
 
 impl Case {
+    // A table-driven helper: eight named arguments (two shapes and two value
+    // slices plus the output shape and tolerances) read better than a struct
+    // built at each of the 41 call sites.
+    #[allow(clippy::too_many_arguments)]
     fn contiguous(
         label: impl Into<String>,
         lhs_dims: &[u64],
@@ -794,8 +798,8 @@ fn batched_rank_three_and_four_broadcast_like_the_cpu_reference() {
     );
 
     // Rank-4 with two-sided broadcast: [2,1,3,4] @ [1,5,4,6] -> [2,5,3,6].
-    let a4 = pseudo_values(2 * 1 * 3 * 4, 0x56_0006, -1.0, 1.0);
-    let b4 = pseudo_values(1 * 5 * 4 * 6, 0x56_0007, -1.0, 1.0);
+    let a4 = pseudo_values(2 * 3 * 4, 0x56_0006, -1.0, 1.0);
+    let b4 = pseudo_values(5 * 4 * 6, 0x56_0007, -1.0, 1.0);
     run_case(
         &backend,
         &Case::contiguous(

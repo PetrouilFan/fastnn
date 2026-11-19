@@ -468,7 +468,7 @@ fn broadcast_binary_ops_replace_the_smoke_kernel_and_match_cpu() {
     let cpu_a = tensor_on(DeviceId::Cpu, &[tail as u64], DType::F32, &f32_bytes(&a));
     let cpu_b = tensor_on(DeviceId::Cpu, &[tail as u64], DType::F32, &f32_bytes(&b));
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Add,
         &[&gpu_a, &gpu_b],
         &[tail as u64],
@@ -491,7 +491,7 @@ fn broadcast_binary_ops_replace_the_smoke_kernel_and_match_cpu() {
     let gpu_exp = tensor_on(device, &[1], DType::F32, &f32_bytes(&exponents));
     let cpu_exp = tensor_on(DeviceId::Cpu, &[1], DType::F32, &f32_bytes(&exponents));
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Pow,
         &[&gpu_a, &gpu_exp],
         &[tail as u64],
@@ -511,7 +511,7 @@ fn broadcast_binary_ops_replace_the_smoke_kernel_and_match_cpu() {
     let gpu_s = tensor_on(device, &[1], DType::F32, &f32_bytes(&scalar));
     let cpu_s = tensor_on(DeviceId::Cpu, &[1], DType::F32, &f32_bytes(&scalar));
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Mul,
         &[&gpu_a, &gpu_s],
         &[tail as u64],
@@ -536,7 +536,7 @@ fn broadcast_binary_ops_replace_the_smoke_kernel_and_match_cpu() {
     let cpu_base = tensor_on(DeviceId::Cpu, &[8], DType::F32, &f32_bytes(&base));
     let cpu_exp = tensor_on(DeviceId::Cpu, &[8], DType::F32, &f32_bytes(&exponents));
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Pow,
         &[&gpu_base, &gpu_exp],
         &[8],
@@ -567,7 +567,7 @@ fn broadcast_binary_ops_replace_the_smoke_kernel_and_match_cpu() {
     let cpu_base = tensor_on(DeviceId::Cpu, &[1], DType::F32, &f32_bytes(&neg_base));
     let cpu_exp = tensor_on(DeviceId::Cpu, &[1], DType::F32, &f32_bytes(&fractional));
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Pow,
         &[&gpu_base, &gpu_exp],
         &[1],
@@ -692,7 +692,7 @@ fn where_and_comparisons_match_cpu() {
     let cpu_x = tensor_on(DeviceId::Cpu, &[2, 3, 4], DType::F32, &f32_bytes(&x));
     let cpu_y = tensor_on(DeviceId::Cpu, &[1], DType::F32, &f32_bytes(&y));
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Where,
         &[&gpu_cond, &gpu_x, &gpu_y],
         &[2, 3, 4],
@@ -728,7 +728,7 @@ fn where_and_comparisons_match_cpu() {
     let cpu_x = tensor_on(DeviceId::Cpu, &[4], DType::I64, &i64_bytes(&xi));
     let cpu_y = tensor_on(DeviceId::Cpu, &[1], DType::I64, &i64_bytes(&yi));
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Where,
         &[&gpu_cond, &gpu_x, &gpu_y],
         &[4],
@@ -811,7 +811,7 @@ fn where_and_comparisons_match_cpu() {
         &f32_bytes(&pattern(count, 43)),
     );
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Less,
         &[&gpu_a, &gpu_b],
         &[count as u64],
@@ -920,7 +920,7 @@ fn embedding_lookup_matches_the_fixture_exactly() {
     let cpu_indices = tensor_on(DeviceId::Cpu, &[2, 5], DType::I64, &i64_bytes(&indices));
 
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Gather,
         &[&gpu_table, &gpu_indices],
         &[2, 5, 7],
@@ -970,7 +970,7 @@ fn gather_covers_other_axes_index_dtypes_and_bad_indices() {
     let cpu_table = tensor_on(DeviceId::Cpu, &[2, 3, 4], DType::F32, &f32_bytes(&table));
     let cpu_indices = tensor_on(DeviceId::Cpu, &[5], DType::I64, &i64_bytes(&indices));
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Gather,
         &[&gpu_table, &gpu_indices],
         &[2, 5, 4],
@@ -995,7 +995,7 @@ fn gather_covers_other_axes_index_dtypes_and_bad_indices() {
     let cpu_table = tensor_on(DeviceId::Cpu, &[4], DType::I64, &i64_bytes(&shape_vector));
     let cpu_indices = tensor_on(DeviceId::Cpu, &[3], DType::I32, &i32_bytes(&refs));
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Gather,
         &[&gpu_table, &gpu_indices],
         &[3],
@@ -1048,7 +1048,7 @@ fn gather_covers_other_axes_index_dtypes_and_bad_indices() {
         &i64_bytes(&[6, 0, 2, -1, 4]),
     );
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Gather,
         &[&gpu_table, &gpu_indices],
         &[5],
@@ -1088,7 +1088,7 @@ fn transpose_and_shape_views_match_cpu() {
     let cpu_in = tensor_on(DeviceId::Cpu, &[2, 3, 4], DType::F32, &f32_bytes(&values));
     let permuted = OpParams::default().with_axes([2, 0, 1]);
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Transpose,
         &[&gpu_in],
         &[4, 2, 3],
@@ -1106,7 +1106,7 @@ fn transpose_and_shape_views_match_cpu() {
 
     // The ONNX default reverses every axis.
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Transpose,
         &[&gpu_in],
         &[4, 3, 2],
@@ -1122,7 +1122,7 @@ fn transpose_and_shape_views_match_cpu() {
     let cpu_in = tensor_on(DeviceId::Cpu, &[2, 2, 3, 4], DType::I64, &values);
     let permuted = OpParams::default().with_axes([0, 1, 3, 2]);
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Transpose,
         &[&gpu_in],
         &[2, 2, 4, 3],
@@ -1146,7 +1146,7 @@ fn transpose_and_shape_views_match_cpu() {
     let gpu_target = tensor_on(device, &[2], DType::I64, &target);
     let cpu_target = tensor_on(DeviceId::Cpu, &[2], DType::I64, &target);
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Reshape,
         &[&gpu_in, &gpu_target],
         &[6, 4],
@@ -1166,7 +1166,7 @@ fn transpose_and_shape_views_match_cpu() {
     let gpu_target = tensor_on(device, &[3], DType::I64, &target);
     let cpu_target = tensor_on(DeviceId::Cpu, &[3], DType::I64, &target);
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Reshape,
         &[&gpu_in, &gpu_target],
         &[2, 3, 4],
@@ -1184,7 +1184,7 @@ fn transpose_and_shape_views_match_cpu() {
 
     // Flatten.
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Flatten,
         &[&gpu_in],
         &[6, 4],
@@ -1210,7 +1210,7 @@ fn transpose_and_shape_views_match_cpu() {
         &f32_bytes(&values),
     );
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Squeeze,
         &[&gpu_in],
         &[3, 4],
@@ -1225,7 +1225,7 @@ fn transpose_and_shape_views_match_cpu() {
     let gpu_axes = tensor_on(device, &[1], DType::I64, &axes);
     let cpu_axes = tensor_on(DeviceId::Cpu, &[1], DType::I64, &axes);
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Squeeze,
         &[&gpu_in, &gpu_axes],
         &[1, 3, 4],
@@ -1247,7 +1247,7 @@ fn transpose_and_shape_views_match_cpu() {
     let cpu_in = tensor_on(DeviceId::Cpu, &[3, 4], DType::F32, &f32_bytes(&values));
     let axes = OpParams::default().with_axes([0, 3]);
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Unsqueeze,
         &[&gpu_in],
         &[1, 3, 4, 1],
@@ -1302,7 +1302,7 @@ fn slice_split_and_concat_match_cpu() {
         tensor_on(DeviceId::Cpu, &[1], DType::I64, &steps),
     ];
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Slice,
         &[
             &gpu_in,
@@ -1348,7 +1348,7 @@ fn slice_split_and_concat_match_cpu() {
         tensor_on(DeviceId::Cpu, &[1], DType::I64, &steps),
     ];
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Slice,
         &[
             &gpu_in,
@@ -1445,7 +1445,7 @@ fn slice_split_and_concat_match_cpu() {
     ];
     let concat_axis0 = OpParams::default();
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Concat,
         &[&gpu_parts[0], &gpu_parts[1], &gpu_parts[2]],
         &[4, 2, 3],
@@ -1474,7 +1474,7 @@ fn slice_split_and_concat_match_cpu() {
     ];
     let params = OpParams::default().with_axes([1]);
     let got = run_gpu(
-        &*backend,
+        &backend,
         OpId::Concat,
         &[&gpu_parts[0], &gpu_parts[1], &gpu_parts[2]],
         &[2, 4],

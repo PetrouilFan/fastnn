@@ -66,33 +66,13 @@ fi
 echo ""
 echo "--- Version consistency ---"
 
-CARGO_VER=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
-PYPROJECT_VER=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
-INIT_VER=$(grep -m1 '__version__' fastnn/__init__.py | sed 's/.*"\(.*\)".*/\1/')
-
-echo "  Cargo.toml:     $CARGO_VER"
-echo "  pyproject.toml: $PYPROJECT_VER"
-echo "  __init__.py:    $INIT_VER"
-
-if [ "$CARGO_VER" = "$PYPROJECT_VER" ] && [ "$PYPROJECT_VER" = "$INIT_VER" ]; then
-  pass "All version strings match ($CARGO_VER)"
+# One checker owns the version rule: SemVer for Cargo, PEP 440 for Python,
+# every version store (manifests, both lockfiles, uv.lock, the facade) and the
+# changelog entry. See scripts/ci/check-versions.py.
+if python3 scripts/ci/check-versions.py; then
+  pass "Versions agree in Cargo.toml, Cargo.lock, fuzz/Cargo.lock, pyproject.toml, uv.lock, fastnn/__init__.py and CHANGELOG.md"
 else
-  fail "Version mismatch: Cargo=$CARGO_VER pyproject=$PYPROJECT_VER init=$INIT_VER"
-fi
-
-for lockfile in Cargo.lock fuzz/Cargo.lock uv.lock; do
-  LOCK_VER=$(awk '/name = "fastnn"/{getline; sub(/version = "/, ""); sub(/"/, ""); print; exit}' "$lockfile")
-  if [ "$LOCK_VER" = "$CARGO_VER" ]; then
-    pass "$lockfile package version matches ($LOCK_VER)"
-  else
-    fail "$lockfile package version mismatch: expected $CARGO_VER, got $LOCK_VER"
-  fi
-done
-
-if grep -Fq "## [$CARGO_VER]" CHANGELOG.md; then
-  pass "CHANGELOG.md contains a $CARGO_VER release entry"
-else
-  fail "CHANGELOG.md has no [$CARGO_VER] release entry"
+  fail "Version drift detected (run: python3 scripts/ci/check-versions.py)"
 fi
 
 # ── 4. Release workflow exists and references wheel artifacts ─────────────────

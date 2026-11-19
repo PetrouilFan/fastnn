@@ -1,8 +1,10 @@
 # FN3-04 reproducible benchmark and profiling harness
 
-Status: schema v1, baseline (2.x) adapter working, fn3 (3.0) adapter seam failing
-loudly by design. Worktree `fn3/50-bench`, base commit
-`a2c0759fff8bdcb7c943e53442f3382b86e59b66`.
+Status: schema v1, baseline (2.x) adapter working, and the fn3 (3.0) adapter
+now measures the pinned prepared model behind the `fn3` Cargo feature (FN3-21
+/ #67). Original worktree `fn3/50-bench`, base commit
+`a2c0759fff8bdcb7c943e53442f3382b86e59b66`; the alpha candidate is
+`3.0.0-alpha.1`.
 
 The harness measures the runtime through public APIs only. It never edits runtime
 state, never synthesises results for missing capabilities, and records raw
@@ -204,22 +206,50 @@ FN3-21/25/26/29 automation.
 ## Adapters
 
 - `baseline` (working): 2.x CPU runtime in this revision.
-- `fn3` (seam): points at the future `fastnn::fn3` runtime. It fails with
-  `fn3 adapter is not built in this revision (base a2c0759…)` and exit code 3;
-  it never emits baseline numbers under the fn3 name. The required runtime
-  surface is documented in `tools/bench/adapters/fn3.rs`:
+- `fn3` (working when built with `--features fn3`): measures the real pinned
+  prepared model from a manifest. Without the feature the adapter refuses with
+  the exact rebuild command and exit code 3; it never emits baseline numbers
+  under the fn3 name. Public entry points in `tools/bench/adapters/fn3.rs`:
 
-  1. `load() -> PreparedModel` — read/instantiate the artifact, separate from
-     compilation.
-  2. `prepare(model) -> PreparedModel` — compile/plan/upload, separate timing.
-  3. `prefill(model, &[u32]) -> ()` — prompt forward, synchronized before
-     return, first-token latency observable at the caller.
-  4. `decode(model, u32) -> ()` — steady-state incremental step (KV cache).
-  5. `last_device_time_ms() -> Option<f64>` — device time for the last op.
-  6. `peak_device_memory_bytes() -> Option<u64>` — device memory where
-     queryable.
-  7. An allocation/telemetry snapshot accessor for per-step counters
-     (optional; unavailable is acceptable if explicitly reported).
+  1. `ModelManifest::from_path` — a JSON manifest naming the ONNX source and
+     the `.fnn3` artifact, with optional byte lengths that are enforced.
+  2. `load(&manifest) -> LoadedModel` — parse the artifact, import the ONNX
+     graph, prove they describe the same model; no plan or weight tensor built.
+  3. `prepare(LoadedModel) -> PreparedModel` — open the device, build the
+     planner and initial plan, materialise weights; timed separately from load.
+  4. `PreparedModel::session() -> RunSession` — one session reuses the prepared
+     model; `prefill` and `decode` are timed around synchronized calls and the
+     session's plan cache persists across `reset`.
+  5. `Runtime::last_device_time_ms() -> Option<f64>` and
+     `Runtime::peak_device_memory_bytes() -> Option<u64>` — `None`, never a
+     fabricated zero, when the backend does not report them.
+  6. `Runtime::last_operation_counters() -> BTreeMap<String, u64>` — plan
+     hits/misses/evictions, slot allocations/reuses/bytes, KV bytes, session
+     step/cache/token counters.
+  7. `PreparedModel::geometry()` and `PreparedModel::identity()` — the schema's
+     decoder geometry and model identity, including artifact/source FNV-1a
+     checksums and byte counts.
+
+Build and run the real model:
+
+```bash
+CARGO_BUILD_JOBS=12 cargo build --release --no-default-features \
+  --features fn3,simd,parallel,prepared-plan,fusion-forward --bin fn3-bench
+CARGO_BUILD_JOBS=12 cargo build --release --no-default-features --features cli --bin fn3-infer
+
+./target/release/fn3-infer prepare \
+  --onnx /tmp/opencode/parity-fresh/models/tiny-gpt2/onnx/model.onnx \
+  --out /tmp/opencode/fn3-bench/tiny-gpt2.fnn3
+
+./target/release/fn3-bench run --adapter fn3 --suite model --quick \
+  --fn3-manifest tools/bench/fn3-model.example.json \
+  --out /tmp/opencode/fn3-bench/model.json
+```
+
+`tools/bench/fn3-model.example.json` holds the pinned prompt and paths; copy it
+next to the model and edit the two absolute paths. A missing manifest, a
+missing model or a source/artifact mismatch is an error, not a placeholder
+measurement.
 
 ## Reuse inventory
 

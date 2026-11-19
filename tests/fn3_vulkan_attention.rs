@@ -144,6 +144,10 @@ fn assert_validation_clean(counts_before: (u64, u64)) {
         "validation layer reported errors/warnings: before {counts_before:?}, after \
          {counts_after:?}; see the [fn3vk][validation] lines above"
     );
+    eprintln!(
+        "[fn3vk][validation] errors={} warnings={} (delta 0/0 since the section opened)",
+        counts_after.0, counts_after.1
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -474,6 +478,9 @@ fn effective_mask(
 }
 
 /// The CPU reference decomposition: `MatMul → Div → Add(mask) → Softmax → MatMul`.
+// A reference helper mirroring the attention operands one-for-one; grouping
+// them into a struct would hide which tensor each shape belongs to.
+#[allow(clippy::too_many_arguments)]
 fn cpu_attention(
     q: &[f32],
     k: &[f32],
@@ -996,7 +1003,9 @@ fn fixture_attention_fused_matches_the_decomposition() {
     // Batch 1, both heads, query row 2 is fully masked by the fixture: the
     // probabilities must be exactly uniform and finite, and so must the result.
     for head in 0..2usize {
-        let base = ((1 * 2 + head) * 4 + 2) * 4;
+        let batch = 1;
+        let heads = 2;
+        let base = ((batch * heads + head) * 4 + 2) * 4;
         let row = &probs_values[base..base + 4];
         assert_exactly_uniform("attention all-masked probs row", row, 0.25);
         eprintln!(
@@ -1315,7 +1324,7 @@ fn gqa_head_broadcasting_matches_the_expanded_cpu_reference() {
     let q_values = pseudo_values(2 * 4 * 5 * 8, 0x63_0001, -1.5, 1.5);
     let k_values = pseudo_values(2 * 2 * 5 * 8, 0x63_0002, -1.5, 1.5);
     let v_values = pseudo_values(2 * 2 * 5 * 8, 0x63_0003, -1.5, 1.5);
-    let mut mask_values = vec![0.0f32; 2 * 1 * 5 * 5];
+    let mut mask_values = vec![0.0f32; 2 * 5 * 5];
     for batch in 0..2usize {
         for row in 0..5usize {
             for column in 0..5usize {
@@ -1419,8 +1428,8 @@ fn causal_mode_and_a_sequence_longer_than_the_fixture() {
         head_dim: 16,
     };
     let q_values = pseudo_values(2 * 33 * 16, 0x64_0001, -1.0, 1.0);
-    let k_values = pseudo_values(1 * 33 * 16, 0x64_0002, -1.0, 1.0);
-    let v_values = pseudo_values(1 * 33 * 16, 0x64_0003, -1.0, 1.0);
+    let k_values = pseudo_values(33 * 16, 0x64_0002, -1.0, 1.0);
+    let v_values = pseudo_values(33 * 16, 0x64_0003, -1.0, 1.0);
 
     let q = f32_tensor_on(device, &[1, 2, 33, 16], &q_values);
     let k = f32_tensor_on(device, &[1, 1, 33, 16], &k_values);

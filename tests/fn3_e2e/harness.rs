@@ -104,8 +104,8 @@ pub fn sha256(bytes: &[u8]) -> String {
     message.extend_from_slice(&bit_len.to_be_bytes());
 
     let mut schedule = [0u32; 64];
-    for chunk in message.chunks_exact(64) {
-        for (index, word) in chunk.chunks_exact(4).enumerate() {
+    for chunk in message.as_chunks::<64>().0 {
+        for (index, word) in chunk.as_chunks::<4>().0.iter().enumerate() {
             schedule[index] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
         }
         for index in 16..64 {
@@ -560,8 +560,10 @@ pub fn census(
     let plan = Planner::new(import, backend)
         .plan(envelope, dims(seq, past))
         .unwrap_or_else(|error| panic!("plan ({seq}, {past}): {error}"));
-    let mut census = Census::default();
-    census.total = plan.instructions().len();
+    let mut census = Census {
+        total: plan.instructions().len(),
+        ..Census::default()
+    };
     for instruction in plan.instructions() {
         let bytes = instruction
             .outputs
@@ -987,7 +989,7 @@ pub fn check_isolation_and_capacity(
     for (index, (a, b)) in first_steps.iter().zip(&second_steps).enumerate() {
         assert_eq!(a, b, "decode step {} differs between sessions", index + 1);
     }
-    assert_eq!(first.step(), (context - PROMPT as u64) as u64);
+    assert_eq!(first.step(), context - PROMPT as u64);
     assert_eq!(second.step(), 2);
     assert_eq!(second.cache_len(), PROMPT as u64 + 2);
 

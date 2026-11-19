@@ -712,15 +712,15 @@ impl<'a> TensorMut<'a> {
                 detail: format!("window end {start} + {len} exceeds usize::MAX"),
             })?;
         let byte_len = self.buffer.len();
-        let bytes = self
-            .buffer
-            .as_bytes_mut()
-            .get_mut(start..end)
-            .ok_or_else(|| Fn3Error::OutOfBounds {
-                what: "TensorMut::as_mut_slice (storage bytes)",
-                index: end as u64,
-                len: byte_len as u64,
-            })?;
+        let bytes =
+            self.buffer
+                .as_bytes_mut()
+                .get_mut(start..end)
+                .ok_or(Fn3Error::OutOfBounds {
+                    what: "TensorMut::as_mut_slice (storage bytes)",
+                    index: end as u64,
+                    len: byte_len as u64,
+                })?;
         bytemuck::try_cast_slice_mut(bytes).map_err(|error| Fn3Error::StorageCast {
             element,
             byte_len: len,
@@ -1067,18 +1067,17 @@ fn materialise_contiguous(storage: &Storage, meta: &TensorMeta) -> Result<Tensor
                         axis: None,
                         detail: "destination window end exceeds usize::MAX".to_string(),
                     })?;
-            let from =
-                source
-                    .get(source_start..source_end)
-                    .ok_or_else(|| Fn3Error::OutOfBounds {
-                        what: "materialise_contiguous (source bytes)",
-                        index: source_end as u64,
-                        len: source.len() as u64,
-                    })?;
+            let from = source
+                .get(source_start..source_end)
+                .ok_or(Fn3Error::OutOfBounds {
+                    what: "materialise_contiguous (source bytes)",
+                    index: source_end as u64,
+                    len: source.len() as u64,
+                })?;
             let destination_len = destination.len();
             let to = destination
                 .get_mut(destination_start..destination_end)
-                .ok_or_else(|| Fn3Error::OutOfBounds {
+                .ok_or(Fn3Error::OutOfBounds {
                     what: "materialise_contiguous (destination bytes)",
                     index: destination_end as u64,
                     len: destination_len as u64,

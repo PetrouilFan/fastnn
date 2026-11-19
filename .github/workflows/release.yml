@@ -51,11 +51,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          VERSION=${GITHUB_REF_NAME#v}
-          test "$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)" = "$VERSION"
-          test "$(sed -n 's/^version = "\([^"]*\)"/\1/p' pyproject.toml | head -1)" = "$VERSION"
-          test "$(sed -n 's/^__version__ = "\([^"]*\)"/\1/p' fastnn/__init__.py | head -1)" = "$VERSION"
-          grep -Fq "## [$VERSION]" CHANGELOG.md
+          # Cargo writes 3.0.0-alpha.1, Python writes 3.0.0a1; the checker
+          # normalises both and refuses any other location that drifted.
+          python3 scripts/ci/check-versions.py --tag "$GITHUB_REF_NAME"
 
   quality:
     needs: validate-tag

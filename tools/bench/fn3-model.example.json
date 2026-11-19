@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "tiny-random-gpt2",
+  "revision": "90f61e71d6fa8e571d0ab0f95a637a5d7d8ed52f",
+  "source": "/tmp/opencode/parity-fresh/models/tiny-gpt2/onnx/model.onnx",
+  "artifact": "/tmp/opencode/fn3-bench/tiny-gpt2.fnn3",
+  "source_bytes": 27897974,
+  "artifact_bytes": 27879928,
+  "device": "cpu",
+  "capacity": 1024,
+  "prompt_tokens": [464, 2068, 7586, 21831, 18045, 625, 262, 16931, 3290, 13],
+  "decode_tokens": [640, 11, 612]
+}

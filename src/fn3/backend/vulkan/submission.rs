@@ -696,7 +696,7 @@ impl Recorder {
                     ),
                 ));
             }
-            if alignment != 0 && supplied.offset % alignment != 0 {
+            if alignment != 0 && !supplied.offset.is_multiple_of(alignment) {
                 return Err(Error::internal(format!(
                     "kernel \"{}\": binding {} offset {} is not a multiple of {} \
                      (min buffer offset alignment)",

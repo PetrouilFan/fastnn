@@ -636,11 +636,9 @@ fn cached_decode_matches_four_committed_steps() {
             cached,
             logits.as_f32_slice().unwrap(),
         );
-        if let Some(reference) =
-            slice_summary(&format!("full.p{length}.logits"), length as usize - 1)
-        {
+        if let Some(reference) = slice_summary(&format!("full.p{length}.logits"), length - 1) {
             compare_summary(
-                &format!("full.p{length}.logits[{}] (summary)", length as usize - 1),
+                &format!("full.p{length}.logits[{}] (summary)", length - 1),
                 logits.as_f32_slice().unwrap(),
                 &reference,
             );

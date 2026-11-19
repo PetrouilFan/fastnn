@@ -722,6 +722,7 @@ mod tests {
             warmup: Some(0),
             manifest_dir: PathBuf::from("."),
             reuse_criterion: false,
+            fn3_manifest: None,
         }
     }
 
