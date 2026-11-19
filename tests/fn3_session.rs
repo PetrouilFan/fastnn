@@ -1531,6 +1531,10 @@ mod gpu {
 #[test]
 fn weight_int8_report_appears_only_after_a_completed_step() {
     let Some(import) = pinned() else {
+        eprintln!(
+            "[fn3][skip] FASTNN_FN3_ONNX_MODEL is not set to the pinned tiny GPT-2 ONNX; \
+             the INT8 session report was not exercised"
+        );
         return;
     };
     let (model, _) = prepared(&import, DeviceId::Cpu);
@@ -1567,6 +1571,7 @@ fn weight_int8_report_appears_only_after_a_completed_step() {
     assert_eq!(packed_payload, 417_792);
     assert_eq!(report.shared_weight_bytes, 0);
     assert_eq!(report.dense_weight_bytes, 26_260_132);
+    let first_prepare = report.prepare;
 
     quantized.reset();
     assert!(
@@ -1576,12 +1581,28 @@ fn weight_int8_report_appears_only_after_a_completed_step() {
     quantized
         .prefill(&token_ids()[..10])
         .expect("repeated prefill");
+    let repeated = quantized
+        .weight_int8_report()
+        .expect("a report after the repeated step");
+    assert_eq!(repeated.packed_payload_bytes, packed_payload);
+    assert_eq!(repeated.routes.len(), 13);
     assert_eq!(
-        quantized
-            .weight_int8_report()
-            .expect("a report after the repeated step")
-            .packed_payload_bytes,
-        packed_payload,
-        "the repeated step reused the packed copies"
+        repeated
+            .routes
+            .iter()
+            .filter(|route| route.fallback.is_none())
+            .count(),
+        8,
+        "the repeated step routes the same eight MatMuls to the packed copies"
+    );
+    // A packed copy is never rebuilt: `prepare` measures the whole route/pack
+    // phase, and a rebuild would pack the same bytes again. The unit test
+    // `a_repeated_step_reuses_the_packed_copy` pins the same property on a
+    // synthetic plan without the pinned model.
+    assert!(
+        repeated.prepare < first_prepare,
+        "re-packing would cost prepare time again: {:?} vs {:?}",
+        repeated.prepare,
+        first_prepare
     );
 }

@@ -462,11 +462,17 @@ struct TrafficSnapshot {
     late_persistent: u64,
 }
 
-/// A snapshot of the per-step INT8-weight report the CLI prints.
+/// A snapshot of the last completed step's INT8-weight report.
 ///
-/// Field names match the CLI's labels with `-` written as `_`; [`as_dict`]
-/// returns the labels themselves, so a single oracle can compare a Python run
-/// with the CLI's `--steps` output.
+/// Attribute names are the CLI's labels with `-` written as `_`. [`as_dict`]
+/// returns the CLI labels themselves (with `/` also written as `_`), so one
+/// oracle can compare a Python run with the CLI's `--steps` output; it adds
+/// `matmul-total`, the denominator of the CLI's `packed-matmuls=P/T`.
+///
+/// Coverage (`packed_matmuls`, `fp32_matmuls`, `routes`) describes the last
+/// completed step. The byte figures and `route_pack_upload` are cumulative for
+/// the session, matching what the CLI prints. Every field is `None` after
+/// [`reset`](PySession::reset) and before the first step.
 ///
 /// [`as_dict`]: PyWeightInt8Report::as_dict
 #[pyclass(module = "fastnn._core.inference", name = "WeightInt8Report", frozen)]
@@ -520,6 +526,9 @@ impl PyWeightInt8Report {
     /// The CLI label for [`dense_weight`]: `"fp32-retained"` on the CPU and
     /// `"dense-weight"` on a device.
     ///
+    /// [`as_dict`](PyWeightInt8Report::as_dict) uses this label as the key for
+    /// the dense figure, exactly as the CLI prints it.
+    ///
     /// [`dense_weight`]: PyWeightInt8Report::dense_weight
     #[getter]
     fn dense_label(&self) -> &'static str {
@@ -538,7 +547,8 @@ impl PyWeightInt8Report {
         self.model_weight
     }
 
-    /// Preparation wall time in milliseconds (`route/pack/upload`).
+    /// Preparation wall time in milliseconds (`route/pack/upload`). The CLI
+    /// formats the same number for display, switching to seconds above 1 s.
     #[getter]
     fn route_pack_upload(&self) -> f64 {
         self.route_pack_upload
@@ -580,19 +590,24 @@ impl PyWeightInt8Report {
 
     /// The report as the CLI's own labels.
     ///
-    /// The keys are `packed-matmuls`, `fp32-matmuls`, `packed-payload`,
-    /// `packed-source`, `dense-weight`, `shared-weight`, `model-weight`,
-    /// `route/pack/upload` and `dense-label`; the three traffic keys
-    /// (`packed-prepare`, `staged-host-bytes`, `late-persistent`) are present
-    /// only when the session runs on a device that reports them.
+    /// The keys are `packed-matmuls`, `matmul-total`, `fp32-matmuls`,
+    /// `packed-payload`, `packed-source`, the dense label (`dense-weight`, or
+    /// `fp32-retained` on the CPU), `shared-weight`, `model-weight` and
+    /// `route/pack/upload`; the three traffic keys (`packed-prepare`,
+    /// `staged-host-bytes`, `late-persistent`) are present only when the
+    /// session runs on a device that reports them.
+    ///
+    /// Values are the raw numbers the CLI formats: `route/pack/upload` is
+    /// milliseconds, and `packed-matmuls` is the count alone, with the
+    /// denominator under `matmul-total`.
     fn as_dict(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
         let dict = pyo3::types::PyDict::new(py);
         dict.set_item("packed-matmuls", self.packed_matmuls)?;
+        dict.set_item("matmul-total", self.packed_matmuls + self.fp32_matmuls)?;
         dict.set_item("fp32-matmuls", self.fp32_matmuls)?;
         dict.set_item("packed-payload", self.packed_payload)?;
         dict.set_item("packed-source", self.packed_source)?;
-        dict.set_item("dense-weight", self.dense_weight)?;
-        dict.set_item("dense-label", self.dense_label)?;
+        dict.set_item(self.dense_label, self.dense_weight)?;
         dict.set_item("shared-weight", self.shared_weight)?;
         dict.set_item("model-weight", self.model_weight)?;
         dict.set_item("route/pack/upload", self.route_pack_upload)?;
@@ -981,6 +996,12 @@ impl PySession {
     }
 
     /// Clear the cache extent and the counters; keep the buffers and the plans.
+    ///
+    /// The INT8 packed copies survive (they are model-derived), but the
+    /// per-step report does not: [`weight_int8_report`] is `None` until the
+    /// next completed step.
+    ///
+    /// [`weight_int8_report`]: PySession::weight_int8_report
     fn reset(&self, py: Python<'_>) {
         py.detach(|| {
             let mut guard = self.inner.lock();
@@ -1050,9 +1071,10 @@ impl PySession {
     /// Per-step INT8-weight coverage and traffic, or `None`.
     ///
     /// `None` when the session was loaded with `weight_int8=False` (the
-    /// default), and `None` before an INT8 session's first completed step. The
-    /// object mirrors the CLI's `--steps` lines: its fields are the CLI labels
-    /// with `-` written as `_`, and `as_dict()` uses the labels themselves.
+    /// default), and `None` before an INT8 session's first completed step or
+    /// after [`reset`](PySession::reset). The object mirrors the CLI's
+    /// `--steps` lines: its fields are the CLI labels with `-` written as `_`,
+    /// and `as_dict()` uses the labels themselves.
     #[getter]
     fn weight_int8_report(&self, py: Python<'_>) -> PyResult<Option<Py<PyWeightInt8Report>>> {
         let snapshot = self.read(py, WeightInt8Snapshot::of);

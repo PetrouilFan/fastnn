@@ -45,8 +45,10 @@ INT8 and keeps everything else FP32. The artifact is unchanged, and the default
     print(report.packed_payload, report.packed_source, report.dense_weight)
     print(report.as_dict())     # the CLI's own field names
 
-``weight_int8_report`` is ``None`` when the option is off and before the first
-completed step. On a host-staged Vulkan session the option is refused with
+``weight_int8_report`` is ``None`` when the option is off, before the first
+completed step and after ``reset()``. Its ``as_dict()`` returns the CLI's own
+labels, with ``matmul-total`` added for the denominator of ``packed-matmuls``.
+On a host-staged Vulkan session the option is refused with
 :class:`Fn3UnsupportedError`; it never falls back to the CPU.
 
 Devices

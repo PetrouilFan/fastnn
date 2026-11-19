@@ -79,7 +79,8 @@ def test_a_drifted_python_version_fails_the_checker(tmp_path):
     result = run_checker("--root", str(tmp_path))
     assert result.returncode != 0
     assert "pyproject.toml" in result.stderr
-    assert "3.0.0b1" in result.stderr
+    assert CARGO in result.stderr
+    assert "2.5.0" in result.stderr
 
 
 def test_a_missing_changelog_entry_fails_the_checker(tmp_path):

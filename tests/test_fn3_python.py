@@ -850,10 +850,23 @@ def test_weight_int8_reports_the_cli_fields(artifact_path):
     assert report.fp32_matmuls == 5
     assert len(report.routes) == 13
     assert report.packed_matmuls + report.fp32_matmuls == len(report.routes)
-    assert all(route.route for route in report.routes)
     assert sum(route.packed for route in report.routes) == report.packed_matmuls
     assert any(route.route == "computed-rhs" for route in report.routes)
     assert any(route.packed and route.route == "packed" for route in report.routes)
+    codes = {
+        "packed",
+        "computed-rhs",
+        "constant-rhs",
+        "graph-input-rhs",
+        "activation-layout",
+        "output-layout",
+        "vulkan-operands",
+        "packing",
+    }
+    for route in report.routes:
+        assert route.route in codes, route.route
+        assert route.instruction >= 0
+        assert route.rhs
 
     # Bytes. The packed set replaces exactly packed_source - packed_payload.
     assert report.model_weight == 27_833_180
@@ -862,7 +875,8 @@ def test_weight_int8_reports_the_cli_fields(artifact_path):
     assert report.dense_weight == 26_260_132
     assert report.shared_weight == 0
     assert 0 < report.packed_payload < report.packed_source
-    assert report.route_pack_upload >= 0.0
+    assert np.isfinite(report.route_pack_upload)
+    assert report.route_pack_upload > 0.0
 
     # The CPU keeps host tensors, so the CLI calls this counter
     # `fp32-retained`, and prints no device-traffic line.
@@ -874,11 +888,13 @@ def test_weight_int8_reports_the_cli_fields(artifact_path):
     # as_dict() is the CLI's own vocabulary, for one oracle over both paths.
     fields = report.as_dict()
     assert fields["packed-matmuls"] == report.packed_matmuls
+    assert fields["matmul-total"] == 13
     assert fields["fp32-matmuls"] == report.fp32_matmuls
     assert fields["packed-payload"] == report.packed_payload
     assert fields["packed-source"] == report.packed_source
-    assert fields["dense-weight"] == report.dense_weight
-    assert fields["dense-label"] == report.dense_label
+    assert fields[report.dense_label] == report.dense_weight
+    assert "dense-weight" not in fields, "the CPU keys the dense figure fp32-retained"
+    assert "dense-label" not in fields
     assert fields["shared-weight"] == report.shared_weight
     assert fields["model-weight"] == report.model_weight
     assert fields["route/pack/upload"] == report.route_pack_upload
@@ -886,15 +902,46 @@ def test_weight_int8_reports_the_cli_fields(artifact_path):
     assert "staged-host-bytes" not in fields
     assert "late-persistent" not in fields
 
+    # One oracle over both paths: parse the CLI line captured from the same
+    # artifact and require every label to line up with the dict, so a label
+    # drift fails here. The time is compared for shape, not value, because the
+    # capture predates this run.
+    line = (
+        "weight-int8: packed-matmuls=8/13 fp32-matmuls=5 packed-payload=417792B "
+        "packed-source=1572864B fp32-retained=26260132B shared-weight=0B "
+        "model-weight=27833180B route/pack/upload=49.84ms"
+    )
+    parsed = {}
+    for item in line.split(": ", 1)[1].split():
+        key, _, value = item.partition("=")
+        parsed[key] = value.split("/")[0].rstrip("Bms")
+    assert set(parsed) == set(fields) - {"matmul-total"}
+    assert int(parsed["packed-matmuls"]) == fields["packed-matmuls"]
+    assert int(parsed["fp32-matmuls"]) == fields["fp32-matmuls"]
+    assert int(parsed["packed-payload"]) == fields["packed-payload"]
+    assert int(parsed["packed-source"]) == fields["packed-source"]
+    assert int(parsed["fp32-retained"]) == fields["fp32-retained"]
+    assert int(parsed["shared-weight"]) == fields["shared-weight"]
+    assert int(parsed["model-weight"]) == fields["model-weight"]
+    assert float(parsed["route/pack/upload"]) > 0.0
+    assert fields["route/pack/upload"] > 0.0
+
     # The report is a snapshot: a read-only object, never a live mutation path.
     with pytest.raises(AttributeError):
         report.packed_matmuls = 1
 
-    # A second step reuses the packed set; the report keeps describing one step.
+    # A second step describes that step, not the first, and is a new object.
     session.decode([4874])
     second = session.weight_int8_report
-    assert second is not None
+    assert second is not None and second is not report
+    assert second.packed_matmuls == report.packed_matmuls
     assert second.packed_payload == report.packed_payload
+
+    # reset() clears the report; the earlier object stays valid (a real copy).
+    session.reset()
+    assert session.weight_int8_report is None
+    assert report.packed_matmuls == 8
+    assert second.packed_matmuls == 8
 
 
 def test_weight_int8_prefill_and_decode_match_fp32(model, artifact_path):
@@ -913,11 +960,18 @@ def test_weight_int8_prefill_and_decode_match_fp32(model, artifact_path):
     assert float(np.max(np.abs(actual - expected))) < 0.02
 
 
-def test_weight_int8_rejects_a_non_bool(artifact_path):
-    """The option is a bool; anything else is a TypeError, as for capacity."""
-    for value in ("yes", 1, 0, 1.0, None):
+def test_weight_int8_rejects_a_non_bool(tmp_path):
+    """The option is a bool; anything else is a TypeError, as for capacity.
+
+    No pinned model is needed: the facade validates before it opens anything,
+    so this test runs in every lane. ``np.bool_(True)`` is the case that proves
+    the facade check is load-bearing, because the PyO3 ``bool`` extractor
+    accepts it while ``isinstance(weight_int8, bool)`` does not.
+    """
+    missing = tmp_path / "absent.fnn3"
+    for value in ("yes", 1, 0, 1.0, None, np.bool_(True)):
         with pytest.raises(TypeError) as info:
-            fn3.load(artifact_path, weight_int8=value)
+            fn3.load(missing, weight_int8=value)
         assert "weight_int8" in str(info.value)
 
 

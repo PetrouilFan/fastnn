@@ -31,9 +31,14 @@ for route in report.routes:
 ```
 
 The report is a read-only snapshot of the last completed step and is `None`
-before the first step. Its attribute names are the CLI labels with `-` written
-as `_`; `as_dict()` uses the labels themselves (`packed-matmuls`,
-`route/pack/upload`, ...). The three traffic fields are `None` on the CPU, where
+before the first step or after `session.reset()`, which clears the report while
+keeping the model-derived packed copies. Its attribute names are the CLI labels
+with `-` written as `_`; `as_dict()` uses the labels themselves
+(`packed-matmuls`, `route/pack/upload`, ...), keys the dense figure by the label
+in force (`fp32-retained` on the CPU, `dense-weight` on a device) and adds
+`matmul-total`, the denominator the CLI prints inside `packed-matmuls=P/T`.
+Values are raw numbers, so `route/pack/upload` is milliseconds where the CLI
+formats for display. The three traffic fields are `None` on the CPU, where
 the CLI prints no `weight-int8-traffic` line, and carry
 `packed-prepare`/`staged-host-bytes`/`late-persistent` on a resident Vulkan
 session. `weight_int8` must be a `bool`; anything else is a `TypeError`. A

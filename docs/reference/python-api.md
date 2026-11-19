@@ -14,13 +14,24 @@ fn3.devices() -> list[Device]
 fn3.prepare(onnx, artifact, *, max_total=None, max_seq=None, max_past=None,
             overwrite=False) -> PrepareReport
 fn3.inspect(artifact) -> ArtifactInfo
-fn3.load(artifact, source=None, *, device=None, capacity=None) -> Model
+fn3.load(artifact, source=None, *, device=None, capacity=None,
+         weight_int8=False) -> Model
 
 Model.session() -> Session
+Model.weight_int8 -> bool            # whether packing was requested
 Session.prefill(tokens) -> Logits          # [batch, 1, vocab]
 Session.decode(tokens) -> Logits           # [batch, 1, vocab]
 Session.reset() -> None
+Session.weight_int8_report -> WeightInt8Report | None
 ```
+
+`WeightInt8Report` has `packed_matmuls / fp32_matmuls / packed_payload /
+packed_source / dense_weight / dense_label / shared_weight / model_weight /
+route_pack_upload`, an optional traffic trio (`packed_prepare /
+staged_host_bytes / late_persistent`) and `routes` of `WeightInt8Route`
+(`instruction / rhs / route / packed`). It is a read-only snapshot of the last
+completed step, documented in `fastnn/inference/__init__.py`; `as_dict()`
+returns the CLI's labels.
 
 `Device.id / kind / index / name`; `Geometry`, `Envelope`, `Metadata`,
 `PrepareReport`, `ArtifactInfo`, `SessionStats` and `Logits` are documented in
