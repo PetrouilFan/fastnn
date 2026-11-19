@@ -22,7 +22,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use fastnn::fn3::import::{import_onnx_model, ModelImport};
-use fastnn::fn3::model::{ModelWeights, Planner, PreparedModel, Session, SessionPhase};
+use fastnn::fn3::model::{
+    ModelWeights, Planner, PreparedModel, Session, SessionOptions, SessionPhase,
+};
 use fastnn::fn3::shape::ShapeEnvelope;
 use fastnn::fn3::{Backend, DeviceId, LiveDims, OpId, Tensor, TensorMeta};
 
@@ -605,8 +607,10 @@ pub fn check_prefill(
     envelope: &ShapeEnvelope,
     tokens: &[u32],
     seq: u64,
+    options: SessionOptions,
 ) -> PrefillOutcome {
-    let mut session = Session::with_runtime(model, import, backend).expect("session");
+    let mut session =
+        Session::with_runtime_options(model, import, backend, options).expect("session");
     let logits = session
         .prefill(&tokens[..seq as usize])
         .unwrap_or_else(|error| panic!("prefill seq={seq}: {error}"));
@@ -696,12 +700,14 @@ pub fn run_chain(
     envelope: &ShapeEnvelope,
     tokens: &[u32],
     context: u64,
+    options: SessionOptions,
 ) -> ChainOutcome {
     assert!(
         context >= FIXTURE_CONTEXT,
         "context {context} is below the fixture chain"
     );
-    let mut session = Session::with_runtime(model, import, backend).expect("session");
+    let mut session =
+        Session::with_runtime_options(model, import, backend, options).expect("session");
     let prompt = session
         .prefill(&tokens[..PROMPT])
         .unwrap_or_else(|error| panic!("prefill {PROMPT}: {error}"));

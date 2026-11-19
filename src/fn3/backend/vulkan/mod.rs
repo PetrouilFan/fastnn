@@ -725,6 +725,28 @@ impl Backend for VulkanBackend {
         self.prepare_persistent_tensors(tensors)
     }
 
+    fn write_resident(
+        &self,
+        dst: &crate::fn3::storage::Storage,
+        byte_offset: u64,
+        bytes: &[u8],
+    ) -> Fn3Result<()> {
+        self.write_resident_storage(dst, byte_offset, bytes)
+    }
+
+    fn note_readback(&self, bytes: u64) {
+        VulkanBackend::note_readback(self, bytes);
+    }
+
+    fn copy_resident_regions(
+        &self,
+        dst: &crate::fn3::storage::Storage,
+        src: &crate::fn3::storage::Storage,
+        regions: &[(u64, u64, u64)],
+    ) -> Fn3Result<()> {
+        self.copy_resident_storage_regions(dst, src, regions)
+    }
+
     fn begin_step(&self, label: &'static str) -> Fn3Result<()> {
         self.set_phase(match label {
             "prefill" => resident::ResidencyPhase::Prefill,

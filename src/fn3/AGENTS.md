@@ -54,8 +54,10 @@ authority is `docs/roadmap/fn3-architecture.md`.
   changes neither the KV live extent nor the step counter.
 - A `Session` executes every instruction through the one backend it was opened
   with; a backend whose device differs from the model's is rejected before any
-  work. KV buffers and value slots for a Vulkan device are host-staged
-  (`host_staged = true`); that is not a CPU compute path.
+  work. Value slots and the KV cache are device-resident when the backend can
+  allocate there (`SessionOptions::default()`, `host_staged = false` for a
+  fully resident op) and host-staged otherwise (`SessionOptions::staged()` or
+  `FN3_VK_STAGED=1`, `host_staged = true`). Neither is a CPU compute path.
 - A `Storage` is either host-backed or device-resident
   (`Storage::from_resident`). A resident storage has **no host bytes**: every
   host byte accessor returns `Fn3Error::NotImplemented` and

@@ -60,7 +60,15 @@ fn cpu_short_prefills_match_the_committed_fixtures() {
     let backend = CpuBackend::new();
     let tokens = token_ids();
     for seq in [1u64, 4] {
-        check_prefill(&backend, &import, &model, &envelope, &tokens, seq);
+        check_prefill(
+            &backend,
+            &import,
+            &model,
+            &envelope,
+            &tokens,
+            seq,
+            Default::default(),
+        );
     }
 }
 
@@ -81,8 +89,24 @@ fn cpu_prefill_and_four_cached_decode_steps_match_the_fixtures() {
     let tokens = token_ids();
     // The two short prefills, then the chain (which itself checks the 13-token
     // prefill against `prefill.p13.last_logits` and all 16 KV tensors).
-    check_prefill(&backend, &import, &model, &envelope, &tokens, 1);
-    check_prefill(&backend, &import, &model, &envelope, &tokens, 4);
+    check_prefill(
+        &backend,
+        &import,
+        &model,
+        &envelope,
+        &tokens,
+        1,
+        Default::default(),
+    );
+    check_prefill(
+        &backend,
+        &import,
+        &model,
+        &envelope,
+        &tokens,
+        4,
+        Default::default(),
+    );
     let chain = run_chain(
         &backend,
         &import,
@@ -90,6 +114,7 @@ fn cpu_prefill_and_four_cached_decode_steps_match_the_fixtures() {
         &envelope,
         &tokens,
         FIXTURE_CONTEXT,
+        Default::default(),
     );
     let extents: Vec<u64> = chain.steps.iter().map(|step| step.extent).collect();
     assert_eq!(extents, vec![14, 15, 16, 17]);
@@ -128,8 +153,24 @@ fn cpu_long_chain_stays_bounded_and_is_deterministic() {
     let backend = CpuBackend::new();
     let tokens = token_ids();
 
-    let first = run_chain(&backend, &import, &model, &envelope, &tokens, context);
-    let second = run_chain(&backend, &import, &model, &envelope, &tokens, context);
+    let first = run_chain(
+        &backend,
+        &import,
+        &model,
+        &envelope,
+        &tokens,
+        context,
+        Default::default(),
+    );
+    let second = run_chain(
+        &backend,
+        &import,
+        &model,
+        &envelope,
+        &tokens,
+        context,
+        Default::default(),
+    );
 
     assert_eq!(
         first.prefill, second.prefill,

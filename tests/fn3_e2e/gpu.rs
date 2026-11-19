@@ -25,6 +25,7 @@ use std::sync::Mutex;
 use fastnn::fn3::backend::vulkan::instance::validation_counts;
 use fastnn::fn3::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
 use fastnn::fn3::device::DeviceRequest;
+use fastnn::fn3::model::SessionOptions;
 use fastnn::fn3::{Fn3Error, Session};
 
 use super::harness::*;
@@ -123,7 +124,22 @@ fn open_physical() -> Option<std::sync::Arc<VulkanBackend>> {
 /// census names it instead of pretending it dispatched. Every instruction that
 /// does produce bytes must appear exactly once, per op, which is what the
 /// per-op histogram check below enforces.
-fn assert_device_execution(backend: &VulkanBackend, census: &Census, label: &str) {
+/// Which storage model the assertions describe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StorageMode {
+    /// Device-resident slots and KV (the #72 default).
+    Resident,
+    /// Host-staged slots and KV (the alpha path, `SessionOptions::staged()`).
+    Staged,
+}
+
+fn assert_device_execution(
+    backend: &VulkanBackend,
+    census: &Census,
+    label: &str,
+    mode: StorageMode,
+    steps: u64,
+) {
     let ledger = backend.residency();
     let records = ledger.records();
     assert_eq!(
@@ -152,6 +168,7 @@ fn assert_device_execution(backend: &VulkanBackend, census: &Census, label: &str
     let mut host_ns = 0u64;
     let mut device_ns = 0u64;
     let mut timed = 0usize;
+    let mut any_resident = false;
     for record in &records {
         assert_eq!(record.backend, "vulkan", "{label}: record backend");
         assert_eq!(record.device, backend.device_id(), "{label}: record device");
@@ -175,13 +192,20 @@ fn assert_device_execution(backend: &VulkanBackend, census: &Census, label: &str
             "{label}: record {} read an input back to the host",
             record.sequence
         );
-        // Alpha `Tensor` storage is host memory on every device. The device
-        // path stages through it and says so; that is not a CPU compute path.
-        assert!(
-            record.host_staged,
-            "{label}: record {} must state that alpha storage is host-staged",
-            record.sequence
-        );
+        match mode {
+            // The staged arm moves every operand through the host, exactly as
+            // the alpha did, and says so on every record.
+            StorageMode::Staged => assert!(
+                record.host_staged,
+                "{label}: the staged arm must stage every record (record {})",
+                record.sequence
+            ),
+            // The resident arm binds device buffers; a record is host-staged
+            // only when it consumes a graph input or a (host) constant.
+            StorageMode::Resident => {
+                any_resident = any_resident || !record.host_staged;
+            }
+        }
         assert!(
             record.proves_device_execution(),
             "{label}: record {} does not prove device execution",
@@ -219,9 +243,82 @@ fn assert_device_execution(backend: &VulkanBackend, census: &Census, label: &str
         summary.submissions >= census.with_bytes as u64,
         "{label}: submissions"
     );
+    // ---- the storage-model assertions ------------------------------------
+    let stats = backend.residency_stats();
+    let resident_binds: u64 = stats.resident_binds.iter().sum();
+    assert_eq!(
+        stats.late_persistent_uploads, 0,
+        "{label}: a prepared weight reached the host staging path"
+    );
+    match mode {
+        StorageMode::Resident => {
+            // Every step downloads exactly one row of logits per batch entry:
+            // that is the only device -> host byte in a resident step. The
+            // counter is the authoritative one: a resident download is an
+            // explicit submission, not an op record.
+            let expected_readback = steps * VOCAB as u64 * 4;
+            assert_eq!(
+                stats.readback_bytes, expected_readback,
+                "{label}: a resident step may read back only the final logits ({} B read)",
+                stats.readback_bytes
+            );
+            // Uploads are the per-step graph inputs plus host constants; a
+            // weight or an intermediate would blow past this by orders of
+            // magnitude (the alpha's per-step upload is ~80 MB). The counter
+            // measures logical operand bytes and the record measures allocated
+            // transfer bytes (padded to 4, plus parameter buffers), so both are
+            // checked against the same budget.
+            let budget = steps * 2 * 1024 * 1024;
+            let staged_uploads: u64 = stats.staged_upload_bytes.iter().sum();
+            assert!(
+                upload_bytes <= budget && staged_uploads <= budget,
+                "{label}: resident uploads {upload_bytes} B / {staged_uploads} B exceed the \
+                 {budget} B input-and-constant budget"
+            );
+            assert!(
+                any_resident,
+                "{label}: no record was fully device-resident; the resident path is not active"
+            );
+            assert!(
+                resident_binds > 0,
+                "{label}: no operand was bound from device-resident storage"
+            );
+            assert!(
+                stats.persistent_hits.iter().sum::<u64>() > 0,
+                "{label}: no weight came from the persistent table"
+            );
+        }
+        StorageMode::Staged => {
+            assert!(
+                !any_resident,
+                "{label}: the staged arm bound a device-resident operand"
+            );
+            assert_eq!(
+                resident_binds, 0,
+                "{label}: the staged arm bound resident storage"
+            );
+            let staged_uploads: u64 = stats.staged_upload_bytes.iter().sum();
+            assert!(
+                staged_uploads > steps * 20 * 1024 * 1024,
+                "{label}: the staged arm should move every intermediate again, uploaded \
+                 {staged_uploads} B"
+            );
+            assert!(
+                stats.readback_bytes > steps * 10 * 1024 * 1024,
+                "{label}: the staged arm should read every output back, read {} B",
+                stats.readback_bytes
+            );
+            assert!(
+                stats.persistent_hits.iter().sum::<u64>() > 0,
+                "{label}: even the staged arm binds persistent weights"
+            );
+        }
+    }
+
     println!(
-        "[fn3vk][residency] {label}: executions {} submissions {} proven {} input_readbacks {} \
-         bindings {}/{} device-local, host_staged true, upload {} B, readback {} B; plan {} \
+        "[fn3vk][residency] {label}: mode {mode:?} executions {} submissions {} proven {} \
+         input_readbacks {} bindings {}/{} device-local, host_staged {} upload {} B, \
+         readback {} B, resident_binds {resident_binds}, steps {steps}; plan {} \
          instructions ({} byte-producing, {} zero-element no-op{:?})",
         summary.executions,
         summary.submissions,
@@ -229,6 +326,11 @@ fn assert_device_execution(backend: &VulkanBackend, census: &Census, label: &str
         summary.input_readbacks,
         device_local,
         bindings,
+        if mode == StorageMode::Staged {
+            "true"
+        } else {
+            "mixed"
+        },
         upload_bytes,
         readback_bytes,
         census.total,
@@ -272,13 +374,29 @@ fn vulkan_prefill_and_four_cached_decode_steps_prove_device_execution() {
     // Short prefills: the first two committed points.
     for seq in [1u64, 4] {
         backend.residency().clear();
-        let outcome = check_prefill(&*backend, &import, &model, &envelope, &tokens, seq);
-        assert_device_execution(&backend, &outcome.census, &format!("prefill p{seq}"));
+        backend.reset_residency_stats();
+        let outcome = check_prefill(
+            &*backend,
+            &import,
+            &model,
+            &envelope,
+            &tokens,
+            seq,
+            SessionOptions::default(),
+        );
+        assert_device_execution(
+            &backend,
+            &outcome.census,
+            &format!("prefill p{seq}"),
+            StorageMode::Resident,
+            1,
+        );
     }
 
     // The production 13 + 4 chain. No test adapter is involved: the session's
     // own backend plans every step through `Backend::admits`.
     backend.residency().clear();
+    backend.reset_residency_stats();
     let chain = run_chain(
         &*backend,
         &import,
@@ -286,6 +404,7 @@ fn vulkan_prefill_and_four_cached_decode_steps_prove_device_execution() {
         &envelope,
         &tokens,
         FIXTURE_CONTEXT,
+        SessionOptions::default(),
     );
     let mut expected = chain.prefill_census.clone();
     for step in &chain.steps {
@@ -295,6 +414,8 @@ fn vulkan_prefill_and_four_cached_decode_steps_prove_device_execution() {
         &backend,
         &expected,
         "prefill p13 + four cached decode steps",
+        StorageMode::Resident,
+        1 + chain.steps.len() as u64,
     );
     assert_eq!(
         chain
@@ -314,6 +435,7 @@ fn vulkan_prefill_and_four_cached_decode_steps_prove_device_execution() {
     // A second session over the same prepared model produces the same bytes,
     // independently.
     backend.residency().clear();
+    backend.reset_residency_stats();
     let mut second = Session::with_runtime(&model, &import, &*backend).expect("second session");
     let prefill = second.prefill(&tokens[..PROMPT]).expect("second prefill");
     assert_eq!(
@@ -341,6 +463,60 @@ fn vulkan_prefill_and_four_cached_decode_steps_prove_device_execution() {
         &backend,
         &second_expected,
         "second session prefill + decode",
+        StorageMode::Resident,
+        2,
+    );
+
+    // ---- the staged arm: the alpha path, still green ---------------------
+    //
+    // `SessionOptions::staged()` keeps every value slot and the whole KV cache
+    // in host memory, so the same kernels stage every operand. This is the
+    // comparison arm #72 promises not to delete, and it runs the same fixture
+    // chain under the same per-op evidence rules.
+    backend.residency().clear();
+    backend.reset_residency_stats();
+    let staged = run_chain(
+        &*backend,
+        &import,
+        &model,
+        &envelope,
+        &tokens,
+        FIXTURE_CONTEXT,
+        SessionOptions::staged(),
+    );
+    let mut staged_expected = staged.prefill_census.clone();
+    for step in &staged.steps {
+        staged_expected = staged_expected.merge(&step.census);
+    }
+    assert_device_execution(
+        &backend,
+        &staged_expected,
+        "staged arm: prefill p13 + four cached decode steps",
+        StorageMode::Staged,
+        1 + staged.steps.len() as u64,
+    );
+    assert_eq!(
+        staged
+            .steps
+            .iter()
+            .map(|step| step.extent)
+            .collect::<Vec<_>>(),
+        vec![14, 15, 16, 17]
+    );
+    assert_eq!(staged.kv_bytes, 34_816);
+    assert_eq!(
+        staged.prefill, chain.prefill,
+        "the staged arm must produce the same logits as the resident arm"
+    );
+    for (resident, staged) in chain.steps.iter().zip(staged.steps.iter()) {
+        assert_eq!(
+            resident.logits, staged.logits,
+            "resident and staged arms disagree on a decode step"
+        );
+    }
+    println!(
+        "[fn3vk][gate] staged arm: {} proven executions, byte-identical logits to the resident arm",
+        staged_expected.with_bytes
     );
 
     let (errors, warnings) = validation_counts();
@@ -386,12 +562,27 @@ fn vulkan_long_chain_to_a_longer_context_stays_bounded() {
     let tokens = token_ids();
 
     backend.residency().clear();
-    let chain = run_chain(&*backend, &import, &model, &envelope, &tokens, context);
+    backend.reset_residency_stats();
+    let chain = run_chain(
+        &*backend,
+        &import,
+        &model,
+        &envelope,
+        &tokens,
+        context,
+        SessionOptions::default(),
+    );
     let mut expected = chain.prefill_census.clone();
     for step in &chain.steps {
         expected = expected.merge(&step.census);
     }
-    assert_device_execution(&backend, &expected, &format!("chain to context {context}"));
+    assert_device_execution(
+        &backend,
+        &expected,
+        &format!("chain to context {context}"),
+        StorageMode::Resident,
+        1 + chain.steps.len() as u64,
+    );
 
     let extents: Vec<u64> = chain.steps.iter().map(|step| step.extent).collect();
     assert_eq!(extents, (14..=context).collect::<Vec<_>>());

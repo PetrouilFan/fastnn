@@ -423,6 +423,53 @@ pub trait Backend: Send + Sync + fmt::Debug {
         Ok(())
     }
 
+    /// Write host bytes into a device-resident storage at `byte_offset`.
+    ///
+    /// This is the session-boundary input path: token ids, positions and the
+    /// attention mask are computed on the host every step. The default body
+    /// reports [`Fn3Error::NotImplemented`] — a backend with no device memory
+    /// is given host tensors and never calls it.
+    fn write_resident(
+        &self,
+        dst: &crate::fn3::storage::Storage,
+        byte_offset: u64,
+        bytes: &[u8],
+    ) -> Result<(), Fn3Error> {
+        let _ = (dst, byte_offset, bytes);
+        Err(Fn3Error::NotImplemented {
+            what: "writing a device-resident tensor on this backend (it has no device allocator)",
+            owner: "FN3-26 (#72)",
+        })
+    }
+
+    /// Copy `regions` of `(dst_offset, src_offset, len)` bytes between two
+    /// device-resident storages.
+    ///
+    /// One call records one transfer for the whole region list, so a strided
+    /// layout (the KV cache's `[batch, heads, capacity, head_dim]` live prefix)
+    /// costs one submission, not one per row. The default body reports
+    /// [`Fn3Error::NotImplemented`]; a host-staged session never calls it.
+    fn copy_resident_regions(
+        &self,
+        dst: &crate::fn3::storage::Storage,
+        src: &crate::fn3::storage::Storage,
+        regions: &[(u64, u64, u64)],
+    ) -> Result<(), Fn3Error> {
+        let _ = (dst, src, regions);
+        Err(Fn3Error::NotImplemented {
+            what: "device-to-device copies on this backend (it has no device allocator)",
+            owner: "FN3-26 (#72)",
+        })
+    }
+
+    /// Record a device → host readback for the residency counters.
+    ///
+    /// The default body is a no-op: a host backend has no counters and no
+    /// device traffic to attribute.
+    fn note_readback(&self, bytes: u64) {
+        let _ = bytes;
+    }
+
     /// Close the scope opened by [`Backend::begin_step`] and submit it once.
     ///
     /// Returns the number of queue submissions this call made (0 for a backend

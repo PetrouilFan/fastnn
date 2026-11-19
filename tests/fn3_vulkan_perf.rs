@@ -216,6 +216,23 @@ fn prefill_and_decode_latency() {
         println!("[fn3-26][per-op] {name} {count} {upload} {readback}");
     }
 
+    // Device-busy time is the stable metric on a shared host: the wall clock
+    // includes one fence wait per submission, and a contended host moves that
+    // by tens of milliseconds between runs of the same binary.
+    let device_busy_ns: u64 = backend
+        .residency()
+        .records()
+        .iter()
+        .filter_map(|record| record.gpu_ns)
+        .sum();
+    let device_busy_ms = device_busy_ns as f64 / 1e6 / iterations.max(1) as f64;
+    let submission_count = summary.submissions / iterations.max(1) as u64;
+    let execution_count = summary.executions / iterations.max(1) as u64;
+    println!(
+        "[fn3-26][perf] device_busy_ms_per_iteration={device_busy_ms:.3} \
+         executions_per_iteration={execution_count} submissions_per_iteration={submission_count}"
+    );
+
     let load = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
     let load = load.split_whitespace().next().unwrap_or("?").to_string();
     println!(
@@ -269,7 +286,10 @@ fn prefill_and_decode_latency() {
          \"submissions\":{},\"input_readbacks\":{},\
          \"device_peak_live_bytes\":{},\"device_live_bytes\":{},\
          \"allocation_count\":{},\"host_peak_rss_bytes\":{},\
-         \"staging_upload_bytes\":{},\"staging_readback_bytes\":{},\"loadavg\":\"{}\"}}",
+         \"staging_upload_bytes\":{},\"staging_readback_bytes\":{},\
+         \"device_busy_ms_per_iteration\":{device_busy_ms:.4},\
+         \"executions_per_iteration\":{execution_count},\
+         \"submissions_per_iteration\":{submission_count},\"loadavg\":\"{}\"}}",
         summary.upload_bytes,
         summary.readback_bytes,
         summary.executions,

@@ -295,16 +295,28 @@ pub struct ResidentBuffer {
     device: Arc<Device>,
     device_id: DeviceId,
     label: String,
+    /// Logical length: the tensor's byte count, not the padded allocation.
+    logical: usize,
 }
 
 impl ResidentBuffer {
-    /// Wrap a just-allocated device buffer.
-    pub fn new(buffer: Buffer, device: Arc<Device>, device_id: DeviceId, label: String) -> Self {
+    /// Wrap a just-allocated device buffer whose logical length is `logical`.
+    ///
+    /// The buffer may be up to three bytes longer (the 4-byte copy
+    /// granularity); those bytes are never addressable through the tensor.
+    pub fn new(
+        buffer: Buffer,
+        device: Arc<Device>,
+        device_id: DeviceId,
+        label: String,
+        logical: usize,
+    ) -> Self {
         ResidentBuffer {
             buffer: Arc::new(buffer),
             device,
             device_id,
             label,
+            logical,
         }
     }
 
@@ -325,7 +337,7 @@ impl DeviceResidency for ResidentBuffer {
     }
 
     fn bytes(&self) -> usize {
-        self.buffer.size() as usize
+        self.logical
     }
 
     fn describe(&self) -> String {
@@ -333,7 +345,7 @@ impl DeviceResidency for ResidentBuffer {
             "buffer {} \"{}\" {} B ({:?}) on {}",
             self.buffer.id(),
             self.label,
-            self.buffer.size(),
+            self.logical,
             self.buffer.class(),
             self.device_id.diagnostic()
         )
@@ -348,6 +360,14 @@ impl DeviceResidency for ResidentBuffer {
             return Ok(());
         }
         let size = dst.len() as u64;
+        let end = (offset as u64).saturating_add(size);
+        if end > self.logical as u64 {
+            return Err(Fn3Error::OutOfBounds {
+                what: "resident download",
+                index: end,
+                len: self.logical as u64,
+            });
+        }
         self.buffer
             .check_range(offset as u64, size, "resident download")
             .map_err(|error| error.to_fn3())?;
@@ -691,6 +711,7 @@ impl super::VulkanBackend {
             Arc::clone(self.vulkan_device()),
             self.device_id(),
             label,
+            required,
         );
         let bytes = resident.bytes();
         let storage = Storage::from_resident(required, Arc::new(resident))?;
@@ -754,6 +775,92 @@ impl super::VulkanBackend {
         drop(submitter);
         self.residency_counters
             .note_staged_upload(bytes.len() as u64);
+        Ok(())
+    }
+
+    /// Replace `bytes` at `byte_offset` of a resident storage from the host.
+    pub fn write_resident_storage(
+        &self,
+        storage: &Storage,
+        byte_offset: u64,
+        bytes: &[u8],
+    ) -> Fn3Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let buffer = self.resident_storage_buffer(storage)?;
+        let mut padded = bytes.to_vec();
+        let size = padded_bytes(bytes.len() as u64);
+        padded.resize(size as usize, 0);
+        let end = byte_offset
+            .checked_add(size)
+            .ok_or_else(|| Fn3Error::ShapeOverflow {
+                context: "VulkanBackend::write_resident_storage",
+                axis: None,
+                detail: format!("offset {byte_offset} plus {size} bytes exceeds u64::MAX"),
+            })?;
+        if end > buffer.size() {
+            return Err(Fn3Error::CapacityExceeded {
+                what: "vulkan resident write",
+                requested: end,
+                capacity: buffer.size(),
+            });
+        }
+        if !byte_offset.is_multiple_of(4) || !size.is_multiple_of(4) {
+            return Err(Error::internal(
+                "a resident write needs 4-byte offsets and a 4-byte-aligned length",
+            )
+            .to_fn3());
+        }
+        let pool = StagingPool::new(Arc::clone(self.vulkan_device()), size.max(4096));
+        let lease = pool.acquire(size).map_err(|error| error.to_fn3())?;
+        lease.write(&padded).map_err(|error| error.to_fn3())?;
+        let mut submitter = self.checkout_submitter()?;
+        submitter
+            .record(|recorder| {
+                recorder.copy_buffer(lease.buffer(), 0, &buffer, byte_offset, size)?;
+                Ok(())
+            })
+            .map_err(|error| error.to_fn3())?
+            .wait()
+            .map_err(|error| error.to_fn3())?;
+        drop(submitter);
+        self.residency_counters
+            .note_staged_upload(bytes.len() as u64);
+        Ok(())
+    }
+
+    /// Copy `regions` between two resident storages in one submission.
+    pub fn copy_resident_storage_regions(
+        &self,
+        dst: &Storage,
+        src: &Storage,
+        regions: &[(u64, u64, u64)],
+    ) -> Fn3Result<()> {
+        if regions.is_empty() {
+            return Ok(());
+        }
+        let dst_buffer = self.resident_storage_buffer(dst)?;
+        let src_buffer = self.resident_storage_buffer(src)?;
+        let mut submitter = self.checkout_submitter()?;
+        submitter
+            .record(|recorder| {
+                for &(dst_offset, src_offset, len) in regions {
+                    recorder.copy_buffer(&src_buffer, src_offset, &dst_buffer, dst_offset, len)?;
+                }
+                recorder.barrier(
+                    &dst_buffer,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::AccessFlags::TRANSFER_WRITE,
+                    vk::AccessFlags::SHADER_READ,
+                );
+                Ok(())
+            })
+            .map_err(|error| error.to_fn3())?
+            .wait()
+            .map_err(|error| error.to_fn3())?;
+        drop(submitter);
         Ok(())
     }
 

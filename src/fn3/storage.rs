@@ -508,12 +508,24 @@ impl Storage {
                 capacity: self.len as u64,
             });
         }
+        self.download_range(0, dst)
+    }
+
+    /// Copy `dst.len()` bytes starting at `offset` into `dst`.
+    ///
+    /// The ranged form of [`Storage::download`]: it is what a caller uses to
+    /// materialise one row of a large resident tensor (the final logits, for
+    /// example) without transferring the rest of it. The range is checked
+    /// against [`Storage::len`] on both widths.
+    pub fn download_range(&self, offset: usize, dst: &mut [u8]) -> Result<(), Fn3Error> {
+        let end = checked_window_end("Storage::download_range", offset, dst.len(), self.len)?;
+        let _ = end;
         match &self.residency {
             None => {
-                dst.copy_from_slice(self.buffer.as_bytes());
+                dst.copy_from_slice(&self.buffer.as_bytes()[offset..offset + dst.len()]);
                 Ok(())
             }
-            Some(residency) => residency.download(0, dst),
+            Some(residency) => residency.download(offset, dst),
         }
     }
 
