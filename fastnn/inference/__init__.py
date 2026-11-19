@@ -30,6 +30,25 @@ Prepare once, then load and run::
 view over one copy of the session output; the session can be reset or dropped
 afterwards. ``numpy.array(logits)`` copies if you need a writable array.
 
+Opt-in INT8 weights
+-------------------
+
+``load(..., weight_int8=True)`` packs eligible static FP32 projection weights as
+INT8 and keeps everything else FP32. The artifact is unchanged, and the default
+``False`` is the existing path::
+
+    model = fn3.load("model.fnn3", device="cpu", weight_int8=True)
+    session = model.session()
+    session.prefill(prompt_token_ids)
+    report = session.weight_int8_report
+    print(report.packed_matmuls, report.fp32_matmuls)
+    print(report.packed_payload, report.packed_source, report.dense_weight)
+    print(report.as_dict())     # the CLI's own field names
+
+``weight_int8_report`` is ``None`` when the option is off and before the first
+completed step. On a host-staged Vulkan session the option is refused with
+:class:`Fn3UnsupportedError`; it never falls back to the CPU.
+
 Devices
 -------
 
@@ -54,6 +73,8 @@ from fastnn._core.inference import (
     PrepareReport,
     Session,
     SessionStats,
+    WeightInt8Report,
+    WeightInt8Route,
     devices as _devices,
     inspect as _inspect,
     load as _load,
@@ -171,6 +192,7 @@ def load(
     *,
     device=None,
     capacity: int | None = None,
+    weight_int8: bool = False,
 ) -> Model:
     """Load a prepared artifact and bind it to an explicit device.
 
@@ -196,6 +218,17 @@ def load(
     capacity:
         KV cache capacity in tokens for each session. Defaults to the artifact's
         declared window (``max_total``).
+    weight_int8:
+        Pack eligible static FP32 projection weights as INT8 and run those
+        ``MatMul`` instructions on the backend's packed kernel. Activations,
+        accumulators, the KV cache and logits stay FP32, and the artifact is
+        unchanged. ``False`` (the default) is the FP32 path, byte for byte.
+
+        After a step, ``session.weight_int8_report`` carries the same coverage,
+        byte and traffic counters the CLI prints with ``--weight-int8 --steps``;
+        it is ``None`` when this option is off. A host-staged Vulkan session
+        (``FN3_VK_STAGED=1``) raises :class:`Fn3UnsupportedError` from
+        ``model.session()`` when this option is on: there is no CPU fallback.
 
     Returns
     -------
@@ -203,11 +236,16 @@ def load(
         Immutable and shareable between threads. ``model.session()`` creates one
         independent session (its own KV cache, plan cache and counters).
     """
+    if not isinstance(weight_int8, bool):
+        raise TypeError(
+            f"weight_int8 must be a bool, found {type(weight_int8).__name__}"
+        )
     return _load(
         _path(artifact),
         source=None if source is None else _path(source),
         device=device,
         capacity=capacity,
+        weight_int8=weight_int8,
     )
 
 
@@ -237,6 +275,8 @@ __all__ = [
     "PrepareReport",
     "Session",
     "SessionStats",
+    "WeightInt8Report",
+    "WeightInt8Route",
     "devices",
     "inspect",
     "load",

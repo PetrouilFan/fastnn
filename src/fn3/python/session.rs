@@ -40,7 +40,7 @@ use crate::inference::device::DeviceId;
 use crate::inference::dtype::DType;
 use crate::inference::error::Fn3Error as CoreError;
 use crate::inference::import::ModelImport;
-use crate::inference::model::{PreparedModel, Session};
+use crate::inference::model::{PreparedModel, Session, SessionOptions};
 use crate::inference::tensor::Tensor;
 
 use super::device::{describe as describe_device, PyDevice};
@@ -80,6 +80,7 @@ impl OwnedSession {
         model: Arc<PreparedModel>,
         import: Arc<ModelImport>,
         backend: Arc<dyn Backend>,
+        options: SessionOptions,
     ) -> Result<OwnedSession, CoreError> {
         // SAFETY: the three referents are heap allocations owned by the `Arc`s
         // moved into the returned `OwnedSession`. `Arc` pointees do not move
@@ -88,10 +89,11 @@ impl OwnedSession {
         // borrow ends before the referent is freed. No `'static` reference is
         // returned, stored elsewhere, or exposed to Python.
         let session = unsafe {
-            Session::with_runtime(
+            Session::with_runtime_options(
                 extend_lifetime(model.as_ref()),
                 extend_lifetime(import.as_ref()),
                 extend_lifetime(backend.as_ref()),
+                options,
             )?
         };
         Ok(OwnedSession {
@@ -401,6 +403,320 @@ impl PySessionStats {
 }
 
 // ---------------------------------------------------------------------------
+// INT8-weight report
+// ---------------------------------------------------------------------------
+
+/// One `MatMul` route in the last completed step of an INT8-weight session.
+///
+/// `route` is exactly what the CLI prints after the operand name: `"packed"` or
+/// a closed fallback code such as `"computed-rhs"` or `"k-below-min"`.
+#[pyclass(module = "fastnn._core.inference", name = "WeightInt8Route", frozen)]
+pub struct PyWeightInt8Route {
+    instruction: usize,
+    rhs: String,
+    route: String,
+}
+
+#[pymethods]
+impl PyWeightInt8Route {
+    /// Position of the instruction in the specialised plan.
+    #[getter]
+    fn instruction(&self) -> usize {
+        self.instruction
+    }
+
+    /// Right-hand operand: a weight name or the computed value's name.
+    #[getter]
+    fn rhs(&self) -> &str {
+        &self.rhs
+    }
+
+    /// `"packed"` or the backend's fallback code.
+    #[getter]
+    fn route(&self) -> &str {
+        &self.route
+    }
+
+    /// `True` when this instruction ran on the packed INT8 kernel.
+    #[getter]
+    fn packed(&self) -> bool {
+        self.route == "packed"
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "WeightInt8Route(instruction={}, rhs={:?}, route={:?})",
+            self.instruction, self.rhs, self.route
+        )
+    }
+}
+
+/// Device-traffic counters the CLI prints on the `weight-int8-traffic` line.
+///
+/// These exist only on a resident Vulkan session; the CPU reference uploads
+/// nothing, so the CLI prints no traffic line and this report reports `None`.
+#[derive(Clone, Copy)]
+struct TrafficSnapshot {
+    packed_prepare: u64,
+    staged_host_bytes: u64,
+    late_persistent: u64,
+}
+
+/// A snapshot of the per-step INT8-weight report the CLI prints.
+///
+/// Field names match the CLI's labels with `-` written as `_`; [`as_dict`]
+/// returns the labels themselves, so a single oracle can compare a Python run
+/// with the CLI's `--steps` output.
+///
+/// [`as_dict`]: PyWeightInt8Report::as_dict
+#[pyclass(module = "fastnn._core.inference", name = "WeightInt8Report", frozen)]
+pub struct PyWeightInt8Report {
+    packed_matmuls: usize,
+    fp32_matmuls: usize,
+    packed_payload: u64,
+    packed_source: u64,
+    dense_weight: u64,
+    dense_label: &'static str,
+    shared_weight: u64,
+    model_weight: u64,
+    route_pack_upload: f64,
+    traffic: Option<TrafficSnapshot>,
+    routes: Vec<PyWeightInt8Route>,
+}
+
+#[pymethods]
+impl PyWeightInt8Report {
+    /// `MatMul`s that ran on the packed INT8 kernel (`packed-matmuls`).
+    #[getter]
+    fn packed_matmuls(&self) -> usize {
+        self.packed_matmuls
+    }
+
+    /// `MatMul`s that ran on the backend's FP32 kernel (`fp32-matmuls`).
+    #[getter]
+    fn fp32_matmuls(&self) -> usize {
+        self.fp32_matmuls
+    }
+
+    /// Packed payload bytes (`packed-payload`).
+    #[getter]
+    fn packed_payload(&self) -> u64 {
+        self.packed_payload
+    }
+
+    /// FP32 bytes the packed set replaced (`packed-source`).
+    #[getter]
+    fn packed_source(&self) -> u64 {
+        self.packed_source
+    }
+
+    /// Bytes of weights still read as FP32 (`dense-weight`, or
+    /// `fp32-retained` on the CPU).
+    #[getter]
+    fn dense_weight(&self) -> u64 {
+        self.dense_weight
+    }
+
+    /// The CLI label for [`dense_weight`]: `"fp32-retained"` on the CPU and
+    /// `"dense-weight"` on a device.
+    ///
+    /// [`dense_weight`]: PyWeightInt8Report::dense_weight
+    #[getter]
+    fn dense_label(&self) -> &'static str {
+        self.dense_label
+    }
+
+    /// Bytes held in both representations (`shared-weight`).
+    #[getter]
+    fn shared_weight(&self) -> u64 {
+        self.shared_weight
+    }
+
+    /// Every weight's FP32 bytes (`model-weight`).
+    #[getter]
+    fn model_weight(&self) -> u64 {
+        self.model_weight
+    }
+
+    /// Preparation wall time in milliseconds (`route/pack/upload`).
+    #[getter]
+    fn route_pack_upload(&self) -> f64 {
+        self.route_pack_upload
+    }
+
+    /// Packed bytes prepared on the device (`packed-prepare`); `None` on the
+    /// CPU, where the CLI prints no traffic line.
+    #[getter]
+    fn packed_prepare(&self) -> Option<u64> {
+        self.traffic.map(|traffic| traffic.packed_prepare)
+    }
+
+    /// Host bytes uploaded for non-weight operands (`staged-host-bytes`);
+    /// `None` on the CPU.
+    #[getter]
+    fn staged_host_bytes(&self) -> Option<u64> {
+        self.traffic.map(|traffic| traffic.staged_host_bytes)
+    }
+
+    /// Bytes of a late persistent upload that was refused
+    /// (`late-persistent`, must stay zero); `None` on the CPU.
+    #[getter]
+    fn late_persistent(&self) -> Option<u64> {
+        self.traffic.map(|traffic| traffic.late_persistent)
+    }
+
+    /// Every `MatMul` route, in plan order.
+    #[getter]
+    fn routes(&self) -> Vec<PyWeightInt8Route> {
+        self.routes
+            .iter()
+            .map(|route| PyWeightInt8Route {
+                instruction: route.instruction,
+                rhs: route.rhs.clone(),
+                route: route.route.clone(),
+            })
+            .collect()
+    }
+
+    /// The report as the CLI's own labels.
+    ///
+    /// The keys are `packed-matmuls`, `fp32-matmuls`, `packed-payload`,
+    /// `packed-source`, `dense-weight`, `shared-weight`, `model-weight`,
+    /// `route/pack/upload` and `dense-label`; the three traffic keys
+    /// (`packed-prepare`, `staged-host-bytes`, `late-persistent`) are present
+    /// only when the session runs on a device that reports them.
+    fn as_dict(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
+        let dict = pyo3::types::PyDict::new(py);
+        dict.set_item("packed-matmuls", self.packed_matmuls)?;
+        dict.set_item("fp32-matmuls", self.fp32_matmuls)?;
+        dict.set_item("packed-payload", self.packed_payload)?;
+        dict.set_item("packed-source", self.packed_source)?;
+        dict.set_item("dense-weight", self.dense_weight)?;
+        dict.set_item("dense-label", self.dense_label)?;
+        dict.set_item("shared-weight", self.shared_weight)?;
+        dict.set_item("model-weight", self.model_weight)?;
+        dict.set_item("route/pack/upload", self.route_pack_upload)?;
+        if let Some(traffic) = self.traffic {
+            dict.set_item("packed-prepare", traffic.packed_prepare)?;
+            dict.set_item("staged-host-bytes", traffic.staged_host_bytes)?;
+            dict.set_item("late-persistent", traffic.late_persistent)?;
+        }
+        Ok(dict.unbind())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "WeightInt8Report(packed_matmuls={}/{}, packed_payload={}, packed_source={}, \
+             dense_weight={}, shared_weight={}, route_pack_upload={:.2}ms)",
+            self.packed_matmuls,
+            self.packed_matmuls + self.fp32_matmuls,
+            self.packed_payload,
+            self.packed_source,
+            self.dense_weight,
+            self.shared_weight,
+            self.route_pack_upload
+        )
+    }
+}
+
+/// The report of the session's last completed step, as plain Rust data.
+///
+/// Building Python objects needs the GIL, and [`PySession::read`] may release
+/// it while waiting for the session lock, so the snapshot is collected first.
+struct WeightInt8Snapshot {
+    packed_matmuls: usize,
+    fp32_matmuls: usize,
+    packed_payload: u64,
+    packed_source: u64,
+    dense_weight: u64,
+    dense_label: &'static str,
+    shared_weight: u64,
+    model_weight: u64,
+    route_pack_upload: f64,
+    traffic: Option<TrafficSnapshot>,
+    routes: Vec<PyWeightInt8Route>,
+}
+
+impl WeightInt8Snapshot {
+    fn of(session: &Session<'static>) -> Option<WeightInt8Snapshot> {
+        let report = session.weight_int8_report()?;
+        let weights = session.model().weights();
+        let model_weight = (0..weights.len())
+            .filter_map(|index| weights.get(index))
+            .map(|tensor| tensor.storage().len() as u64)
+            .sum();
+        let packed_matmuls = report
+            .routes
+            .iter()
+            .filter(|route| route.fallback.is_none())
+            .count();
+        let routes = report
+            .routes
+            .iter()
+            .map(|route| PyWeightInt8Route {
+                instruction: route.instruction,
+                rhs: route.rhs.clone(),
+                route: route.fallback.as_ref().map_or_else(
+                    || "packed".to_string(),
+                    |fallback| fallback.code().to_string(),
+                ),
+            })
+            .collect();
+        Some(WeightInt8Snapshot {
+            packed_matmuls,
+            fp32_matmuls: report.routes.len() - packed_matmuls,
+            packed_payload: report.packed_payload_bytes,
+            packed_source: report.packed_source_bytes,
+            dense_weight: report.dense_weight_bytes,
+            // On the CPU nothing is uploaded: the dense figure is FP32 weights
+            // the session kept, which is the label the CLI uses too.
+            dense_label: if session.model().device().is_cpu() {
+                "fp32-retained"
+            } else {
+                "dense-weight"
+            },
+            shared_weight: report.shared_weight_bytes,
+            model_weight,
+            route_pack_upload: report.prepare.as_secs_f64() * 1e3,
+            traffic: traffic_snapshot(session),
+            routes,
+        })
+    }
+
+    fn into_report(self) -> PyWeightInt8Report {
+        PyWeightInt8Report {
+            packed_matmuls: self.packed_matmuls,
+            fp32_matmuls: self.fp32_matmuls,
+            packed_payload: self.packed_payload,
+            packed_source: self.packed_source,
+            dense_weight: self.dense_weight,
+            dense_label: self.dense_label,
+            shared_weight: self.shared_weight,
+            model_weight: self.model_weight,
+            route_pack_upload: self.route_pack_upload,
+            traffic: self.traffic,
+            routes: self.routes,
+        }
+    }
+}
+
+/// The residency ledger's view of an INT8-weight session step.
+#[cfg(feature = "vulkan")]
+fn traffic_snapshot(session: &Session<'_>) -> Option<TrafficSnapshot> {
+    let stats = session.backend()?.as_vulkan()?.residency_stats();
+    Some(TrafficSnapshot {
+        packed_prepare: stats.packed_prepare_bytes,
+        staged_host_bytes: stats.staged_upload_bytes.iter().sum(),
+        late_persistent: stats.late_persistent_bytes,
+    })
+}
+
+#[cfg(not(feature = "vulkan"))]
+fn traffic_snapshot(_session: &Session<'_>) -> Option<TrafficSnapshot> {
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Session
 // ---------------------------------------------------------------------------
 
@@ -432,10 +748,15 @@ impl PySession {
         backend: Arc<dyn Backend>,
         device: DeviceId,
         capacity: u64,
+        weight_int8: bool,
         model_instance: u64,
     ) -> PyResult<Py<PySession>> {
         let vocab_size = import.geometry().vocab_size;
-        let session = OwnedSession::open(model, import, backend)
+        let options = SessionOptions {
+            weight_int8,
+            ..SessionOptions::default()
+        };
+        let session = OwnedSession::open(model, import, backend, options)
             .map_err(|error| errors::from_core(py, error))?;
         Py::new(
             py,
@@ -726,6 +1047,21 @@ impl PySession {
         Py::new(py, self.snapshot(py))
     }
 
+    /// Per-step INT8-weight coverage and traffic, or `None`.
+    ///
+    /// `None` when the session was loaded with `weight_int8=False` (the
+    /// default), and `None` before an INT8 session's first completed step. The
+    /// object mirrors the CLI's `--steps` lines: its fields are the CLI labels
+    /// with `-` written as `_`, and `as_dict()` uses the labels themselves.
+    #[getter]
+    fn weight_int8_report(&self, py: Python<'_>) -> PyResult<Option<Py<PyWeightInt8Report>>> {
+        let snapshot = self.read(py, WeightInt8Snapshot::of);
+        match snapshot {
+            Some(snapshot) => Ok(Some(Py::new(py, snapshot.into_report())?)),
+            None => Ok(None),
+        }
+    }
+
     fn __repr__(&self, py: Python<'_>) -> String {
         let stats = self.snapshot(py);
         format!(
@@ -744,6 +1080,8 @@ impl PySession {
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyLogits>()?;
     module.add_class::<PySessionStats>()?;
+    module.add_class::<PyWeightInt8Route>()?;
+    module.add_class::<PyWeightInt8Report>()?;
     module.add_class::<PySession>()?;
     Ok(())
 }

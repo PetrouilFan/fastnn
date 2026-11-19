@@ -142,13 +142,14 @@ pub(super) struct WeightInt8 {
     packed: BTreeMap<usize, Result<Packed, String>>,
     /// Weight IDs some live plan has read through an FP32 consumer.
     dense: BTreeSet<usize>,
-    pub(super) report: WeightInt8Report,
+    /// Report of the last completed step; `None` until one succeeds.
+    pub(super) report: Option<WeightInt8Report>,
 }
 
 impl WeightInt8 {
     /// Forget the per-step report; the packed and dense caches stay valid.
     pub(super) fn clear_report(&mut self) {
-        self.report = WeightInt8Report::default();
+        self.report = None;
     }
 
     /// Choose a route for every instruction of `plan` and prepare what the

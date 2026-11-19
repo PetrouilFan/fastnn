@@ -46,7 +46,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use fastnn::inference::import::{import_onnx_model, ModelImport};
-use fastnn::inference::model::{ModelWeights, Planner, PreparedModel, Session, SessionPhase};
+use fastnn::inference::model::{
+    ModelWeights, Planner, PreparedModel, Session, SessionOptions, SessionPhase,
+};
 use fastnn::inference::shape::ShapeEnvelope;
 use fastnn::inference::{
     Backend, Capabilities, CpuBackend, DType, DeviceId, Fn3Error, LiveDims, OpId, OpParams,
@@ -1518,4 +1520,68 @@ mod gpu {
             "the validation layer reported an error or warning; see the [fn3vk][validation] lines"
         );
     }
+}
+
+/// The Python `weight_int8=True` hook is exactly `SessionOptions::weight_int8`.
+///
+/// A session that never asked for the option exposes no report, and an INT8
+/// session exposes one only after a step has completed. This is the core half
+/// of the Python surface's `session.weight_int8_report`; the report's own
+/// routing and byte accounting are covered in `src/fn3/model/weight_int8.rs`.
+#[test]
+fn weight_int8_report_appears_only_after_a_completed_step() {
+    let Some(import) = pinned() else {
+        return;
+    };
+    let (model, _) = prepared(&import, DeviceId::Cpu);
+    let backend = CpuBackend::new();
+
+    let mut reference = cpu_session(&model, &import, &backend);
+    assert!(reference.weight_int8_report().is_none());
+    reference.prefill(&token_ids()[..4]).expect("FP32 prefill");
+    assert!(
+        reference.weight_int8_report().is_none(),
+        "a default session must never report INT8 coverage"
+    );
+
+    let options = SessionOptions {
+        weight_int8: true,
+        ..SessionOptions::default()
+    };
+    let mut quantized = Session::with_runtime_options(&model, &import, &backend, options)
+        .expect("the CPU reference hosts packed weights");
+    assert!(quantized.weight_int8_report().is_none(), "no step has run");
+    quantized.prefill(&token_ids()[..10]).expect("INT8 prefill");
+
+    let report = quantized
+        .weight_int8_report()
+        .expect("an INT8 session reports the completed step");
+    let packed = report
+        .routes
+        .iter()
+        .filter(|route| route.fallback.is_none())
+        .count();
+    assert_eq!((packed, report.routes.len()), (8, 13));
+    assert_eq!(report.packed_source_bytes, 1_572_864);
+    let packed_payload = report.packed_payload_bytes;
+    assert_eq!(packed_payload, 417_792);
+    assert_eq!(report.shared_weight_bytes, 0);
+    assert_eq!(report.dense_weight_bytes, 26_260_132);
+
+    quantized.reset();
+    assert!(
+        quantized.weight_int8_report().is_none(),
+        "reset clears the per-step report but keeps the packed weights"
+    );
+    quantized
+        .prefill(&token_ids()[..10])
+        .expect("repeated prefill");
+    assert_eq!(
+        quantized
+            .weight_int8_report()
+            .expect("a report after the repeated step")
+            .packed_payload_bytes,
+        packed_payload,
+        "the repeated step reused the packed copies"
+    );
 }

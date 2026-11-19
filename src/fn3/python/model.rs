@@ -581,6 +581,7 @@ pub struct PyModel {
     backend: Arc<dyn Backend>,
     device: DeviceId,
     capacity: u64,
+    weight_int8: bool,
     instance: u64,
     path: String,
     source: Option<String>,
@@ -653,6 +654,12 @@ impl PyModel {
         self.capacity
     }
 
+    /// `True` when sessions pack eligible projection weights as INT8.
+    #[getter]
+    fn weight_int8(&self) -> bool {
+        self.weight_int8
+    }
+
     /// KV cache bytes each session allocates (keys and values, all layers).
     #[getter]
     fn kv_bytes(&self) -> u64 {
@@ -695,6 +702,7 @@ impl PyModel {
             Arc::clone(&self.backend),
             self.device,
             self.capacity,
+            self.weight_int8,
             self.instance,
         )
     }
@@ -1217,13 +1225,14 @@ fn retag_weights(weights: ModelWeights, device: DeviceId) -> Result<ModelWeights
 
 /// Load a prepared artifact, bind it to an explicit device and return a model.
 #[pyfunction]
-#[pyo3(signature = (artifact, *, source = None, device = None, capacity = None))]
+#[pyo3(signature = (artifact, *, source = None, device = None, capacity = None, weight_int8 = false))]
 pub fn load(
     py: Python<'_>,
     artifact: &str,
     source: Option<String>,
     device: Option<Bound<'_, PyAny>>,
     capacity: Option<u64>,
+    weight_int8: bool,
 ) -> PyResult<Py<PyModel>> {
     // 1. The device first: a wrong request must fail before 28 MB of I/O.
     let device = resolve_device(py, device.as_ref())?;
@@ -1319,6 +1328,7 @@ pub fn load(
         backend: backend_arc,
         device,
         capacity,
+        weight_int8,
         instance: MODEL_IDENTITY.fetch_add(1, Ordering::Relaxed),
         path: artifact.to_string(),
         source,

@@ -1,10 +1,44 @@
 # Artifact-only INT8 weights (opt-in)
 
-Pass `--weight-int8` to `fastnn-infer run` or `generate`, or set
-`SessionOptions::weight_int8` in Rust. Without the flag the FP32 path is
+Pass `--weight-int8` to `fastnn-infer run` or `generate`, set
+`SessionOptions::weight_int8` in Rust, or pass `weight_int8=True` to
+`fastnn.inference.load` in Python. Without the flag the FP32 path is
 unchanged. Deployment still needs only the existing `.fnn3` artifact: the file
 carries FP32 weights, its size is unchanged, and no conversion tool or ONNX file
 is involved. Activations, accumulators, the KV cache and logits stay FP32.
+
+From Python the same option is a keyword on `fastnn.inference.load`, and the
+per-step report is a session property:
+
+```python
+import fastnn.inference as fn3
+
+model = fn3.load("model.fnn3", device="cpu", weight_int8=True)
+session = model.session()
+session.prefill(tokens)
+
+report = session.weight_int8_report       # None when the option is off
+print(report.packed_matmuls, report.fp32_matmuls)
+print(report.packed_payload, report.packed_source)
+print(report.dense_weight, report.dense_label)   # fp32-retained on the CPU
+print(report.shared_weight, report.model_weight)
+print(report.route_pack_upload)           # milliseconds
+print(report.packed_prepare, report.staged_host_bytes, report.late_persistent)
+print(report.as_dict())                   # the CLI's own field names
+
+for route in report.routes:
+    print(route.instruction, route.rhs, route.route)   # packed / fallback code
+```
+
+The report is a read-only snapshot of the last completed step and is `None`
+before the first step. Its attribute names are the CLI labels with `-` written
+as `_`; `as_dict()` uses the labels themselves (`packed-matmuls`,
+`route/pack/upload`, ...). The three traffic fields are `None` on the CPU, where
+the CLI prints no `weight-int8-traffic` line, and carry
+`packed-prepare`/`staged-host-bytes`/`late-persistent` on a resident Vulkan
+session. `weight_int8` must be a `bool`; anything else is a `TypeError`. A
+host-staged Vulkan session raises `Fn3UnsupportedError` from `model.session()`,
+exactly like the CLI's typed refusal, and never runs on the CPU.
 
 This is a runtime path, not an artifact section. `fn3-quant-format-v1.md` §6 is
 the fallback policy reused here; §8's packed tensor sections are read from an
@@ -196,6 +230,14 @@ hide a regression:
   backend rejection.
 - `tests/fn3_cli.rs`: the tiny artifact-only run, when the pinned ONNX is
   present, asserts the CPU report labels and route codes.
+- `tests/fn3_session.rs`: `SessionOptions::weight_int8` exposes no report
+  before a step and the pinned tiny artifact's 8/13 coverage, bytes and reset
+  semantics after one; the core half of the Python hook.
+- `tests/test_fn3_python.py` (`weight_int8_*`): the default emits no report; an
+  INT8 load reports the CLI's coverage, byte and traffic fields (and `as_dict()`
+  uses the CLI labels); the tiny artifact's logits stay within the published
+  bound; a non-bool raises `TypeError`; and a staged Vulkan session raises
+  `Fn3UnsupportedError`.
 - `tests/fn3_vulkan_quant.rs`: a resident quantized prepare moves exactly the
   payload through `packed_prepare_bytes` and zero staged bytes.
 

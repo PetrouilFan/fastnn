@@ -815,3 +815,133 @@ def test_one_session_serialises_concurrent_calls(model):
     assert session.phase == "ready"
     assert session.cache_len == 1
     assert session.decode([5]).shape == (1, 1, VOCAB)
+
+
+# ---------------------------------------------------------------------------
+# 9. Opt-in INT8 weights
+# ---------------------------------------------------------------------------
+
+
+def test_weight_int8_is_off_by_default_and_emits_no_report(model):
+    """The default is the FP32 path: no report, and no new observable state."""
+    assert model.weight_int8 is False
+    session = model.session()
+    assert session.weight_int8_report is None
+    logits = session.prefill(TOKENS[:4])
+    assert session.weight_int8_report is None, (
+        "a weight_int8=False session must not report INT8 coverage"
+    )
+    assert np.isfinite(np.asarray(logits)).all()
+
+
+def test_weight_int8_reports_the_cli_fields(artifact_path):
+    """The report carries the same numbers and labels as the CLI's --steps."""
+    quantized = fn3.load(artifact_path, device="cpu", weight_int8=True)
+    assert quantized.weight_int8 is True
+    session = quantized.session()
+    assert session.weight_int8_report is None, "no step has completed yet"
+
+    session.prefill(TOKENS[:10])
+    report = session.weight_int8_report
+    assert report is not None
+
+    # Coverage, from the pinned tiny artifact: 8 packed of 13 MatMuls.
+    assert report.packed_matmuls == 8
+    assert report.fp32_matmuls == 5
+    assert len(report.routes) == 13
+    assert report.packed_matmuls + report.fp32_matmuls == len(report.routes)
+    assert all(route.route for route in report.routes)
+    assert sum(route.packed for route in report.routes) == report.packed_matmuls
+    assert any(route.route == "computed-rhs" for route in report.routes)
+    assert any(route.packed and route.route == "packed" for route in report.routes)
+
+    # Bytes. The packed set replaces exactly packed_source - packed_payload.
+    assert report.model_weight == 27_833_180
+    assert report.packed_source == 1_572_864
+    assert report.packed_payload == 417_792
+    assert report.dense_weight == 26_260_132
+    assert report.shared_weight == 0
+    assert 0 < report.packed_payload < report.packed_source
+    assert report.route_pack_upload >= 0.0
+
+    # The CPU keeps host tensors, so the CLI calls this counter
+    # `fp32-retained`, and prints no device-traffic line.
+    assert report.dense_label == "fp32-retained"
+    assert report.packed_prepare is None
+    assert report.staged_host_bytes is None
+    assert report.late_persistent is None
+
+    # as_dict() is the CLI's own vocabulary, for one oracle over both paths.
+    fields = report.as_dict()
+    assert fields["packed-matmuls"] == report.packed_matmuls
+    assert fields["fp32-matmuls"] == report.fp32_matmuls
+    assert fields["packed-payload"] == report.packed_payload
+    assert fields["packed-source"] == report.packed_source
+    assert fields["dense-weight"] == report.dense_weight
+    assert fields["dense-label"] == report.dense_label
+    assert fields["shared-weight"] == report.shared_weight
+    assert fields["model-weight"] == report.model_weight
+    assert fields["route/pack/upload"] == report.route_pack_upload
+    assert "packed-prepare" not in fields
+    assert "staged-host-bytes" not in fields
+    assert "late-persistent" not in fields
+
+    # The report is a snapshot: a read-only object, never a live mutation path.
+    with pytest.raises(AttributeError):
+        report.packed_matmuls = 1
+
+    # A second step reuses the packed set; the report keeps describing one step.
+    session.decode([4874])
+    second = session.weight_int8_report
+    assert second is not None
+    assert second.packed_payload == report.packed_payload
+
+
+def test_weight_int8_prefill_and_decode_match_fp32(model, artifact_path):
+    """The tiny artifact's logits stay within the format's published bound."""
+    reference = model.session()
+    quantized = fn3.load(artifact_path, device="cpu", weight_int8=True).session()
+
+    expected = np.asarray(reference.prefill(TOKENS[:10])).copy()
+    actual = np.asarray(quantized.prefill(TOKENS[:10])).copy()
+    assert int(actual.argmax()) == int(expected.argmax())
+    assert float(np.max(np.abs(actual - expected))) < 0.02
+
+    expected = np.asarray(reference.decode([4874])).copy()
+    actual = np.asarray(quantized.decode([4874])).copy()
+    assert int(actual.argmax()) == int(expected.argmax())
+    assert float(np.max(np.abs(actual - expected))) < 0.02
+
+
+def test_weight_int8_rejects_a_non_bool(artifact_path):
+    """The option is a bool; anything else is a TypeError, as for capacity."""
+    for value in ("yes", 1, 0, 1.0, None):
+        with pytest.raises(TypeError) as info:
+            fn3.load(artifact_path, weight_int8=value)
+        assert "weight_int8" in str(info.value)
+
+
+def test_staged_vulkan_weight_int8_is_refused_with_the_typed_error(artifact_path):
+    """A host-staged Vulkan session refuses INT8 weights; it never uses the CPU."""
+    vulkan = [device for device in fn3.devices() if device.kind == "vulkan"]
+    if not vulkan:
+        pytest.skip("this build or machine enumerates no Vulkan device")
+
+    previous = os.environ.get("FN3_VK_STAGED")
+    os.environ["FN3_VK_STAGED"] = "1"
+    try:
+        model = fn3.load(artifact_path, device=vulkan[0], weight_int8=True)
+        with pytest.raises(fn3.Fn3UnsupportedError) as info:
+            model.session()
+    finally:
+        if previous is None:
+            os.environ.pop("FN3_VK_STAGED", None)
+        else:
+            os.environ["FN3_VK_STAGED"] = previous
+
+    error = info.value
+    assert error.op == "matmul"
+    assert error.backend == "vulkan"
+    assert "INT8 weights need the CPU backend or a resident Vulkan session" in str(error)
+    assert "host-staged" in str(error)
+    assert "CPU backend" in str(error)

@@ -59,7 +59,7 @@ execution path the CLI uses.
 
 prepare(onnx, artifact, ...) -> PrepareReport
 inspect(artifact) -> ArtifactInfo
-load(artifact, source=..., device=..., capacity=...) -> Model
+load(artifact, source=..., device=..., capacity=..., weight_int8=...) -> Model
 devices() -> list[Device]
 ";
 
@@ -88,6 +88,8 @@ pub fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
         "Model",
         "Session",
         "SessionStats",
+        "WeightInt8Report",
+        "WeightInt8Route",
         "Logits",
     ];
     names.extend_from_slice(errors::NAMES);

@@ -632,12 +632,10 @@ impl<'model> Session<'model> {
     }
 
     /// Per-MatMul INT8/FP32 coverage and preparation cost of the last completed step.
+    ///
+    /// `None` until an INT8-weight session completes its first step.
     pub fn weight_int8_report(&self) -> Option<&super::WeightInt8Report> {
-        self.runtime
-            .as_ref()?
-            .weight_int8
-            .as_ref()
-            .map(|state| &state.report)
+        self.runtime.as_ref()?.weight_int8.as_ref()?.report.as_ref()
     }
 
     /// The backend every instruction of this session is executed by, when the
@@ -1189,7 +1187,7 @@ impl<'model> Session<'model> {
         drop(presents);
 
         if let (Some(state), Some((_, report))) = (&mut runtime.weight_int8, quant) {
-            state.report = report;
+            state.report = Some(report);
         }
         runtime.recycle(&plan, slots);
         runtime.last_plan = Some(plan.identity());
