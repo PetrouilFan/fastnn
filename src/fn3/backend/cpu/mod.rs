@@ -55,7 +55,43 @@ use crate::fn3::ops::OpId;
 use crate::fn3::tensor::{TensorMut, TensorView};
 
 pub(crate) mod kernels;
+pub(crate) mod parallel;
+pub(crate) mod simd;
 pub(crate) mod support;
+
+pub use parallel::{CpuParallelStats, ThreadBudget};
+
+/// Snapshot of the CPU backend's parallel dispatch counters.
+///
+/// The counters are incremented *inside* the worker chunk bodies, so they are
+/// evidence that a [`ThreadBudget`] reached the kernels rather than only the
+/// backend's configuration. `max_active` is the highest observed number of
+/// chunks running at one instant; `distinct_threads` is how many threads
+/// executed at least one chunk since the last [`reset_parallel_stats`].
+pub fn parallel_stats() -> CpuParallelStats {
+    parallel::stats()
+}
+
+/// Clear the parallel dispatch counters and start a new observation window.
+pub fn reset_parallel_stats() {
+    parallel::reset_stats()
+}
+
+/// Run a trivial parallel dispatch so the first measured sample does not pay the
+/// global pool's start-up.
+pub fn warm_parallel_pool() {
+    parallel::warm_pool()
+}
+
+/// What decided the process-wide thread budget (environment cap, visible CPUs).
+pub fn cpu_thread_budget_note() -> &'static str {
+    parallel::process_pool_note()
+}
+
+/// The thread count [`ThreadBudget::Auto`] resolves to in this process.
+pub fn cpu_process_budget() -> usize {
+    parallel::process_budget()
+}
 
 /// Backend name used in every CPU diagnostic.
 pub const CPU_BACKEND_NAME: &str = "cpu";
@@ -70,9 +106,7 @@ pub fn cpu_capabilities() -> Capabilities {
         max_buffer_bytes: 16 * 1024 * 1024 * 1024,
         max_shape_rank: 8,
         max_workgroup_size: [1, 1, 1],
-        max_threads: std::thread::available_parallelism()
-            .map(|parallelism| parallelism.get().min(u32::MAX as usize) as u32)
-            .unwrap_or(1),
+        max_threads: parallel::process_budget().min(u32::MAX as usize) as u32,
         supports_strided_views: true,
         features: CapabilityFeatures {
             broadcasting: true,
@@ -89,13 +123,110 @@ pub fn cpu_capabilities() -> Capabilities {
 #[derive(Debug, Clone)]
 pub struct CpuBackend {
     capabilities: Capabilities,
+    budget: ThreadBudget,
+    /// Set once a decode-shaped instruction (a matrix product with one output
+    /// row) that could **not** use more than one thread has run through this
+    /// runtime. See [`CpuBackend::threads`].
+    decode_serial: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Set once a decode-shaped instruction that *could* use several threads has
+    /// run. A runtime that can parallelise its decode keeps the wide budget.
+    decode_parallel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl CpuBackend {
-    /// Construct with the capabilities of this host.
+    /// Construct with the capabilities of this host and [`ThreadBudget::Auto`].
     pub fn new() -> CpuBackend {
         CpuBackend {
             capabilities: cpu_capabilities(),
+            budget: ThreadBudget::Auto,
+            decode_serial: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            decode_parallel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// Construct with an explicit per-runtime thread budget.
+    ///
+    /// The budget bounds how many threads one instruction may use. It is
+    /// resolved on every dispatch against [`parallel::process_budget`], so a cap
+    /// above the CPUs this process may use is clamped rather than honoured.
+    /// `ThreadBudget::Fixed(1)` is exactly the serial path, which is what the
+    /// parity and allocation baselines use.
+    pub fn with_thread_budget(budget: ThreadBudget) -> CpuBackend {
+        CpuBackend {
+            capabilities: cpu_capabilities(),
+            budget,
+            decode_serial: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            decode_parallel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// The budget this backend was built with, before clamping.
+    pub fn thread_budget(&self) -> ThreadBudget {
+        self.budget
+    }
+
+    /// The thread count the next instruction may use.
+    ///
+    /// # Why `Auto` narrows after a decode-shaped instruction
+    ///
+    /// A turn prefills and then decodes. The prefill is the only wide
+    /// instruction, and a wide prefill measurably slows the decode that follows
+    /// it (FN3-25 measured 6.0–7.4 ms at one thread against 6.9–10.9 ms at four
+    /// or more, on the tiny model), while a *serial* prefill costs 1.3x on its
+    /// own. For a turn the serial pair wins: 14.2 + 6.2 ms against 11.0 + 10.1.
+    /// A prefill-only workload has the opposite optimum. `Auto` therefore keeps
+    /// the wide budget until it sees a matrix product with one output row — the
+    /// shape of every one-token projection — and narrows to one thread after
+    /// that, which is the measured optimum for the turn class and leaves
+    /// prefill-only runs at [`ThreadBudget::Auto`]'s wide setting.
+    ///
+    /// [`ThreadBudget::Fixed`] is never narrowed: an explicit request is a
+    /// statement about the workload, not a guess.
+    ///
+    /// The first turn of a session still runs wide, because nothing has been
+    /// observed yet; the cost of that first turn is in the report.
+    pub fn threads(&self) -> usize {
+        let resolved = self.budget.threads();
+        if self.budget == ThreadBudget::Auto && self.auto_narrowed() {
+            return 1;
+        }
+        resolved
+    }
+
+    /// `true` when [`CpuBackend::threads`] has narrowed an `Auto` budget because
+    /// decode-shaped work was observed.
+    pub fn auto_narrowed(&self) -> bool {
+        self.budget == ThreadBudget::Auto
+            && self
+                .decode_serial
+                .load(std::sync::atomic::Ordering::Relaxed)
+            && !self
+                .decode_parallel
+                .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Record that a matrix product with one output row ran **and could not use
+    /// more than one thread anyway**.
+    ///
+    /// That is the case the narrowing is for: the decode step then has no
+    /// parallelisable instruction, so a wide prefill buys 1.3x on the prefill
+    /// while making the decode that follows it 1.4-1.7x slower, and the pair is
+    /// a net loss (tiny model: 14.2 + 6.2 ms serial against 11.0 + 10.1 ms wide).
+    /// When the decode's own product is above
+    /// [`parallel::MIN_MACS_PER_TASK`] the decode does use threads and the wide
+    /// budget stays: the trained model's one-token `lm_head` is 38.6 M MACs and
+    /// its decode is 1.06x faster wide. A runtime that has seen *both* kinds of
+    /// decode-shaped product — which is every real decode step, whose
+    /// small projections are serial and whose `lm_head` may be parallel — keeps
+    /// the wide budget, because the step can use threads.
+    pub(crate) fn note_decode_shaped(&self, macs: u64) {
+        let tiles = macs / crate::fn3::backend::cpu::parallel::MIN_MACS_PER_TASK;
+        if tiles <= 1 {
+            self.decode_serial
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            self.decode_parallel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
@@ -161,7 +292,17 @@ impl CpuBackend {
             OpId::MatMul => {
                 check_arity(op, inputs.len(), outputs.len(), 2, 1)?;
                 kernels::require_no_attributes(op, params)?;
-                matmul::matmul(op, &inputs[0], &inputs[1], &mut outputs[0])
+                let threads = self.threads();
+                // One output row is the shape of every one-token projection; the
+                // MAC count decides whether that projection could use threads at
+                // all, which is what the narrowing rule keys on.
+                let dims = outputs[0].shape().dims();
+                if dims.len() >= 2 && dims[dims.len() - 2] == 1 {
+                    let columns = dims[dims.len() - 1];
+                    let inner = inputs[0].shape().dims()[inputs[0].shape().rank() - 1];
+                    self.note_decode_shaped(inner.saturating_mul(columns));
+                }
+                matmul::matmul(op, &inputs[0], &inputs[1], &mut outputs[0], threads)
             }
 
             // -- elementwise arithmetic ----------------------------------

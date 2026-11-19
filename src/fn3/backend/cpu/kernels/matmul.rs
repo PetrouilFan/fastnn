@@ -37,11 +37,18 @@
 //!
 //! # Performance seam
 //!
-//! [`matmul`] is the correctness reference. [`dot_rows`] is the single
-//! inner-product loop, isolated so #71 can replace it with
-//! `blocked_row_matmul`-style blocking and SIMD (the 2.x
-//! `src/backend/cpu/microkernels/misc.rs` has a `simd_dot_product` worth
-//! copying) without touching layout, validation or broadcasting.
+//! [`matmul`] validates layout, broadcasting and the output shape and then
+//! dispatches. When the matrix axes of both operands are row-major and the
+//! output is contiguous, the contraction runs through
+//! [`super::gemm::row_major_slab`] (FN3-25 / #71): a bounds check once per slab
+//! instead of once per output element, `4x4` scalar blocking, and an
+//! 8-wide AVX2 kernel selected by runtime detection. That path is
+//! **bit-identical** to the reference below — it vectorises across output
+//! columns, so no accumulator is ever reassociated — and is pinned by
+//! `tests/fn3_cpu_perf.rs`. Everything else (a transposed `K @ V^T` view, a
+//! strided or broadcast operand, a non-contiguous output) keeps using
+//! [`dot_rows`], which is the documented contract and the only implementation
+//! of it.
 
 use crate::fn3::dtype::DType;
 use crate::fn3::error::Fn3Error;
@@ -57,6 +64,7 @@ pub(crate) fn matmul(
     lhs: &TensorView<'_>,
     rhs: &TensorView<'_>,
     out: &mut TensorMut<'_>,
+    threads: usize,
 ) -> Result<(), Fn3Error> {
     require_dtype(op, lhs.meta(), DType::F32)?;
     require_dtype(op, rhs.meta(), DType::F32)?;
@@ -117,9 +125,46 @@ pub(crate) fn matmul(
     let rhs_row_step = stride_usize(op, rhs, rhs_rank - 2)?;
     let rhs_column_step = stride_usize(op, rhs, rhs_rank - 1)?;
 
+    // The fast path needs `usize` extents; a contraction that does not fit is
+    // already refused by `dot_rows`, so failing here with the same error keeps
+    // both paths equivalent.
+    let inner_usize = usize::try_from(inner).map_err(|_| Fn3Error::ShapeOverflow {
+        context: "cpu matmul contraction length",
+        axis: None,
+        detail: "contraction length does not fit in usize".to_string(),
+    })?;
+    let rows_usize = usize::try_from(rows).map_err(|_| Fn3Error::ShapeOverflow {
+        context: "cpu matmul row count",
+        axis: None,
+        detail: "row count does not fit in usize".to_string(),
+    })?;
+    let columns_usize = usize::try_from(columns).map_err(|_| Fn3Error::ShapeOverflow {
+        context: "cpu matmul column count",
+        axis: None,
+        detail: "column count does not fit in usize".to_string(),
+    })?;
+
     let out_locator = Locator::new(op, out.meta(), &expected)?;
     let lhs_data = lhs.storage_slice::<f32>()?;
     let rhs_data = rhs.storage_slice::<f32>()?;
+
+    // Row-major fast path (FN3-25 / #71). The four matrix-axis strides below
+    // are exactly "k is contiguous in the left operand, n is contiguous in the
+    // right one, and each row is packed": the shape `K @ N` layout the pinned
+    // model's weights and every plan output use. `super::gemm` keeps the
+    // ascending-`k` one-accumulator order, so taking this branch cannot change
+    // a single bit; it only removes per-element index arithmetic.
+    let lhs_row_major = lhs_row_step == 1 && lhs_column_step == inner_usize;
+    let rhs_row_major = rhs_row_step == columns_usize && rhs_column_step == 1;
+    let row_major = lhs_row_major && rhs_row_major && out.is_contiguous();
+    let out_offset = out.meta().offset();
+    let slab = rows_usize
+        .checked_mul(columns_usize)
+        .ok_or_else(|| Fn3Error::ShapeOverflow {
+            context: "cpu matmul output slab",
+            axis: None,
+            detail: "rows times columns overflows usize".to_string(),
+        })?;
     let out_data = out.storage_slice_mut::<f32>()?;
 
     let rank = batch.rank();
@@ -180,6 +225,38 @@ pub(crate) fn matmul(
         // already fits in `usize` (see the element-count note in `kernels`).
         let lhs_base = lhs_base as usize;
         let rhs_base = rhs_base as usize;
+
+        if row_major {
+            // A contiguous output means slab `batch_linear` occupies exactly
+            // `[offset + batch_linear*slab, .. + slab)`.
+            let out_base = out_offset
+                .checked_add((batch_linear as usize).checked_mul(slab).ok_or_else(|| {
+                    Fn3Error::ShapeOverflow {
+                        context: "cpu matmul output slab base",
+                        axis: None,
+                        detail: format!("batch {batch_linear} times slab {slab} overflows"),
+                    }
+                })?)
+                .ok_or_else(|| Fn3Error::ShapeOverflow {
+                    context: "cpu matmul output slab base",
+                    axis: None,
+                    detail: "element index exceeds usize::MAX".to_string(),
+                })?;
+            super::gemm::row_major_slab(
+                op,
+                lhs_data,
+                lhs_base,
+                rhs_data,
+                rhs_base,
+                out_data,
+                out_base,
+                rows_usize,
+                inner_usize,
+                columns_usize,
+                threads,
+            )?;
+            continue;
+        }
 
         for row in 0..rows {
             let row_offset =
@@ -389,7 +466,7 @@ mod tests {
         let lhs_view = lhs.as_view().unwrap();
         let rhs_view = rhs.as_view().unwrap();
         let mut out_view = out.as_mut_view().unwrap();
-        matmul(OpId::MatMul, &lhs_view, &rhs_view, &mut out_view).unwrap();
+        matmul(OpId::MatMul, &lhs_view, &rhs_view, &mut out_view, 1).unwrap();
         out.as_f32_slice().unwrap().to_vec()
     }
 

@@ -1,0 +1,4 @@
+ 1 thread(s):   25.309 ms    2.03 GB/s
+ 2 thread(s):   19.856 ms    2.59 GB/s
+ 4 thread(s):   14.039 ms    3.67 GB/s
+ 8 thread(s):   12.510 ms    4.11 GB/s

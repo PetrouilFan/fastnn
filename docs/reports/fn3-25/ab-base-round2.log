@@ -1,0 +1,165 @@
+PinnedModel {"sha256":"e18370ba6247c564a4aef7b6a83aa86d5d036f47a73c0935e51bbcfe178141a1","prefill":10,"decode_past":10,"long_prefill":32,"long_decode_past":32,"context":96}
+Environment {"variant":"base","threads":16,"max_threads":16,"iters":20,"warmup":3,"loadavg":"2.03 3.37 3.70 1/2071 1371334","arch":"x86_64"}
+Notes {"timer":"std::time::Instant","clock":"CLOCK_MONOTONIC","build":"release, lto=true, codegen-units=1, panic=abort","threads_note":"the fn3 CPU kernels are single-threaded; max_threads only advertises the host"}
+PERF {"variant":"base","workload":"prefill_10","samples":20,"p50_us":270756.772,"p95_us":295432.776,"min_us":262189.841,"max_us":318811.915,"alloc_count":3444,"alloc_bytes":29282226,"note":"fresh session, plan cache and slot pool warm"}
+Checksum {"workload":"prefill_10","fnv1a32":"0x57908efa8cfa18b7"}
+PERF {"variant":"base","workload":"decode_past10","samples":20,"p50_us":186028.876,"p95_us":189112.010,"min_us":183277.803,"max_us":189654.133,"alloc_count":3405,"alloc_bytes":926161,"note":"reset + prefill 10 untimed; KV capacity 96 so no buffer grows"}
+Checksum {"workload":"decode_past10","fnv1a32":"0xca2d9d3615ee1863"}
+PERF {"variant":"base","workload":"decode_chain_past10_30","samples":20,"p50_us":188649.897,"p95_us":204087.519,"min_us":184240.117,"max_us":205534.736,"alloc_count":7102,"alloc_bytes":908264,"note":"warm slot pool, past grows 10..29, one token per step"}
+Checksum {"workload":"decode_chain_past10_30","fnv1a32":"0x9be595ad0ddd4d51"}
+PROFILE {"variant":"base","phase":"prefill_10","step_us":270039.145,"kernel_us":268020.886,"session_overhead_us":2018.259,"checksum":"0x57908efa8cfa18b7"}
+PROFILE_CLASS {"variant":"base","phase":"prefill_10","op":"transpose","calls":11,"ns":180964740,"pct_of_step":67.01,"pct_of_kernels":67.52}
+PROFILE_CLASS {"variant":"base","phase":"prefill_10","op":"matmul","calls":13,"ns":85495907,"pct_of_step":31.66,"pct_of_kernels":31.90}
+PROFILE_CLASS {"variant":"base","phase":"prefill_10","op":"add","calls":24,"ns":416390,"pct_of_step":0.15,"pct_of_kernels":0.16}
+PROFILE_CLASS {"variant":"base","phase":"prefill_10","op":"reduce_mean","calls":10,"ns":188682,"pct_of_step":0.07,"pct_of_kernels":0.07}
+PROFILE_CLASS {"variant":"base","phase":"prefill_10","op":"split","calls":2,"ns":183372,"pct_of_step":0.07,"pct_of_kernels":0.07}
+PROFILE_CLASS {"variant":"base","phase":"prefill_10","op":"concat","calls":5,"ns":160051,"pct_of_step":0.06,"pct_of_kernels":0.06}
+PROFILE_CLASS {"variant":"base","phase":"prefill_10","op":"pow","calls":7,"ns":144391,"pct_of_step":0.05,"pct_of_kernels":0.05}
+PROFILE_CLASS {"variant":"base","phase":"prefill_10","op":"sub","calls":6,"ns":139872,"pct_of_step":0.05,"pct_of_kernels":0.05}
+PROFILE_CLASS {"variant":"base","phase":"prefill_10","op":"div","calls":5,"ns":135820,"pct_of_step":0.05,"pct_of_kernels":0.05}
+PROFILE_CLASS {"variant":"base","phase":"prefill_10","op":"gather","calls":2,"ns":61170,"pct_of_step":0.02,"pct_of_kernels":0.02}
+PROFILE_CLASS {"variant":"base","phase":"prefill_10","op":"tanh","calls":2,"ns":41841,"pct_of_step":0.02,"pct_of_kernels":0.02}
+PROFILE_CLASS {"variant":"base","phase":"prefill_10","op":"reshape","calls":24,"ns":20250,"pct_of_step":0.01,"pct_of_kernels":0.01}
+PROFILE_CLASS {"variant":"base","phase":"prefill_10","op":"mul","calls":12,"ns":13010,"pct_of_step":0.00,"pct_of_kernels":0.00}
+PROFILE_CLASS {"variant":"base","phase":"prefill_10","op":"softmax","calls":2,"ns":12970,"pct_of_step":0.00,"pct_of_kernels":0.00}
+PROFILE_CLASS {"variant":"base","phase":"prefill_10","op":"where","calls":3,"ns":12250,"pct_of_step":0.00,"pct_of_kernels":0.00}
+PROFILE_CLASS {"variant":"base","phase":"prefill_10","op":"slice","calls":2,"ns":8440,"pct_of_step":0.00,"pct_of_kernels":0.00}
+PROFILE_CLASS {"variant":"base","phase":"prefill_10","op":"expand","calls":2,"ns":8200,"pct_of_step":0.00,"pct_of_kernels":0.00}
+PROFILE_CLASS {"variant":"base","phase":"prefill_10","op":"cast","calls":3,"ns":7690,"pct_of_step":0.00,"pct_of_kernels":0.00}
+PROFILE_CLASS {"variant":"base","phase":"prefill_10","op":"unsqueeze","calls":2,"ns":2730,"pct_of_step":0.00,"pct_of_kernels":0.00}
+PROFILE_CLASS {"variant":"base","phase":"prefill_10","op":"sqrt","calls":5,"ns":1610,"pct_of_step":0.00,"pct_of_kernels":0.00}
+PROFILE_CLASS {"variant":"base","phase":"prefill_10","op":"constant_of_shape","calls":2,"ns":1500,"pct_of_step":0.00,"pct_of_kernels":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"transpose","geometry":"transpose [50257, 128] -> [128, 50257]","calls":1,"ns":180626199,"pct_of_step":66.89}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"matmul","geometry":"matmul [1, 10, 128] [128, 50257] -> [1, 10, 50257]","calls":1,"ns":80498324,"pct_of_step":29.81}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"matmul","geometry":"matmul [10, 128] [128, 512] -> [10, 512]","calls":2,"ns":1649938,"pct_of_step":0.61}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"matmul","geometry":"matmul [10, 512] [512, 128] -> [10, 128]","calls":2,"ns":1614127,"pct_of_step":0.60}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"matmul","geometry":"matmul [10, 128] [128, 384] -> [10, 384]","calls":2,"ns":1227366,"pct_of_step":0.45}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"matmul","geometry":"matmul [10, 128] [128, 128] -> [10, 128]","calls":2,"ns":405412,"pct_of_step":0.15}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"transpose","geometry":"transpose [1, 10, 2, 64] -> [1, 2, 10, 64]","calls":6,"ns":203090,"pct_of_step":0.08}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"reduce_mean","geometry":"reduce_mean [1, 10, 128] -> [1, 10, 1]","calls":10,"ns":188682,"pct_of_step":0.07}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"split","geometry":"split [1, 10, 384] [3] -> [3 outputs]","calls":2,"ns":183372,"pct_of_step":0.07}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"add","geometry":"add [10, 512] [512] -> [10, 512]","calls":2,"ns":177710,"pct_of_step":0.07}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"concat","geometry":"concat [1, 2, 0, 64] [1, 2, 10, 64] -> [1, 2, 10, 64]","calls":4,"ns":157381,"pct_of_step":0.06}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"sub","geometry":"sub [1, 10, 128] [1, 10, 1] -> [1, 10, 128]","calls":5,"ns":139082,"pct_of_step":0.05}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"div","geometry":"div [1, 10, 128] [1, 10, 1] -> [1, 10, 128]","calls":5,"ns":135820,"pct_of_step":0.05}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"add","geometry":"add [10, 384] [384] -> [10, 384]","calls":2,"ns":129170,"pct_of_step":0.05}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"pow","geometry":"pow [1, 10, 512] [] -> [1, 10, 512]","calls":2,"ns":88130,"pct_of_step":0.03}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"add","geometry":"add [10, 128] [128] -> [10, 128]","calls":4,"ns":87220,"pct_of_step":0.03}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"transpose","geometry":"transpose [1, 2, 10, 64] -> [1, 2, 64, 10]","calls":2,"ns":69071,"pct_of_step":0.03}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"transpose","geometry":"transpose [1, 2, 10, 64] -> [1, 10, 2, 64]","calls":2,"ns":66380,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"matmul","geometry":"matmul [1, 2, 10, 10] [1, 2, 10, 64] -> [1, 2, 10, 64]","calls":2,"ns":65610,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"pow","geometry":"pow [1, 10, 128] [] -> [1, 10, 128]","calls":5,"ns":56261,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"tanh","geometry":"tanh [1, 10, 512] -> [1, 10, 512]","calls":2,"ns":41841,"pct_of_step":0.02}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"matmul","geometry":"matmul [1, 2, 10, 64] [1, 2, 64, 10] -> [1, 2, 10, 10]","calls":2,"ns":35130,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"gather","geometry":"gather [50257, 128] [1, 10] -> [1, 10, 128]","calls":1,"ns":30840,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"gather","geometry":"gather [1024, 128] [1, 10] -> [1, 10, 128]","calls":1,"ns":30330,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"softmax","geometry":"softmax [1, 2, 10, 10] -> [1, 2, 10, 10]","calls":2,"ns":12970,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"add","geometry":"add [1, 2, 10, 10] [1, 1, 10, 10] -> [1, 2, 10, 10]","calls":2,"ns":11410,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"where","geometry":"where [1, 1, 10, 10] [] [1, 1, 10, 10] -> [1, 1, 10, 10]","calls":2,"ns":8600,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"slice","geometry":"slice [1, 1, 10, 10] [1] [1] [1] [1] -> [1, 1, 10, 10]","calls":2,"ns":8440,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"mul","geometry":"mul [1, 10, 512] [] -> [1, 10, 512]","calls":6,"ns":7750,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"cast","geometry":"cast [1, 1, 10, 10] -> [1, 1, 10, 10]","calls":3,"ns":7690,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"expand","geometry":"expand [1, 1, 1, 10] [4] -> [1, 1, 10, 10]","calls":1,"ns":4900,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"reshape","geometry":"reshape [1, 10, 128] [2] -> [10, 128]","calls":6,"ns":4300,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"reshape","geometry":"reshape [10, 512] [3] -> [1, 10, 512]","calls":2,"ns":3930,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"add","geometry":"add [1, 10, 128] [1, 10, 128] -> [1, 10, 128]","calls":5,"ns":3870,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"where","geometry":"where [10, 10] [] [10, 10] -> [10, 10]","calls":1,"ns":3650,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"reshape","geometry":"reshape [1, 10, 128] [4] -> [1, 10, 2, 64]","calls":6,"ns":3580,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"expand","geometry":"expand [1, 1, 10, 10] [4] -> [1, 1, 10, 10]","calls":1,"ns":3300,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"add","geometry":"add [1, 10, 512] [] -> [1, 10, 512]","calls":2,"ns":3260,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"mul","geometry":"mul [1, 10, 512] [1, 10, 512] -> [1, 10, 512]","calls":2,"ns":2880,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"reshape","geometry":"reshape [1, 10, 512] [2] -> [10, 512]","calls":2,"ns":2680,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"concat","geometry":"concat [10, 0] [10, 10] -> [10, 10]","calls":1,"ns":2670,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"add","geometry":"add [1, 10, 512] [1, 10, 512] -> [1, 10, 512]","calls":2,"ns":2450,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"unsqueeze","geometry":"unsqueeze [1, 10] [2] -> [1, 1, 1, 10]","calls":1,"ns":2270,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"reshape","geometry":"reshape [10, 128] [3] -> [1, 10, 128]","calls":4,"ns":2130,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"reshape","geometry":"reshape [10, 384] [3] -> [1, 10, 384]","calls":2,"ns":2050,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"sqrt","geometry":"sqrt [1, 10, 1] -> [1, 10, 1]","calls":5,"ns":1610,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"reshape","geometry":"reshape [1, 10, 2, 64] [3] -> [1, 10, 128]","calls":2,"ns":1580,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"mul","geometry":"mul [1, 2, 10, 64] [1] -> [1, 2, 10, 64]","calls":2,"ns":1470,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"add","geometry":"add [1, 10, 1] [] -> [1, 10, 1]","calls":5,"ns":1300,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"constant_of_shape","geometry":"constant_of_shape [2] [1] -> [10, 10]","calls":1,"ns":1190,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"mul","geometry":"mul [1, 2, 64, 10] [1] -> [1, 2, 64, 10]","calls":2,"ns":910,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"sub","geometry":"sub [] [1, 1, 10, 10] -> [1, 1, 10, 10]","calls":1,"ns":790,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"unsqueeze","geometry":"unsqueeze [10, 10] [2] -> [1, 1, 10, 10]","calls":1,"ns":460,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"prefill_10","op":"constant_of_shape","geometry":"constant_of_shape [2] [1] -> [10, 0]","calls":1,"ns":310,"pct_of_step":0.00}
+PROFILE {"variant":"base","phase":"decode_past10","step_us":188379.395,"kernel_us":188093.694,"session_overhead_us":285.701,"checksum":"0xca2d9d3615ee1863"}
+PROFILE_CLASS {"variant":"base","phase":"decode_past10","op":"transpose","calls":11,"ns":179199693,"pct_of_step":95.13,"pct_of_kernels":95.27}
+PROFILE_CLASS {"variant":"base","phase":"decode_past10","op":"matmul","calls":13,"ns":8567200,"pct_of_step":4.55,"pct_of_kernels":4.55}
+PROFILE_CLASS {"variant":"base","phase":"decode_past10","op":"concat","calls":5,"ns":172741,"pct_of_step":0.09,"pct_of_kernels":0.09}
+PROFILE_CLASS {"variant":"base","phase":"decode_past10","op":"add","calls":24,"ns":47480,"pct_of_step":0.03,"pct_of_kernels":0.03}
+PROFILE_CLASS {"variant":"base","phase":"decode_past10","op":"reduce_mean","calls":10,"ns":24010,"pct_of_step":0.01,"pct_of_kernels":0.01}
+PROFILE_CLASS {"variant":"base","phase":"decode_past10","op":"split","calls":2,"ns":19780,"pct_of_step":0.01,"pct_of_kernels":0.01}
+PROFILE_CLASS {"variant":"base","phase":"decode_past10","op":"pow","calls":7,"ns":16420,"pct_of_step":0.01,"pct_of_kernels":0.01}
+PROFILE_CLASS {"variant":"base","phase":"decode_past10","op":"gather","calls":2,"ns":10580,"pct_of_step":0.01,"pct_of_kernels":0.01}
+PROFILE_CLASS {"variant":"base","phase":"decode_past10","op":"reshape","calls":24,"ns":6410,"pct_of_step":0.00,"pct_of_kernels":0.00}
+PROFILE_CLASS {"variant":"base","phase":"decode_past10","op":"tanh","calls":2,"ns":5400,"pct_of_step":0.00,"pct_of_kernels":0.00}
+PROFILE_CLASS {"variant":"base","phase":"decode_past10","op":"mul","calls":12,"ns":4900,"pct_of_step":0.00,"pct_of_kernels":0.00}
+PROFILE_CLASS {"variant":"base","phase":"decode_past10","op":"slice","calls":2,"ns":2650,"pct_of_step":0.00,"pct_of_kernels":0.00}
+PROFILE_CLASS {"variant":"base","phase":"decode_past10","op":"unsqueeze","calls":2,"ns":2400,"pct_of_step":0.00,"pct_of_kernels":0.00}
+PROFILE_CLASS {"variant":"base","phase":"decode_past10","op":"where","calls":3,"ns":2390,"pct_of_step":0.00,"pct_of_kernels":0.00}
+PROFILE_CLASS {"variant":"base","phase":"decode_past10","op":"softmax","calls":2,"ns":2360,"pct_of_step":0.00,"pct_of_kernels":0.00}
+PROFILE_CLASS {"variant":"base","phase":"decode_past10","op":"cast","calls":3,"ns":2170,"pct_of_step":0.00,"pct_of_kernels":0.00}
+PROFILE_CLASS {"variant":"base","phase":"decode_past10","op":"sub","calls":6,"ns":1990,"pct_of_step":0.00,"pct_of_kernels":0.00}
+PROFILE_CLASS {"variant":"base","phase":"decode_past10","op":"div","calls":5,"ns":1650,"pct_of_step":0.00,"pct_of_kernels":0.00}
+PROFILE_CLASS {"variant":"base","phase":"decode_past10","op":"expand","calls":2,"ns":1570,"pct_of_step":0.00,"pct_of_kernels":0.00}
+PROFILE_CLASS {"variant":"base","phase":"decode_past10","op":"sqrt","calls":5,"ns":1040,"pct_of_step":0.00,"pct_of_kernels":0.00}
+PROFILE_CLASS {"variant":"base","phase":"decode_past10","op":"constant_of_shape","calls":2,"ns":860,"pct_of_step":0.00,"pct_of_kernels":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"transpose","geometry":"transpose [50257, 128] -> [128, 50257]","calls":1,"ns":179099453,"pct_of_step":95.07}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"matmul","geometry":"matmul [1, 1, 128] [128, 50257] -> [1, 1, 50257]","calls":1,"ns":7962717,"pct_of_step":4.23}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"matmul","geometry":"matmul [1, 128] [128, 512] -> [1, 512]","calls":2,"ns":200131,"pct_of_step":0.11}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"matmul","geometry":"matmul [1, 512] [512, 128] -> [1, 128]","calls":2,"ns":189691,"pct_of_step":0.10}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"concat","geometry":"concat [1, 2, 10, 64] [1, 2, 1, 64] -> [1, 2, 11, 64]","calls":4,"ns":171501,"pct_of_step":0.09}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"matmul","geometry":"matmul [1, 128] [128, 384] -> [1, 384]","calls":2,"ns":153401,"pct_of_step":0.08}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"transpose","geometry":"transpose [1, 2, 11, 64] -> [1, 2, 64, 11]","calls":2,"ns":72280,"pct_of_step":0.04}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"matmul","geometry":"matmul [1, 128] [128, 128] -> [1, 128]","calls":2,"ns":49340,"pct_of_step":0.03}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"reduce_mean","geometry":"reduce_mean [1, 1, 128] -> [1, 1, 1]","calls":10,"ns":24010,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"transpose","geometry":"transpose [1, 1, 2, 64] -> [1, 2, 1, 64]","calls":6,"ns":21180,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"split","geometry":"split [1, 1, 384] [3] -> [3 outputs]","calls":2,"ns":19780,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"add","geometry":"add [1, 512] [512] -> [1, 512]","calls":2,"ns":17740,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"add","geometry":"add [1, 384] [384] -> [1, 384]","calls":2,"ns":13640,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"add","geometry":"add [1, 128] [128] -> [1, 128]","calls":4,"ns":10240,"pct_of_step":0.01}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"pow","geometry":"pow [1, 1, 512] [] -> [1, 1, 512]","calls":2,"ns":9230,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"pow","geometry":"pow [1, 1, 128] [] -> [1, 1, 128]","calls":5,"ns":7190,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"matmul","geometry":"matmul [1, 2, 1, 11] [1, 2, 11, 64] -> [1, 2, 1, 64]","calls":2,"ns":7180,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"transpose","geometry":"transpose [1, 2, 1, 64] -> [1, 1, 2, 64]","calls":2,"ns":6780,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"gather","geometry":"gather [50257, 128] [1, 1] -> [1, 1, 128]","calls":1,"ns":5630,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"tanh","geometry":"tanh [1, 1, 512] -> [1, 1, 512]","calls":2,"ns":5400,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"gather","geometry":"gather [1024, 128] [1, 1] -> [1, 1, 128]","calls":1,"ns":4950,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"matmul","geometry":"matmul [1, 2, 1, 64] [1, 2, 64, 11] -> [1, 2, 1, 11]","calls":2,"ns":4740,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"slice","geometry":"slice [1, 1, 1, 11] [1] [1] [1] [1] -> [1, 1, 1, 11]","calls":2,"ns":2650,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"unsqueeze","geometry":"unsqueeze [1, 11] [2] -> [1, 1, 1, 11]","calls":2,"ns":2400,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"softmax","geometry":"softmax [1, 2, 1, 11] -> [1, 2, 1, 11]","calls":2,"ns":2360,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"cast","geometry":"cast [1, 1, 1, 11] -> [1, 1, 1, 11]","calls":3,"ns":2170,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"where","geometry":"where [1, 1, 1, 11] [] [1, 1, 1, 11] -> [1, 1, 1, 11]","calls":2,"ns":1970,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"mul","geometry":"mul [1, 1, 512] [] -> [1, 1, 512]","calls":6,"ns":1920,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"reshape","geometry":"reshape [1, 1, 128] [2] -> [1, 128]","calls":6,"ns":1890,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"add","geometry":"add [1, 2, 1, 11] [1, 1, 1, 11] -> [1, 2, 1, 11]","calls":2,"ns":1860,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"add","geometry":"add [1, 1, 128] [1, 1, 128] -> [1, 1, 128]","calls":5,"ns":1830,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"div","geometry":"div [1, 1, 128] [1, 1, 1] -> [1, 1, 128]","calls":5,"ns":1650,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"expand","geometry":"expand [1, 1, 1, 11] [4] -> [1, 1, 1, 11]","calls":2,"ns":1570,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"sub","geometry":"sub [1, 1, 128] [1, 1, 1] -> [1, 1, 128]","calls":5,"ns":1560,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"reshape","geometry":"reshape [1, 1, 128] [4] -> [1, 1, 2, 64]","calls":6,"ns":1310,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"concat","geometry":"concat [1, 10] [1, 1] -> [1, 11]","calls":1,"ns":1240,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"sqrt","geometry":"sqrt [1, 1, 1] -> [1, 1, 1]","calls":5,"ns":1040,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"mul","geometry":"mul [1, 2, 64, 11] [1] -> [1, 2, 64, 11]","calls":2,"ns":1010,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"add","geometry":"add [1, 1, 1] [] -> [1, 1, 1]","calls":5,"ns":1000,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"mul","geometry":"mul [1, 1, 512] [1, 1, 512] -> [1, 1, 512]","calls":2,"ns":1000,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"mul","geometry":"mul [1, 2, 1, 64] [1] -> [1, 2, 1, 64]","calls":2,"ns":970,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"reshape","geometry":"reshape [1, 128] [3] -> [1, 1, 128]","calls":4,"ns":820,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"reshape","geometry":"reshape [1, 1, 2, 64] [3] -> [1, 1, 128]","calls":2,"ns":670,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"add","geometry":"add [1, 1, 512] [1, 1, 512] -> [1, 1, 512]","calls":2,"ns":630,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"constant_of_shape","geometry":"constant_of_shape [2] [1] -> [1, 1]","calls":1,"ns":620,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"reshape","geometry":"reshape [1, 384] [3] -> [1, 1, 384]","calls":2,"ns":610,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"reshape","geometry":"reshape [1, 512] [3] -> [1, 1, 512]","calls":2,"ns":590,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"add","geometry":"add [1, 1, 512] [] -> [1, 1, 512]","calls":2,"ns":540,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"reshape","geometry":"reshape [1, 1, 512] [2] -> [1, 512]","calls":2,"ns":520,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"sub","geometry":"sub [] [1, 1, 1, 11] -> [1, 1, 1, 11]","calls":1,"ns":430,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"where","geometry":"where [1, 1] [] [1, 1] -> [1, 1]","calls":1,"ns":420,"pct_of_step":0.00}
+PROFILE_SITE {"variant":"base","phase":"decode_past10","op":"constant_of_shape","geometry":"constant_of_shape [2] [1] -> [1, 10]","calls":1,"ns":240,"pct_of_step":0.00}
+PERF {"variant":"base","workload":"prefill_32","samples":20,"p50_us":485671.047,"p95_us":539526.266,"min_us":458518.329,"max_us":551491.341,"alloc_count":3444,"alloc_bytes":35924862,"note":"fresh session, plan cache and slot pool warm"}
+Checksum {"workload":"prefill_32","fnv1a32":"0x562adb65c7f2369b"}
+PERF {"variant":"base","workload":"decode_past32","samples":20,"p50_us":192949.764,"p95_us":202529.639,"min_us":189231.618,"max_us":204249.918,"alloc_count":3405,"alloc_bytes":1067005,"note":"reset + prefill 32 untimed"}
+Checksum {"workload":"decode_past32","fnv1a32":"0x56ab990c772e716c"}
+LoadAfter {"loadavg":"1.89 3.13 3.60 2/2146 1371703"}
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 49.19s
