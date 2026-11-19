@@ -33,8 +33,8 @@
 use std::sync::Mutex;
 
 use super::submission::BindingSnapshot;
-use crate::fn3::device::DeviceId;
-use crate::fn3::ops::OpId;
+use crate::inference::device::DeviceId;
+use crate::inference::ops::OpId;
 
 /// Backend name used in every record.
 pub const VULKAN_BACKEND_NAME: &str = "vulkan";
@@ -331,7 +331,7 @@ mod tests {
     use super::super::context::BindingRole;
     use super::super::submission::BindingSnapshot;
     use super::*;
-    use crate::fn3::device::PhysicalDeviceId;
+    use crate::inference::device::PhysicalDeviceId;
 
     fn record() -> ExecutionRecord {
         let mut record = ExecutionRecord::new(

@@ -62,12 +62,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use fastnn::fn3::import::{import_onnx_model, ModelImport};
-use fastnn::fn3::{Backend, DeviceId, Session};
+use fastnn::inference::import::{import_onnx_model, ModelImport};
+use fastnn::inference::{Backend, DeviceId, Session};
 use serde_json::{json, Value};
 
 #[cfg(feature = "vulkan")]
-use fastnn::fn3::backend::vulkan::{
+use fastnn::inference::backend::vulkan::{
     adapters, instance::validation_counts, VulkanBackend, VulkanConfig,
 };
 
@@ -743,7 +743,7 @@ fn alpha_release_baseline() {
     for requested in requested_backends() {
         match requested {
             "cpu" => {
-                let backend = fastnn::fn3::CpuBackend::new();
+                let backend = fastnn::inference::CpuBackend::new();
                 let context = DeviceContext {
                     label: "cpu",
                     device: DeviceId::Cpu,
@@ -770,7 +770,7 @@ fn alpha_release_baseline() {
                             measured["adapter"] = json!({
                                 "name": adapter.name,
                                 "uuid": adapter.uuid_string(),
-                                "api_version": fastnn::fn3::backend::vulkan::device_info::format_version(adapter.api_version),
+                                "api_version": fastnn::inference::backend::vulkan::device_info::format_version(adapter.api_version),
                                 "driver_version": adapter.driver_version_string(),
                                 "software": backend.is_software(),
                                 "validation_enabled_in_code": backend.validation_enabled(),
@@ -890,7 +890,7 @@ fn alpha_release_baseline() {
 
 #[cfg(feature = "vulkan")]
 fn open_physical() -> Result<std::sync::Arc<VulkanBackend>, String> {
-    use fastnn::fn3::device::DeviceRequest;
+    use fastnn::inference::device::DeviceRequest;
 
     let pinned = pinned_uuid();
     let adapter = adapters()

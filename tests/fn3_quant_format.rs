@@ -3,7 +3,7 @@
 //! Two independent layers of evidence live here:
 //!
 //! 1. **Format conformance.** `fixtures/quant/` stores hand-checkable
-//!    `fn3-quant-format-v1` blobs. The Rust decoder in [`fastnn::fn3::quant`]
+//!    `fn3-quant-format-v1` blobs. The Rust decoder in [`fastnn::inference::quant`]
 //!    must agree with the Python reference in `tools/quant/` byte for byte, and
 //!    malformed metadata must produce typed errors rather than panics.
 //! 2. **Trained-model parity.** An opt-in, release-mode run of the pinned
@@ -23,10 +23,10 @@
 
 use std::path::{Path, PathBuf};
 
-use fastnn::fn3::import::{import_onnx_file, ModelImport};
-use fastnn::fn3::model::{ModelWeights, Planner, PreparedModel, Session};
-use fastnn::fn3::shape::ShapeEnvelope;
-use fastnn::fn3::{CpuBackend, DeviceId, LiveDims, Tensor, TensorMeta};
+use fastnn::inference::import::{import_onnx_file, ModelImport};
+use fastnn::inference::model::{ModelWeights, Planner, PreparedModel, Session};
+use fastnn::inference::shape::ShapeEnvelope;
+use fastnn::inference::{CpuBackend, DeviceId, LiveDims, Tensor, TensorMeta};
 
 // ---------------------------------------------------------------------------
 // Trained GPT-2 parity: the real model, the real release build, full logits
@@ -299,7 +299,7 @@ fn argmax(values: &[f32]) -> usize {
 // Format fixtures: the independent Python reference and the Rust decoder
 // ---------------------------------------------------------------------------
 
-use fastnn::fn3::quant::{QuantBlob, QuantError};
+use fastnn::inference::quant::{QuantBlob, QuantError};
 
 fn quant_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/quant")

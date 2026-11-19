@@ -22,12 +22,12 @@
 //! NaN comparisons are IEEE: `Equal(NaN, NaN)` is `false`, and `Less`/`Greater`
 //! are `false` for any NaN operand.
 
-use crate::fn3::backend::OpParams;
-use crate::fn3::dtype::DType;
-use crate::fn3::error::Fn3Error;
-use crate::fn3::ops::OpId;
-use crate::fn3::shape::Shape;
-use crate::fn3::tensor::{TensorMut, TensorView};
+use crate::inference::backend::OpParams;
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Error;
+use crate::inference::ops::OpId;
+use crate::inference::shape::Shape;
+use crate::inference::tensor::{TensorMut, TensorView};
 
 use super::{
     at, at_mut, checked_product, copy_element, decompose, read_i64_scalar, require_dtype,

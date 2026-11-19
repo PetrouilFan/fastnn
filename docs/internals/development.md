@@ -16,7 +16,7 @@ src/
               vulkan/         # instance, device, memory, dispatch, kernels, shaders
     import/                   # strict ONNX protobuf reader and graph builder
     model/   weights.rs plan.rs specialize.rs kv.rs session.rs format/
-    cli/                      # fn3-infer implementation
+    cli/                      # fastnn-infer implementation
     python/                   # PyO3 binding, declared from src/python/mod.rs
   ir/                         # 2.x ComputeGraph, IRNode, Opcode, GraphBuilder
   compiler/                   # 2.x passes (shape, fusion, quantization, memory)

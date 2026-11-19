@@ -8,10 +8,10 @@
 use std::io::Write;
 use std::path::Path;
 
-use crate::fn3::import::{import_onnx_model, ModelImport, PositionEmbedding};
-use crate::fn3::model::format::PreparedArtifact;
-use crate::fn3::model::Planner;
-use crate::fn3::{CpuBackend, Symbol};
+use crate::inference::import::{import_onnx_model, ModelImport, PositionEmbedding};
+use crate::inference::model::format::PreparedArtifact;
+use crate::inference::model::Planner;
+use crate::inference::{CpuBackend, Symbol};
 
 use super::args::PrepareArgs;
 use super::digest::sha256_hex;
@@ -117,7 +117,7 @@ pub fn execute(args: &PrepareArgs, out: &mut dyn Write) -> Result<(), CliError> 
         ))
         .with_next("re-run prepare; the filesystem or a concurrent writer changed the file"));
     }
-    let header = crate::fn3::model::format::PreparedHeader::parse(&artifact_bytes)
+    let header = crate::inference::model::format::PreparedHeader::parse(&artifact_bytes)
         .map_err(|error| CliError::model(format!("the written header is invalid: {error}")))?;
 
     print_summary(
@@ -138,7 +138,7 @@ pub fn execute(args: &PrepareArgs, out: &mut dyn Write) -> Result<(), CliError> 
 fn print_summary(
     args: &PrepareArgs,
     import: &ModelImport,
-    envelope: crate::fn3::ShapeEnvelope,
+    envelope: crate::inference::ShapeEnvelope,
     source_bytes: &[u8],
     source_sha256: &str,
     artifact_bytes: &[u8],
@@ -158,7 +158,7 @@ fn print_summary(
         }
     };
 
-    let _ = writeln!(out, "fn3-infer prepare");
+    let _ = writeln!(out, "fastnn-infer prepare");
     let _ = writeln!(out, "  source: {}", args.onnx.display());
     let _ = writeln!(out, "    bytes:  {}", thousands(source_bytes.len() as u64));
     let _ = writeln!(out, "    sha256: {source_sha256}");

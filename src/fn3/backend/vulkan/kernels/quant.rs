@@ -3,7 +3,7 @@
 //! # What this module is
 //!
 //! One fused projection kernel for the locked `fn3-quant-format-v1` format
-//! ([`crate::fn3::quant`]): signed INT8 weight codes in groups of 64 along the
+//! ([`crate::inference::quant`]): signed INT8 weight codes in groups of 64 along the
 //! contraction axis, an IEEE binary16 scale and an int16 zero-point per
 //! `(row, group)`, FP32 activations, and **no dequantized weight buffer**.
 //!
@@ -30,14 +30,14 @@
 //!   fallback) and never claims `Full` for a shape the launch rejects;
 //! - `admits` is the concrete-operand refinement: a rule can only confirm the
 //!   documented subset, never widen it, exactly like
-//!   [`crate::fn3::backend::Backend::admits`].
+//!   [`crate::inference::backend::Backend::admits`].
 //!
 //! [`KernelSet::alpha`](super::KernelSet::alpha) is deliberately unchanged, so
 //! `supports(OpId::MatMul)` still means "the FP32 kernel" and never silently
 //! becomes a promise about W8A16. Mounting this family in the plan needs one
 //! core change that is **not** in this issue's ownership: a quantized
 //! projection identity (`OpId`, or a packed-weight operand in
-//! [`crate::fn3::backend::OpParams`]) plus the planner rule that emits it. Until
+//! [`crate::inference::backend::OpParams`]) plus the planner rule that emits it. Until
 //! then a caller selects this kernel explicitly, which is what
 //! `tests/fn3_vulkan_quant.rs` does through a `Backend` decorator.
 //!
@@ -87,14 +87,14 @@ use super::super::VulkanBackend;
 use super::io::{self, Operand, OperandMut};
 use super::pointwise::Job;
 use super::{BindingSpec, GridInput, KernelSpec};
-use crate::fn3::backend::vulkan::VULKAN_BACKEND_NAME;
-use crate::fn3::backend::{Backend, Support};
-use crate::fn3::dtype::DType;
-use crate::fn3::error::{Fn3Error, Fn3Result};
-use crate::fn3::ops::OpId;
-use crate::fn3::quant::{QuantBlob, QuantTensor, GROUP_SIZE};
-use crate::fn3::shape::Shape;
-use crate::fn3::tensor::{TensorMut, TensorView};
+use crate::inference::backend::vulkan::VULKAN_BACKEND_NAME;
+use crate::inference::backend::{Backend, Support};
+use crate::inference::dtype::DType;
+use crate::inference::error::{Fn3Error, Fn3Result};
+use crate::inference::ops::OpId;
+use crate::inference::quant::{QuantBlob, QuantTensor, GROUP_SIZE};
+use crate::inference::shape::Shape;
+use crate::inference::tensor::{TensorMut, TensorView};
 
 /// Owning issue named in this family's rejection messages.
 pub const KERNEL_OWNER: &str = "FN3-24 (#70)";

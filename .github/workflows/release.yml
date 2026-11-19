@@ -7,7 +7,7 @@
 #   * portable-build uses --no-default-features: the 2.x feature list is deleted
 #     by FN3-19 (#65) and no 3.0 feature is assumed;
 #   * the wheel smoke is tools/ci/packaging_lane.py (outside-the-tree install),
-#     which imports the fastnn.fn3 inference surface;
+#     which imports the fastnn.inference inference surface;
 #   * the wheel smoke is STRICT: the pinned tiny-GPT-2 ONNX is fetched from the
 #     URL and sha256 recorded in fixtures/parity/tiny-gpt2/model.lock.json, and
 #     the lane fails by name if the model cannot be fetched or the pinned

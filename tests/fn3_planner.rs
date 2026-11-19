@@ -41,10 +41,10 @@
 
 use std::path::PathBuf;
 
-use fastnn::fn3::import::{import_onnx_model, ModelImport};
-use fastnn::fn3::model::{Plan, Planner, SlotRole};
-use fastnn::fn3::shape::DimBound;
-use fastnn::fn3::{
+use fastnn::inference::import::{import_onnx_model, ModelImport};
+use fastnn::inference::model::{Plan, Planner, SlotRole};
+use fastnn::inference::shape::DimBound;
+use fastnn::inference::{
     Backend, CpuBackend, DType, Fn3Error, LiveDims, OpId, OpParams, ShapeEnvelope, Support, Symbol,
 };
 
@@ -537,11 +537,11 @@ impl Backend for PartialSoftmax {
         "partial-test"
     }
 
-    fn device(&self) -> fastnn::fn3::DeviceId {
+    fn device(&self) -> fastnn::inference::DeviceId {
         self.inner.device()
     }
 
-    fn capabilities(&self) -> &fastnn::fn3::Capabilities {
+    fn capabilities(&self) -> &fastnn::inference::Capabilities {
         self.inner.capabilities()
     }
 
@@ -556,8 +556,8 @@ impl Backend for PartialSoftmax {
     fn execute_op(
         &self,
         op: OpId,
-        inputs: &[fastnn::fn3::TensorView<'_>],
-        outputs: &mut [fastnn::fn3::TensorMut<'_>],
+        inputs: &[fastnn::inference::TensorView<'_>],
+        outputs: &mut [fastnn::inference::TensorMut<'_>],
         params: &OpParams,
     ) -> Result<(), Fn3Error> {
         self.inner.execute_op(op, inputs, outputs, params)
@@ -576,11 +576,11 @@ impl Backend for NoMatMul {
         "no-matmul-test"
     }
 
-    fn device(&self) -> fastnn::fn3::DeviceId {
+    fn device(&self) -> fastnn::inference::DeviceId {
         self.inner.device()
     }
 
-    fn capabilities(&self) -> &fastnn::fn3::Capabilities {
+    fn capabilities(&self) -> &fastnn::inference::Capabilities {
         self.inner.capabilities()
     }
 
@@ -595,8 +595,8 @@ impl Backend for NoMatMul {
     fn execute_op(
         &self,
         op: OpId,
-        inputs: &[fastnn::fn3::TensorView<'_>],
-        outputs: &mut [fastnn::fn3::TensorMut<'_>],
+        inputs: &[fastnn::inference::TensorView<'_>],
+        outputs: &mut [fastnn::inference::TensorMut<'_>],
         params: &OpParams,
     ) -> Result<(), Fn3Error> {
         self.inner.execute_op(op, inputs, outputs, params)
@@ -706,12 +706,12 @@ fn pinned_mask_constants_are_finite_and_are_flt_max() {
         // A fill and a Where branch both ride on -FLT_MAX in the pinned export.
         assert!(
             mask.iter()
-                .any(|entry| entry.role == fastnn::fn3::model::MaskRole::Fill),
+                .any(|entry| entry.role == fastnn::inference::model::MaskRole::Fill),
             "ConstantOfShape's fill value must be checked"
         );
         assert!(
             mask.iter()
-                .any(|entry| entry.role == fastnn::fn3::model::MaskRole::Selected),
+                .any(|entry| entry.role == fastnn::inference::model::MaskRole::Selected),
             "Where's selected branch must be checked"
         );
     }
@@ -796,7 +796,7 @@ fn token_ids() -> Vec<u32> {
 
 /// Run one prefill plan and return the full logits for every prompt position.
 fn run_prefill(import: &ModelImport, seq: u64) -> Vec<f32> {
-    use fastnn::fn3::{DeviceId, Tensor};
+    use fastnn::inference::{DeviceId, Tensor};
 
     let backend = CpuBackend::new();
     let planner = Planner::new(import, &backend);
@@ -916,7 +916,7 @@ fn pinned_importer_unresolved_values_all_resolve_in_the_plan() {
                 .shape
                 .dims()
                 .iter()
-                .any(|dim| matches!(dim, fastnn::fn3::import::Dim::Unknown(_)))
+                .any(|dim| matches!(dim, fastnn::inference::import::Dim::Unknown(_)))
         })
         .map(|(index, _)| index as u32)
         .collect();
@@ -930,7 +930,7 @@ fn pinned_importer_unresolved_values_all_resolve_in_the_plan() {
     let envelope = envelope(&planner);
     let plan = planner.plan(&envelope, dims(13, 0)).expect("prefill plan");
     for index in unresolved {
-        let value = graph.value(fastnn::fn3::import::ValueId::new(index));
+        let value = graph.value(fastnn::inference::import::ValueId::new(index));
         let slot = plan
             .slots()
             .iter()
@@ -950,7 +950,7 @@ fn pinned_importer_unresolved_values_all_resolve_in_the_plan() {
 
 #[test]
 fn plan_cache_reuses_the_plan_and_refuses_a_foreign_envelope() {
-    use fastnn::fn3::model::PlanCache;
+    use fastnn::inference::model::PlanCache;
     use std::sync::Arc;
 
     let Some(import) = pinned() else {

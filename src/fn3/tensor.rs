@@ -29,7 +29,7 @@
 //! a slice never needs to copy.
 //!
 //! An offset that is measured in **bytes** first goes through
-//! [`crate::fn3::storage::StorageWindow`], which checks
+//! [`crate::inference::storage::StorageWindow`], which checks
 //! `offset % dtype.alignment_hint() == 0` and `offset + len <= storage.len()`
 //! before any metadata exists. [`TensorView::from_window`] and
 //! [`Tensor::from_window`] then derive the element offset from that window, so
@@ -59,7 +59,7 @@
 //! it may not write an output slot through a pointer obtained from an input,
 //! and it may not assume that two `TensorMut` outputs point at distinct
 //! allocations unless it checked. Plan construction rejects a slot that is both
-//! input and output ([`crate::fn3::model::ExecutionPlan`]).
+//! input and output ([`crate::inference::model::ExecutionPlan`]).
 //!
 //! # Materialisation
 //!
@@ -72,7 +72,7 @@
 //! # Device-resident tensors (FN3-26 / #72)
 //!
 //! A tensor whose [`Storage`] is device-resident
-//! ([`crate::fn3::storage::Storage::from_resident`]) carries its authoritative
+//! ([`crate::inference::storage::Storage::from_resident`]) carries its authoritative
 //! bytes in device memory. It is the same tensor to the planner and the
 //! kernels — same [`TensorMeta`], same strides, same device — but it has no
 //! host bytes:
@@ -93,12 +93,12 @@ use std::fmt;
 
 use bytemuck::Pod;
 
-use crate::fn3::device::{DeviceId, DeviceResolveError};
-use crate::fn3::dtype::DType;
-use crate::fn3::error::Fn3Error;
-use crate::fn3::ops::OpId;
-use crate::fn3::shape::{checked_usize, Shape, Strides};
-use crate::fn3::storage::{AlignedBuffer, Storage, StorageWindow};
+use crate::inference::device::{DeviceId, DeviceResolveError};
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Error;
+use crate::inference::ops::OpId;
+use crate::inference::shape::{checked_usize, Shape, Strides};
+use crate::inference::storage::{AlignedBuffer, Storage, StorageWindow};
 
 /// Validated description of a tensor: dtype, device, shape, strides, offset.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -356,7 +356,7 @@ impl TensorMeta {
     ///
     /// A strided view is not invalid; it simply cannot be exposed as one
     /// contiguous slice. Materialise it with
-    /// [`crate::fn3::tensor::TensorView::to_contiguous`] first.
+    /// [`crate::inference::tensor::TensorView::to_contiguous`] first.
     pub fn require_contiguous(&self, context: &'static str) -> Result<(), Fn3Error> {
         if self.is_contiguous() {
             Ok(())
@@ -567,7 +567,7 @@ impl<'a> TensorView<'a> {
     ///
     /// A host view returns a cheap storage-sharing clone; a device-resident
     /// view is copied device → host through
-    /// [`Storage::download`](crate::fn3::storage::Storage::download), so the
+    /// [`Storage::download`](crate::inference::storage::Storage::download), so the
     /// result is a snapshot, never a stale alias.
     pub fn to_host(&self) -> Result<Tensor, Fn3Error> {
         if !self.storage.is_resident() {
@@ -974,7 +974,7 @@ impl Tensor {
     /// `meta.device()`. Host `AlignedBuffer` storage tagged for a Vulkan device
     /// is the staged path: the backend uploads it per dispatch, which is why
     /// `FN3_VK_STAGED=1` still produces it. Device-resident storage
-    /// ([`crate::fn3::storage::Storage::from_resident`]) is the resident path
+    /// ([`crate::inference::storage::Storage::from_resident`]) is the resident path
     /// and is written by kernels in place (FN3-26 / #72).
     ///
     /// The storage must provide every byte this metadata addresses:
@@ -1000,7 +1000,9 @@ impl Tensor {
     }
 
     /// The device handle when this tensor is resident.
-    pub fn residency(&self) -> Option<&std::sync::Arc<dyn crate::fn3::storage::DeviceResidency>> {
+    pub fn residency(
+        &self,
+    ) -> Option<&std::sync::Arc<dyn crate::inference::storage::DeviceResidency>> {
         self.storage.residency()
     }
 
@@ -1367,7 +1369,7 @@ mod tests {
         let error = Tensor::zeros(
             Shape::from_dims([2]),
             DType::F32,
-            DeviceId::Vulkan(crate::fn3::device::PhysicalDeviceId::new(0)),
+            DeviceId::Vulkan(crate::inference::device::PhysicalDeviceId::new(0)),
         )
         .unwrap_err();
         let text = error.to_string();
@@ -1438,7 +1440,7 @@ mod tests {
         bytes: Vec<u8>,
     }
 
-    impl crate::fn3::storage::DeviceResidency for FakeResident {
+    impl crate::inference::storage::DeviceResidency for FakeResident {
         fn backend(&self) -> &'static str {
             "fake"
         }
@@ -1467,7 +1469,7 @@ mod tests {
         let meta = TensorMeta::contiguous(
             Shape::from_dims([values.len() as u64]),
             DType::F32,
-            DeviceId::Vulkan(crate::fn3::device::PhysicalDeviceId::new(0)),
+            DeviceId::Vulkan(crate::inference::device::PhysicalDeviceId::new(0)),
         )
         .unwrap();
         let storage =

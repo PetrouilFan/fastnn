@@ -53,18 +53,18 @@ use std::sync::{Arc, Mutex};
 
 use fn3_fixtures::{Actual, Suite};
 
-use fastnn::fn3::backend::cpu::CpuBackend;
-use fastnn::fn3::backend::vulkan::instance::validation_counts;
-use fastnn::fn3::backend::vulkan::residency::ExecutionRecord;
-use fastnn::fn3::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
-use fastnn::fn3::backend::{Backend, OpParams, Support};
-use fastnn::fn3::device::{DeviceId, DeviceRequest, PhysicalDeviceId};
-use fastnn::fn3::dtype::DType;
-use fastnn::fn3::error::Fn3Error;
-use fastnn::fn3::ops::OpId;
-use fastnn::fn3::shape::Shape;
-use fastnn::fn3::storage::Storage;
-use fastnn::fn3::tensor::{Tensor, TensorMeta, TensorMut, TensorView};
+use fastnn::inference::backend::cpu::CpuBackend;
+use fastnn::inference::backend::vulkan::instance::validation_counts;
+use fastnn::inference::backend::vulkan::residency::ExecutionRecord;
+use fastnn::inference::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
+use fastnn::inference::backend::{Backend, OpParams, Support};
+use fastnn::inference::device::{DeviceId, DeviceRequest, PhysicalDeviceId};
+use fastnn::inference::dtype::DType;
+use fastnn::inference::error::Fn3Error;
+use fastnn::inference::ops::OpId;
+use fastnn::inference::shape::Shape;
+use fastnn::inference::storage::Storage;
+use fastnn::inference::tensor::{Tensor, TensorMeta, TensorMut, TensorView};
 
 /// Serialises physical-GPU use and validation-count assertions.
 static GPU_LOCK: Mutex<()> = Mutex::new(());
@@ -1679,7 +1679,7 @@ fn unsupported_layouts_and_dtypes_are_rejected_not_approximated() {
     let storage = Storage::from_bytes(&f32_bytes(&values)).expect("storage");
     let meta = TensorMeta::strided(
         Shape::from_dims([3, 2]),
-        fastnn::fn3::shape::Strides::from_elements(vec![1, 3]),
+        fastnn::inference::shape::Strides::from_elements(vec![1, 3]),
         0,
         DType::F32,
         device,

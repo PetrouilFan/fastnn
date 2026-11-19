@@ -27,10 +27,10 @@
 
 use std::time::Instant;
 
-use fastnn::fn3::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
-use fastnn::fn3::device::DeviceRequest;
-use fastnn::fn3::OpId;
-use fastnn::fn3::Session;
+use fastnn::inference::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
+use fastnn::inference::device::DeviceRequest;
+use fastnn::inference::OpId;
+use fastnn::inference::Session;
 
 #[path = "fn3_e2e/harness.rs"]
 mod harness;
@@ -318,7 +318,7 @@ fn prefill_and_decode_latency() {
         println!("[fn3-26][csv] {index},decode,{sample:.4}");
     }
 
-    let (errors, warnings) = fastnn::fn3::backend::vulkan::instance::validation_counts();
+    let (errors, warnings) = fastnn::inference::backend::vulkan::instance::validation_counts();
     assert_eq!(
         (errors, warnings),
         (0, 0),

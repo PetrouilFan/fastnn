@@ -58,23 +58,25 @@ use std::sync::Arc;
 use ash::vk;
 
 use super::io::{self, Operand, OperandMut};
-use crate::fn3::backend::check_arity;
-use crate::fn3::backend::vulkan::context::{
+use crate::inference::backend::check_arity;
+use crate::inference::backend::vulkan::context::{
     BindingArg, BindingRole, Buffer, BufferDesc, KernelInvocation,
 };
-use crate::fn3::backend::vulkan::error::Error;
-use crate::fn3::backend::vulkan::kernels::{grid, BindingSpec, KernelSet, KernelSpec, OpKernel};
-use crate::fn3::backend::vulkan::pipeline::Kernel;
-use crate::fn3::backend::vulkan::residency::ExecutionRecord;
-use crate::fn3::backend::vulkan::staging::StagingLease;
-use crate::fn3::backend::vulkan::submission::DispatchInfo;
-use crate::fn3::backend::vulkan::VulkanBackend;
-use crate::fn3::backend::{CapabilityFeatures, OpParams, Support};
-use crate::fn3::dtype::DType;
-use crate::fn3::error::{Fn3Error, Fn3Result};
-use crate::fn3::ops::OpId;
-use crate::fn3::shape::Shape;
-use crate::fn3::tensor::{TensorMut, TensorView};
+use crate::inference::backend::vulkan::error::Error;
+use crate::inference::backend::vulkan::kernels::{
+    grid, BindingSpec, KernelSet, KernelSpec, OpKernel,
+};
+use crate::inference::backend::vulkan::pipeline::Kernel;
+use crate::inference::backend::vulkan::residency::ExecutionRecord;
+use crate::inference::backend::vulkan::staging::StagingLease;
+use crate::inference::backend::vulkan::submission::DispatchInfo;
+use crate::inference::backend::vulkan::VulkanBackend;
+use crate::inference::backend::{CapabilityFeatures, OpParams, Support};
+use crate::inference::dtype::DType;
+use crate::inference::error::{Fn3Error, Fn3Result};
+use crate::inference::ops::OpId;
+use crate::inference::shape::Shape;
+use crate::inference::tensor::{TensorMut, TensorView};
 
 /// Owning issue named in this family's rejection messages.
 const KERNEL_OWNER: &str = "FN3-13 (#59)";
@@ -839,7 +841,7 @@ pub(super) fn require_output_shape(
 /// Check every operand and the output are on the backend's device.
 pub(super) fn require_device(
     op: OpId,
-    device: crate::fn3::device::DeviceId,
+    device: crate::inference::device::DeviceId,
     inputs: &[TensorView<'_>],
     outputs: &[TensorMut<'_>],
 ) -> Fn3Result<()> {

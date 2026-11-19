@@ -26,13 +26,13 @@
 //!   -- --nocapture --test-threads=1
 //! ```
 
-use fastnn::fn3::import::{
+use fastnn::inference::import::{
     DecoderGeometry, Dim, GraphIr, GraphNode, ModelImport, ModelProvenance, OpsetImport,
     PositionEmbedding, ValueInfo, ValueOrigin, ValueShape,
 };
-use fastnn::fn3::model::weights::{WeightId, WeightSet, WeightSource, WeightTensor};
-use fastnn::fn3::model::{Plan, Planner, SlotRole};
-use fastnn::fn3::{
+use fastnn::inference::model::weights::{WeightId, WeightSet, WeightSource, WeightTensor};
+use fastnn::inference::model::{Plan, Planner, SlotRole};
+use fastnn::inference::{
     CpuBackend, DType, DeviceId, Fn3Error, LiveDims, OpId, OpParams, Shape, Strides, Tensor,
     TensorMeta,
 };
@@ -103,10 +103,10 @@ fn synthetic_import_with_declared_shape(
             onnx_op: "Reshape".to_string(),
             op: OpId::Reshape,
             inputs: vec![
-                fastnn::fn3::import::ValueId::new(0),
-                fastnn::fn3::import::ValueId::new(2),
+                fastnn::inference::import::ValueId::new(0),
+                fastnn::inference::import::ValueId::new(2),
             ],
-            outputs: vec![fastnn::fn3::import::ValueId::new(3)],
+            outputs: vec![fastnn::inference::import::ValueId::new(3)],
             params: params(&[]),
         },
         GraphNode {
@@ -115,18 +115,18 @@ fn synthetic_import_with_declared_shape(
             onnx_op: "Gather".to_string(),
             op: OpId::Gather,
             inputs: vec![
-                fastnn::fn3::import::ValueId::new(1),
-                fastnn::fn3::import::ValueId::new(3),
+                fastnn::inference::import::ValueId::new(1),
+                fastnn::inference::import::ValueId::new(3),
             ],
-            outputs: vec![fastnn::fn3::import::ValueId::new(4)],
+            outputs: vec![fastnn::inference::import::ValueId::new(4)],
             params: params(&[0]),
         },
     ];
     let graph = GraphIr::from_parts(
         values,
         nodes,
-        vec![fastnn::fn3::import::ValueId::new(0)],
-        vec![fastnn::fn3::import::ValueId::new(4)],
+        vec![fastnn::inference::import::ValueId::new(0)],
+        vec![fastnn::inference::import::ValueId::new(4)],
     );
 
     let table: Vec<f32> = (0..VOCAB)
@@ -174,7 +174,7 @@ fn synthetic_import_with_declared_shape(
         },
         layer_norm_epsilon: None,
         token_embedding: WeightId::new(0),
-        logits: fastnn::fn3::import::ValueId::new(4),
+        logits: fastnn::inference::import::ValueId::new(4),
         kv: Vec::new(),
     };
     ModelImport::from_parts(
@@ -227,17 +227,17 @@ fn reshape_output_import() -> ModelImport {
         onnx_op: "Reshape".to_string(),
         op: OpId::Reshape,
         inputs: vec![
-            fastnn::fn3::import::ValueId::new(0),
-            fastnn::fn3::import::ValueId::new(1),
+            fastnn::inference::import::ValueId::new(0),
+            fastnn::inference::import::ValueId::new(1),
         ],
-        outputs: vec![fastnn::fn3::import::ValueId::new(2)],
+        outputs: vec![fastnn::inference::import::ValueId::new(2)],
         params: params(&[]),
     }];
     let graph = GraphIr::from_parts(
         values,
         nodes,
-        vec![fastnn::fn3::import::ValueId::new(0)],
-        vec![fastnn::fn3::import::ValueId::new(2)],
+        vec![fastnn::inference::import::ValueId::new(0)],
+        vec![fastnn::inference::import::ValueId::new(2)],
     );
     let target_bytes: Vec<u8> = [1i64, SEQ as i64]
         .iter()
@@ -266,7 +266,7 @@ fn reshape_output_import() -> ModelImport {
         },
         layer_norm_epsilon: None,
         token_embedding: WeightId::new(0),
-        logits: fastnn::fn3::import::ValueId::new(2),
+        logits: fastnn::inference::import::ValueId::new(2),
         kv: Vec::new(),
     };
     ModelImport::from_parts(
@@ -286,7 +286,7 @@ fn reshape_output_import() -> ModelImport {
     )
 }
 
-fn gather_instruction(plan: &Plan) -> &fastnn::fn3::Instruction {
+fn gather_instruction(plan: &Plan) -> &fastnn::inference::Instruction {
     let gather = plan
         .instructions()
         .iter()
@@ -426,11 +426,11 @@ mod resident {
 
     use std::sync::Arc;
 
-    use fastnn::fn3::backend::vulkan::instance::validation_counts;
-    use fastnn::fn3::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
-    use fastnn::fn3::device::DeviceRequest;
-    use fastnn::fn3::import::{KvInterface, ValueId};
-    use fastnn::fn3::model::{ModelWeights, PreparedModel, Session};
+    use fastnn::inference::backend::vulkan::instance::validation_counts;
+    use fastnn::inference::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
+    use fastnn::inference::device::DeviceRequest;
+    use fastnn::inference::import::{KvInterface, ValueId};
+    use fastnn::inference::model::{ModelWeights, PreparedModel, Session};
 
     // Supply the decoder interface needed by a real prefill. The cache has
     // one lane and both key and value use the same synthetic present tensor.

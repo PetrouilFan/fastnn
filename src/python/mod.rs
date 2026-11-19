@@ -73,7 +73,7 @@ include!("io.rs");
 // still being a module of `crate::python`, which is the only tree compiled with
 // the `python` feature. `src/fn3/` itself stays free of PyO3.
 #[path = "../fn3/python/mod.rs"]
-pub mod fn3;
+pub mod inference;
 
 #[pymodule]
 pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -217,8 +217,8 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cumsum, py)?)?;
     m.add_function(wrap_pyfunction!(erf, py)?)?;
 
-    // `_core.fn3` is the 3.0 inference surface. The 2.x entry points above are
+    // `_core.inference` is the 3.0 inference surface. The 2.x entry points above are
     // the secondary eager/AOT API and carry no training names.
-    fn3::register(m)?;
+    inference::register(m)?;
     Ok(())
 }

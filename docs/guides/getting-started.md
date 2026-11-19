@@ -37,12 +37,12 @@ print(y.numpy())
 ## Prepare and run an inference session
 
 ```python
-import fastnn.fn3 as fn3
+import fastnn.inference as fn3
 
-report = fn3.prepare("model.onnx", "model.fn3prep")
+report = fn3.prepare("model.onnx", "model.fnn3")
 print(report.status, report.geometry)
 
-model = fn3.load("model.fn3prep", source="model.onnx", device="cpu")
+model = fn3.load("model.fnn3", source="model.onnx", device="cpu")
 session = model.session()
 
 logits = session.prefill([464, 2068, 7586, 21831])

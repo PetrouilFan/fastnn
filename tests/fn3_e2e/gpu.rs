@@ -22,11 +22,11 @@
 
 use std::sync::Mutex;
 
-use fastnn::fn3::backend::vulkan::instance::validation_counts;
-use fastnn::fn3::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
-use fastnn::fn3::device::DeviceRequest;
-use fastnn::fn3::model::SessionOptions;
-use fastnn::fn3::{Fn3Error, Session};
+use fastnn::inference::backend::vulkan::instance::validation_counts;
+use fastnn::inference::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
+use fastnn::inference::device::DeviceRequest;
+use fastnn::inference::model::SessionOptions;
+use fastnn::inference::{Fn3Error, Session};
 
 use super::harness::*;
 
@@ -103,7 +103,7 @@ fn open_physical() -> Option<std::sync::Arc<VulkanBackend>> {
         "[fn3vk][device] name=\"{}\" uuid={} api={} driver={} validation={} software={}",
         adapter.name,
         adapter.uuid_string(),
-        fastnn::fn3::backend::vulkan::device_info::format_version(adapter.api_version),
+        fastnn::inference::backend::vulkan::device_info::format_version(adapter.api_version),
         adapter.driver_version_string(),
         backend.validation_enabled(),
         backend.is_software()
@@ -152,7 +152,7 @@ fn assert_device_execution(
         census.with_bytes + census.zero_byte(),
         "{label}: every instruction is either byte-producing or a zero-element no-op"
     );
-    let mut observed: std::collections::BTreeMap<fastnn::fn3::OpId, usize> =
+    let mut observed: std::collections::BTreeMap<fastnn::inference::OpId, usize> =
         std::collections::BTreeMap::new();
     for (op, count) in ledger.summary().ops {
         observed.insert(op, count as usize);
@@ -657,7 +657,7 @@ fn an_explicit_vulkan_request_without_a_usable_driver_fails_actionably() {
     if std::env::var(NO_DRIVER_CHILD).as_deref() == Ok("1") {
         // This process has no reachable ICD (the parent points the loader at a
         // nonexistent manifest). The only honest outcome is a typed failure.
-        let available = fastnn::fn3::device::available_devices();
+        let available = fastnn::inference::device::available_devices();
         assert!(
             available.iter().all(|info| info.id.is_cpu()),
             "the child must not see a Vulkan adapter: {available:?}"
@@ -756,7 +756,7 @@ fn an_unsatisfiable_explicit_request_names_the_request_and_the_devices() {
     );
 
     // Resolution itself never yields the CPU for an explicit request.
-    let available = fastnn::fn3::device::available_devices();
+    let available = fastnn::inference::device::available_devices();
     for request in [
         DeviceRequest::Vulkan { index: None },
         DeviceRequest::Vulkan {
@@ -787,7 +787,7 @@ fn an_unsatisfiable_explicit_request_names_the_request_and_the_devices() {
 /// non-empty access, and return every byte and handle on drop.
 #[test]
 fn a_zero_element_buffer_is_real_but_unaddressable() {
-    use fastnn::fn3::backend::vulkan::context::BufferDesc;
+    use fastnn::inference::backend::vulkan::context::BufferDesc;
 
     let _guard = gpu_lock();
     let Some(backend) = open_physical() else {

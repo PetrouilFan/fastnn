@@ -1,6 +1,6 @@
 //! Packing FP32 projection weights into the locked W8A16 representation.
 //!
-//! The container in [`crate::fn3::quant`] is produced by the independent Python
+//! The container in [`crate::inference::quant`] is produced by the independent Python
 //! encoder in `tools/quant/fn3_quant.py`. A CPU backend that wants a packed
 //! weight has to run the same policy; this module is the Rust implementation of
 //! `docs/quantization/fn3-quant-format-v1.md` §4.5 for a weight already in
@@ -48,10 +48,10 @@
 
 use half::f16;
 
-use crate::fn3::dtype::DType;
-use crate::fn3::error::Fn3Error;
-use crate::fn3::quant::GROUP_SIZE;
-use crate::fn3::tensor::{Tensor, TensorView};
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Error;
+use crate::inference::quant::GROUP_SIZE;
+use crate::inference::tensor::{Tensor, TensorView};
 
 use super::kernel::{groups_per_row, PackedView};
 
@@ -140,7 +140,7 @@ impl PackedWeight {
         let name = name.into();
         if tensor.dtype() != DType::F32 {
             return Err(Fn3Error::UnsupportedDType {
-                op: Some(crate::fn3::ops::OpId::MatMul),
+                op: Some(crate::inference::ops::OpId::MatMul),
                 dtype: tensor.dtype(),
                 context: "W8A16 packing needs an f32 weight",
             });

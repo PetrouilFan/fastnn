@@ -41,18 +41,18 @@
 //! - a shape or rank outside a kernel's documented contract is `UnsupportedOp`
 //!   naming FN3-07 (#53) and the offending value;
 //! - a wrong dtype, device, arity or attribute is the matching
-//!   [`crate::fn3::error::Fn3Error`] variant with the op named;
+//!   [`crate::inference::error::Fn3Error`] variant with the op named;
 //! - every failure happens before the first output write, so a failed
 //!   `execute_op` leaves the caller's outputs untouched.
 
 use std::fmt;
 
 use super::{check_arity, Backend, Capabilities, CapabilityFeatures, OpParams, Support};
-use crate::fn3::device::DeviceId;
-use crate::fn3::dtype::DType;
-use crate::fn3::error::Fn3Error;
-use crate::fn3::ops::OpId;
-use crate::fn3::tensor::{TensorMut, TensorView};
+use crate::inference::device::DeviceId;
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Error;
+use crate::inference::ops::OpId;
+use crate::inference::tensor::{TensorMut, TensorView};
 
 pub(crate) mod kernels;
 pub(crate) mod parallel;
@@ -221,7 +221,7 @@ impl CpuBackend {
     /// small projections are serial and whose `lm_head` may be parallel — keeps
     /// the wide budget, because the step can use threads.
     pub(crate) fn note_decode_shaped(&self, macs: u64) {
-        let tiles = macs / crate::fn3::backend::cpu::parallel::MIN_MACS_PER_TASK;
+        let tiles = macs / crate::inference::backend::cpu::parallel::MIN_MACS_PER_TASK;
         if tiles <= 1 {
             self.decode_serial
                 .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -542,8 +542,8 @@ fn check_flexible_arity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fn3::shape::Shape;
-    use crate::fn3::tensor::Tensor;
+    use crate::inference::shape::Shape;
+    use crate::inference::tensor::Tensor;
 
     fn run(
         op: OpId,
@@ -596,14 +596,14 @@ mod tests {
     #[test]
     fn device_mismatch_is_rejected() {
         let lhs = Tensor::from_f32(Shape::from_dims([2]), &[1.0, 2.0]).unwrap();
-        let storage = crate::fn3::storage::Storage::from_bytes(
+        let storage = crate::inference::storage::Storage::from_bytes(
             &[1.0f32.to_ne_bytes(), 2.0f32.to_ne_bytes()].concat(),
         )
         .unwrap();
-        let meta = crate::fn3::tensor::TensorMeta::contiguous(
+        let meta = crate::inference::tensor::TensorMeta::contiguous(
             Shape::from_dims([2]),
             DType::F32,
-            DeviceId::Vulkan(crate::fn3::device::PhysicalDeviceId::new(0)),
+            DeviceId::Vulkan(crate::inference::device::PhysicalDeviceId::new(0)),
         )
         .unwrap();
         let rhs = Tensor::from_storage(storage, meta).unwrap();

@@ -10,7 +10,7 @@
 //! *all* of them: a model with three unsupported nodes yields three problems in
 //! file order, not the first one.
 //!
-//! # Why not [`crate::fn3::error::Fn3Error`]
+//! # Why not [`crate::inference::error::Fn3Error`]
 //!
 //! `Fn3Error` has one payload per variant and belongs to the core contract
 //! (FN3-02 / #48). "Six problems, each naming a node" has no representation
@@ -24,9 +24,9 @@
 
 use std::fmt;
 
-use crate::fn3::dtype::DType;
-use crate::fn3::error::Fn3Error;
-use crate::fn3::ops::OpId;
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Error;
+use crate::inference::ops::OpId;
 
 /// Maximum number of problems one import reports before summarising.
 ///

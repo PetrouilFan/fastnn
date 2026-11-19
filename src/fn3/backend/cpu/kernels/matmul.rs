@@ -50,11 +50,11 @@
 //! [`dot_rows`], which is the documented contract and the only implementation
 //! of it.
 
-use crate::fn3::dtype::DType;
-use crate::fn3::error::Fn3Error;
-use crate::fn3::ops::OpId;
-use crate::fn3::shape::Shape;
-use crate::fn3::tensor::{TensorMut, TensorView};
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Error;
+use crate::inference::ops::OpId;
+use crate::inference::shape::Shape;
+use crate::inference::tensor::{TensorMut, TensorView};
 
 use super::{at_mut, require_dtype, require_output_shape, Locator};
 
@@ -76,7 +76,7 @@ pub(crate) fn matmul(
         if rank < 2 {
             return Err(Fn3Error::UnsupportedOp {
                 op,
-                backend: crate::fn3::backend::cpu::CPU_BACKEND_NAME,
+                backend: crate::inference::backend::cpu::CPU_BACKEND_NAME,
                 reason: format!(
                     "the fn3 matmul contract covers rank >= 2 with the matrix axes last; \
                      found rank {rank} ({}). Rank-1 vector products are owned by FN3-07 (#53) \
@@ -457,8 +457,8 @@ fn stride_usize(op: OpId, view: &TensorView<'_>, axis: usize) -> Result<usize, F
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fn3::device::DeviceId;
-    use crate::fn3::tensor::{Tensor, TensorMeta};
+    use crate::inference::device::DeviceId;
+    use crate::inference::tensor::{Tensor, TensorMeta};
 
     fn matmul_via_backend(lhs: &Tensor, rhs: &Tensor, out_shape: [u64; 2]) -> Vec<f32> {
         let mut out =
@@ -489,7 +489,7 @@ mod tests {
             Tensor::from_f32(Shape::from_dims([2, 3]), &[7.0, 9.0, 11.0, 8.0, 10.0, 12.0]).unwrap();
         let meta = TensorMeta::strided(
             Shape::from_dims([3, 2]),
-            crate::fn3::shape::Strides::from_elements(vec![1, 3]),
+            crate::inference::shape::Strides::from_elements(vec![1, 3]),
             0,
             DType::F32,
             DeviceId::Cpu,

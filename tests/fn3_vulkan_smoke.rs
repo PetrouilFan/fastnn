@@ -20,21 +20,21 @@
 
 use std::sync::{Arc, Mutex};
 
-use fastnn::fn3::backend::cpu::CpuBackend;
-use fastnn::fn3::backend::vulkan::instance::validation_counts;
-use fastnn::fn3::backend::vulkan::{
+use fastnn::inference::backend::cpu::CpuBackend;
+use fastnn::inference::backend::vulkan::instance::validation_counts;
+use fastnn::inference::backend::vulkan::{
     adapters, available_devices as vulkan_devices, BufferDesc, KernelSpec, VulkanBackend,
     VulkanConfig,
 };
-use fastnn::fn3::backend::{Backend, OpParams};
-use fastnn::fn3::device::{available_devices, DeviceId, DeviceRequest, PhysicalDeviceId};
-use fastnn::fn3::dtype::DType;
-use fastnn::fn3::error::Fn3Error;
-use fastnn::fn3::model::{ExecutionPlan, Instruction};
-use fastnn::fn3::ops::OpId;
-use fastnn::fn3::shape::Shape;
-use fastnn::fn3::storage::Storage;
-use fastnn::fn3::tensor::{Tensor, TensorMeta};
+use fastnn::inference::backend::{Backend, OpParams};
+use fastnn::inference::device::{available_devices, DeviceId, DeviceRequest, PhysicalDeviceId};
+use fastnn::inference::dtype::DType;
+use fastnn::inference::error::Fn3Error;
+use fastnn::inference::model::{ExecutionPlan, Instruction};
+use fastnn::inference::ops::OpId;
+use fastnn::inference::shape::Shape;
+use fastnn::inference::storage::Storage;
+use fastnn::inference::tensor::{Tensor, TensorMeta};
 
 /// Serialises physical-GPU use and validation-count assertions.
 static GPU_LOCK: Mutex<()> = Mutex::new(());
@@ -130,7 +130,7 @@ fn open_physical() -> Option<Arc<VulkanBackend>> {
         "[fn3vk][test] device=\"{}\" uuid={} api={} driver={} queue_family={} validation={}",
         adapter.name,
         adapter.uuid_string(),
-        fastnn::fn3::backend::vulkan::device_info::format_version(adapter.api_version),
+        fastnn::inference::backend::vulkan::device_info::format_version(adapter.api_version),
         adapter.driver_version_string(),
         backend.vulkan_device().queue_family(),
         backend.validation_enabled()
@@ -513,17 +513,18 @@ fn explicit_teardown_leaves_only_the_device_and_pipeline_cache() {
         return;
     };
     let counts_before = validation_counts();
-    let instance = fastnn::fn3::backend::vulkan::instance::Instance::new(
-        &fastnn::fn3::backend::vulkan::instance::InstanceConfig::with_validation(true),
+    let instance = fastnn::inference::backend::vulkan::instance::Instance::new(
+        &fastnn::inference::backend::vulkan::instance::InstanceConfig::with_validation(true),
     )
     .expect("instance");
-    let config = fastnn::fn3::backend::vulkan::DeviceConfig::default();
-    let device = fastnn::fn3::backend::vulkan::Device::open(Arc::clone(&instance), index, &config)
-        .expect("device");
+    let config = fastnn::inference::backend::vulkan::DeviceConfig::default();
+    let device =
+        fastnn::inference::backend::vulkan::Device::open(Arc::clone(&instance), index, &config)
+            .expect("device");
     let buffer = device
         .create_buffer(&BufferDesc::device_storage(64 * 1024, "teardown"))
         .expect("buffer");
-    let submitter = fastnn::fn3::backend::vulkan::Submitter::new(&device).expect("submitter");
+    let submitter = fastnn::inference::backend::vulkan::Submitter::new(&device).expect("submitter");
     drop(submitter);
     drop(buffer);
     let outstanding = device.ledger().outstanding();
@@ -743,14 +744,14 @@ fn kernel_registration_rejects_a_spec_that_disagrees_with_its_spirv() {
         // The shader declares 3 storage buffers; this claim is wrong on
         // purpose so registration must refuse it.
         bindings: &[
-            fastnn::fn3::backend::vulkan::BindingSpec::storage(0, "lhs"),
-            fastnn::fn3::backend::vulkan::BindingSpec::storage(1, "rhs"),
+            fastnn::inference::backend::vulkan::BindingSpec::storage(0, "lhs"),
+            fastnn::inference::backend::vulkan::BindingSpec::storage(1, "rhs"),
         ],
         push_constant_bytes: 4,
         workgroup_size: [64, 1, 1],
         dtypes: &[DType::F32],
         shape: "same-shape contiguous f32 vectors",
-        grid: fastnn::fn3::backend::vulkan::kernels::grid::elementwise,
+        grid: fastnn::inference::backend::vulkan::kernels::grid::elementwise,
     };
     let error = backend.kernel(&WRONG).expect_err("spec must not register");
     let text = error.to_string();

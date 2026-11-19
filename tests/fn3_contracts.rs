@@ -1,14 +1,14 @@
 //! Contract tests for the FastNN 3.0 inference core (`src/fn3/`).
 //!
 //! These tests pin the behaviour downstream workers code against. They are
-//! deliberately integration tests over the public `fastnn::fn3` surface: if a
+//! deliberately integration tests over the public `fastnn::inference` surface: if a
 //! contract test needs to reach into a private item, the contract is missing.
 
-use fastnn::fn3::backend::{check_arity, Support};
-use fastnn::fn3::device::{available_devices, PhysicalDeviceId};
-use fastnn::fn3::model::{KvCacheConfig, KvCacheLayout, SessionPhase};
-use fastnn::fn3::shape::Symbol;
-use fastnn::fn3::{
+use fastnn::inference::backend::{check_arity, Support};
+use fastnn::inference::device::{available_devices, PhysicalDeviceId};
+use fastnn::inference::model::{KvCacheConfig, KvCacheLayout, SessionPhase};
+use fastnn::inference::shape::Symbol;
+use fastnn::inference::{
     AlignedBuffer, Backend, Capabilities, CpuBackend, DType, DeviceId, DeviceRequest, DimBound,
     ExecutionPlan, Fn3Error, Instruction, LiveDims, ModelWeights, OpId, OpParams, PreparedModel,
     Session, Shape, ShapeEnvelope, Storage, Strides, Tensor, TensorMeta, TensorMut,

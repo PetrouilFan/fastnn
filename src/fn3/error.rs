@@ -16,9 +16,9 @@
 
 use std::fmt;
 
-use crate::fn3::device::{DeviceId, DeviceResolveError};
-use crate::fn3::dtype::{DType, UnknownDTypeCode};
-use crate::fn3::ops::OpId;
+use crate::inference::device::{DeviceId, DeviceResolveError};
+use crate::inference::dtype::{DType, UnknownDTypeCode};
+use crate::inference::ops::OpId;
 
 /// Convenience alias used throughout the 3.0 core.
 pub type Fn3Result<T> = Result<T, Fn3Error>;
@@ -99,7 +99,7 @@ pub enum Fn3Error {
     ///
     /// This is not an invalid view: it is a valid transpose or slice that must
     /// be materialised (for example with
-    /// [`crate::fn3::tensor::Tensor::to_contiguous`]) before this particular
+    /// [`crate::inference::tensor::Tensor::to_contiguous`]) before this particular
     /// access. The detail names the view and its strides.
     NonContiguous {
         /// The operation that requires a contiguous view.
@@ -191,7 +191,7 @@ pub enum Fn3Error {
     /// A byte window or sub-range is outside its storage or misaligned for its
     /// dtype.
     ///
-    /// Carried by [`crate::fn3::storage::Storage::window`] and the constructors
+    /// Carried by [`crate::inference::storage::Storage::window`] and the constructors
     /// that consume a window. The window is always checked with
     /// `offset.checked_add(len)`, so a wrapping request is reported here rather
     /// than silently becoming an in-bounds request.
@@ -486,7 +486,7 @@ impl From<DeviceResolveError> for Fn3Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fn3::device::DeviceRequest;
+    use crate::inference::device::DeviceRequest;
 
     #[test]
     fn messages_name_op_and_values() {
@@ -504,7 +504,7 @@ mod tests {
     #[test]
     fn device_errors_delegate_and_keep_source() {
         let resolve = DeviceRequest::Vulkan { index: Some(1000) }
-            .resolve(&crate::fn3::device::available_devices())
+            .resolve(&crate::inference::device::available_devices())
             .unwrap_err();
         let error = Fn3Error::from(resolve);
         let text = error.to_string();

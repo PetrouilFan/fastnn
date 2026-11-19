@@ -21,12 +21,12 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use fastnn::fn3::import::{import_onnx_model, ModelImport};
-use fastnn::fn3::model::{
+use fastnn::inference::import::{import_onnx_model, ModelImport};
+use fastnn::inference::model::{
     ModelWeights, Planner, PreparedModel, Session, SessionOptions, SessionPhase,
 };
-use fastnn::fn3::shape::ShapeEnvelope;
-use fastnn::fn3::{Backend, DeviceId, LiveDims, OpId, Tensor, TensorMeta};
+use fastnn::inference::shape::ShapeEnvelope;
+use fastnn::inference::{Backend, DeviceId, LiveDims, OpId, Tensor, TensorMeta};
 
 // ---------------------------------------------------------------------------
 // The pinned model
@@ -473,7 +473,7 @@ pub fn prepared(
     device: DeviceId,
     context: u64,
 ) -> (PreparedModel, ShapeEnvelope) {
-    let backend = fastnn::fn3::CpuBackend::new();
+    let backend = fastnn::inference::CpuBackend::new();
     let planner = Planner::new(import, &backend);
     let envelope = envelope(&planner, context);
     let config = import.geometry().kv_cache_config(context, 1);
@@ -860,7 +860,7 @@ pub fn run_chain(
     assert!(
         matches!(
             error,
-            fastnn::fn3::Fn3Error::CapacityExceeded {
+            fastnn::inference::Fn3Error::CapacityExceeded {
                 what: "KV cache live extent",
                 ..
             }
@@ -1021,7 +1021,7 @@ pub fn check_isolation_and_capacity(
     assert!(
         matches!(
             error,
-            fastnn::fn3::Fn3Error::CapacityExceeded {
+            fastnn::inference::Fn3Error::CapacityExceeded {
                 what: "KV cache live extent",
                 ..
             }

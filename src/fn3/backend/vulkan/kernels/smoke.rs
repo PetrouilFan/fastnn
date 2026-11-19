@@ -18,19 +18,23 @@
 //! `upload → barrier → dispatch → barrier → readback` as **one** submission,
 //! wait once, read the output and append a residency record.
 
-use crate::fn3::backend::check_arity;
-use crate::fn3::backend::vulkan::context::{BindingArg, BindingRole, BufferDesc, KernelInvocation};
-use crate::fn3::backend::vulkan::kernels::{grid, BindingSpec, KernelSet, KernelSpec, OpKernel};
-use crate::fn3::backend::vulkan::residency::ExecutionRecord;
-use crate::fn3::backend::vulkan::VulkanBackend;
-use crate::fn3::backend::Backend;
-use crate::fn3::backend::CapabilityFeatures;
-use crate::fn3::backend::OpParams;
-use crate::fn3::backend::Support;
-use crate::fn3::dtype::DType;
-use crate::fn3::error::{Fn3Error, Fn3Result};
-use crate::fn3::ops::OpId;
-use crate::fn3::tensor::{TensorMut, TensorView};
+use crate::inference::backend::check_arity;
+use crate::inference::backend::vulkan::context::{
+    BindingArg, BindingRole, BufferDesc, KernelInvocation,
+};
+use crate::inference::backend::vulkan::kernels::{
+    grid, BindingSpec, KernelSet, KernelSpec, OpKernel,
+};
+use crate::inference::backend::vulkan::residency::ExecutionRecord;
+use crate::inference::backend::vulkan::VulkanBackend;
+use crate::inference::backend::Backend;
+use crate::inference::backend::CapabilityFeatures;
+use crate::inference::backend::OpParams;
+use crate::inference::backend::Support;
+use crate::inference::dtype::DType;
+use crate::inference::error::{Fn3Error, Fn3Result};
+use crate::inference::ops::OpId;
+use crate::inference::tensor::{TensorMut, TensorView};
 
 /// Declared kernel: `out[i] = a[i] + b[i]`.
 pub const SMOKE_ADD: KernelSpec = KernelSpec {

@@ -14,7 +14,7 @@
 //!    bind by handle. The host tensor is never modified, so the CPU/fallback
 //!    path keeps its bytes.
 //! 2. **Resident tensors.** [`ResidentBuffer`] implements
-//!    [`crate::fn3::storage::DeviceResidency`], so a `Tensor` can own a device
+//!    [`crate::inference::storage::DeviceResidency`], so a `Tensor` can own a device
 //!    allocation instead of host memory. Kernels bind it directly; nothing is
 //!    staged per op.
 //!
@@ -57,11 +57,11 @@ use super::device::Device;
 use super::error::Error;
 use super::staging::StagingPool;
 use super::submission::Submitter;
-use crate::fn3::device::DeviceId;
-use crate::fn3::dtype::DType;
-use crate::fn3::error::{Fn3Error, Fn3Result};
-use crate::fn3::storage::{DeviceResidency, Storage};
-use crate::fn3::tensor::{Tensor, TensorMeta, TensorMut, TensorView};
+use crate::inference::device::DeviceId;
+use crate::inference::dtype::DType;
+use crate::inference::error::{Fn3Error, Fn3Result};
+use crate::inference::storage::{DeviceResidency, Storage};
+use crate::inference::tensor::{Tensor, TensorMeta, TensorMut, TensorView};
 
 /// Name every resident buffer reports in diagnostics.
 pub const RESIDENT_BUFFER_NAME: &str = "resident";
@@ -715,7 +715,7 @@ impl super::VulkanBackend {
     /// Allocate a device-resident tensor on this backend's device.
     pub fn allocate_resident(
         &self,
-        shape: &crate::fn3::shape::Shape,
+        shape: &crate::inference::shape::Shape,
         dtype: DType,
     ) -> Fn3Result<Tensor> {
         let meta = TensorMeta::contiguous(shape.clone(), dtype, self.device_id())?;

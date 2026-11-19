@@ -26,7 +26,7 @@
 //!
 //! Device enumeration and tensor placement are separate questions. A Vulkan
 //! device can be present in [`available_devices`] and still refuse to own a
-//! [`Tensor`](crate::fn3::Tensor), because alpha tensor storage is host memory
+//! [`Tensor`](crate::inference::Tensor), because alpha tensor storage is host memory
 //! on every device: Vulkan executes by staging through host memory, and
 //! device-resident storage is the session/KV work (FN3-12 / #58). See
 //! [`DeviceResolveError::unavailable_device`].
@@ -290,7 +290,7 @@ impl DeviceResolveError {
     ///
     /// Enumeration and placement are separate questions. A Vulkan device can be
     /// listed by [`available_devices`] and still refuse to own a
-    /// [`Tensor`](crate::fn3::Tensor), because alpha tensor storage is host
+    /// [`Tensor`](crate::inference::Tensor), because alpha tensor storage is host
     /// memory on every device. The reason therefore reports *why allocation*
     /// failed, not merely that the device was missing.
     pub fn unavailable_device(device: DeviceId) -> Self {
@@ -354,7 +354,7 @@ pub fn available_devices() -> Vec<DeviceInfo> {
     #[allow(unused_mut)]
     let mut devices = vec![DeviceInfo::new(DeviceId::Cpu, "cpu")];
     #[cfg(feature = "vulkan")]
-    devices.extend(crate::fn3::backend::vulkan::available_devices());
+    devices.extend(crate::inference::backend::vulkan::available_devices());
     devices
 }
 

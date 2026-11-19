@@ -66,16 +66,16 @@
 
 use std::path::Path;
 
-use crate::fn3::dtype::DType;
-use crate::fn3::error::Fn3Error;
-use crate::fn3::import::{
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Error;
+use crate::inference::import::{
     DecoderGeometry, Dim, KvInterface, ModelImport, ModelProvenance, OpsetImport,
     PositionEmbedding, ValueId, ValueInfo, ValueOrigin, ValueShape,
 };
-use crate::fn3::model::weights::{WeightId, WeightSet, WeightSource, WeightTensor};
-use crate::fn3::model::{ModelWeights, MAX_KV_LAYERS};
-use crate::fn3::ops::OpId;
-use crate::fn3::shape::{DimBound, Shape, ShapeEnvelope, Symbol};
+use crate::inference::model::weights::{WeightId, WeightSet, WeightSource, WeightTensor};
+use crate::inference::model::{ModelWeights, MAX_KV_LAYERS};
+use crate::inference::ops::OpId;
+use crate::inference::shape::{DimBound, Shape, ShapeEnvelope, Symbol};
 
 use super::error::{FormatError, FormatErrorKind};
 use super::graph::PreparedGraph;
@@ -356,9 +356,9 @@ impl ArtifactMetadata {
 ///
 /// ```no_run
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// use fastnn::fn3::import::import_onnx_file;
-/// use fastnn::fn3::model::format::PreparedArtifact;
-/// use fastnn::fn3::shape::ShapeEnvelope;
+/// use fastnn::inference::import::import_onnx_file;
+/// use fastnn::inference::model::format::PreparedArtifact;
+/// use fastnn::inference::shape::ShapeEnvelope;
 ///
 /// let imported = import_onnx_file("model.onnx")?;
 /// let artifact = PreparedArtifact::from_import(&imported, ShapeEnvelope::uniform(1024)?)?;
@@ -571,7 +571,7 @@ impl PreparedArtifact {
     ///
     /// The result satisfies the round-trip identity a verifier can check:
     /// `ArtifactMetadata::from_import(&artifact.to_model_import()) == *artifact.metadata()`,
-    /// and [`Session::with_runtime`](crate::fn3::model::Session::with_runtime)
+    /// and [`Session::with_runtime`](crate::inference::model::Session::with_runtime)
     /// produces the same plans as an import of the source ONNX.
     pub fn into_model_import(self) -> ModelImport {
         let metadata = self.metadata;
@@ -1305,14 +1305,14 @@ fn decode_graph(values_section: &[u8], nodes_section: &[u8]) -> Result<PreparedG
             }
         };
         let epsilon = reader.f32(format!("node {index} epsilon"))?;
-        nodes.push(crate::fn3::import::GraphNode {
+        nodes.push(crate::inference::import::GraphNode {
             onnx_index,
             name,
             onnx_op,
             op,
             inputs,
             outputs: node_outputs,
-            params: crate::fn3::backend::OpParams {
+            params: crate::inference::backend::OpParams {
                 axes,
                 keep_dims,
                 epsilon,
@@ -1486,8 +1486,8 @@ fn symbol_from_code(code: u8) -> Result<Symbol, String> {
 mod tests {
     use super::*;
 
-    use crate::fn3::import::{Dim, ValueShape};
-    use crate::fn3::model::KvCacheLayout;
+    use crate::inference::import::{Dim, ValueShape};
+    use crate::inference::model::KvCacheLayout;
 
     fn tiny_geometry() -> DecoderGeometry {
         DecoderGeometry {
@@ -1515,8 +1515,8 @@ mod tests {
     }
 
     fn tiny_graph() -> PreparedGraph {
-        use crate::fn3::backend::OpParams;
-        use crate::fn3::import::GraphNode;
+        use crate::inference::backend::OpParams;
+        use crate::inference::import::GraphNode;
         PreparedGraph::new(
             vec![
                 ValueInfo {

@@ -3,7 +3,7 @@
 //! # What this module is for
 //!
 //! One thing: turn the bytes of a self-contained ONNX model into the fn3 IR that
-//! a planner ([`crate::fn3::import::ModelImport`]) and a serializer can consume,
+//! a planner ([`crate::inference::import::ModelImport`]) and a serializer can consume,
 //! or fail with a list of problems that names every node it could not represent.
 //!
 //! ```text
@@ -28,16 +28,16 @@
 //! # Entry points
 //!
 //! ```no_run
-//! # fn main() -> Result<(), fastnn::fn3::import::ImportError> {
+//! # fn main() -> Result<(), fastnn::inference::import::ImportError> {
 //! let bytes = std::fs::read("model.onnx").map_err(|error| {
-//!     fastnn::fn3::import::ImportError::single(
-//!         fastnn::fn3::import::ImportProblemKind::Io {
+//!     fastnn::inference::import::ImportError::single(
+//!         fastnn::inference::import::ImportProblemKind::Io {
 //!             path: "model.onnx".to_string(),
 //!             detail: error.to_string(),
 //!         },
 //!     )
 //! })?;
-//! let imported = fastnn::fn3::import::import_onnx_model(&bytes)?;
+//! let imported = fastnn::inference::import::import_onnx_model(&bytes)?;
 //! let geometry = imported.geometry();
 //! assert!(geometry.layers > 0);
 //! let (graph, weights) = imported.into_parts();
@@ -51,7 +51,7 @@
 //! | Consumer | What to call |
 //! |---|---|
 //! | #55 prepared-model format | [`ModelImport::weights`] ([`WeightSet`]: name, [`DType`], [`Shape`], bytes in file order) and [`ModelImport::ir_version`]/[`ModelImport::opset`] |
-//! | #56 planner | [`ModelImport::graph`] ([`GraphIr`]: values, then nodes with [`OpId`], operand [`ValueId`]s, [`crate::fn3::backend::OpParams`]) and [`ModelImport::geometry`] |
+//! | #56 planner | [`ModelImport::graph`] ([`GraphIr`]: values, then nodes with [`OpId`], operand [`ValueId`]s, [`crate::inference::backend::OpParams`]) and [`ModelImport::geometry`] |
 //! | #58 session | [`DecoderGeometry::kv`] for the cache interface and [`DecoderGeometry::kv_cache_config`] for the allocation |
 //! | #62 end-to-end | [`ModelImport::to_model_weights`] plus [`ModelImport::summary`] for an inventory assertion |
 //!
@@ -76,7 +76,7 @@
 //!
 //! "Reject non-F32 compute paths" is implemented as three separate rules:
 //!
-//! 1. an element type outside [`crate::fn3::dtype::DType`] (`FLOAT16`, `DOUBLE`,
+//! 1. an element type outside [`crate::inference::dtype::DType`] (`FLOAT16`, `DOUBLE`,
 //!    `BFLOAT16`, quantized types, strings) is
 //!    [`ImportProblemKind::UnsupportedDType`] naming the code, the ONNX mnemonic
 //!    and the carrier;
@@ -98,7 +98,7 @@ mod proto;
 /// The weight table is typed weight data, not import logic, so it lives in
 /// `model/` (ADR §5 reserves `src/fn3/model/weights.rs` for this issue) and is
 /// re-exported here for import callers.
-pub use crate::fn3::model::weights::{WeightId, WeightSet, WeightSource, WeightTensor};
+pub use crate::inference::model::weights::{WeightId, WeightSet, WeightSource, WeightTensor};
 pub use budget::{
     MAX_ATTRIBUTES, MAX_MODEL_BYTES, MAX_NODES, MAX_OPERANDS, MAX_OPSET_IMPORTS, MAX_PARAM_AXES,
     MAX_RANK, MAX_STRING_BYTES, MAX_TRACKED_ELEMENTS, MAX_TYPED_ELEMENTS, MAX_VALUES, MAX_WEIGHTS,

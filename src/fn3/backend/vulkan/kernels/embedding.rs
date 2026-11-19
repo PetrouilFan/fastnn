@@ -30,23 +30,25 @@
 //! without `storageBuffer8BitAccess`, which the platform layer does not enable.
 //! The pinned graph gathers `f32` tables and `i64` shape vectors only.
 
-use crate::fn3::backend::check_arity;
-use crate::fn3::backend::vulkan::context::BindingRole;
-use crate::fn3::backend::vulkan::kernels::io;
-use crate::fn3::backend::vulkan::kernels::pointwise::{
+use crate::inference::backend::check_arity;
+use crate::inference::backend::vulkan::context::BindingRole;
+use crate::inference::backend::vulkan::kernels::io;
+use crate::inference::backend::vulkan::kernels::pointwise::{
     element_count, require_contiguous_output, require_contiguous_view, require_device,
     require_only_axes, require_output_shape, require_shader_rank, single_axis, workgroups, Job,
     Push, WORKGROUP,
 };
-use crate::fn3::backend::vulkan::kernels::transform::{checked_product, read_i64_values};
-use crate::fn3::backend::vulkan::kernels::{grid, BindingSpec, KernelSet, KernelSpec, OpKernel};
-use crate::fn3::backend::vulkan::VulkanBackend;
-use crate::fn3::backend::{CapabilityFeatures, OpParams, Support};
-use crate::fn3::dtype::DType;
-use crate::fn3::error::{Fn3Error, Fn3Result};
-use crate::fn3::ops::OpId;
-use crate::fn3::shape::Shape;
-use crate::fn3::tensor::{TensorMut, TensorView};
+use crate::inference::backend::vulkan::kernels::transform::{checked_product, read_i64_values};
+use crate::inference::backend::vulkan::kernels::{
+    grid, BindingSpec, KernelSet, KernelSpec, OpKernel,
+};
+use crate::inference::backend::vulkan::VulkanBackend;
+use crate::inference::backend::{CapabilityFeatures, OpParams, Support};
+use crate::inference::dtype::DType;
+use crate::inference::error::{Fn3Error, Fn3Result};
+use crate::inference::ops::OpId;
+use crate::inference::shape::Shape;
+use crate::inference::tensor::{TensorMut, TensorView};
 
 /// Owning issue named in this family's rejection messages.
 const KERNEL_OWNER: &str = "FN3-13 (#59)";

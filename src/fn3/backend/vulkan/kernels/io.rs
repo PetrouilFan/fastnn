@@ -36,10 +36,10 @@ use std::sync::Arc;
 use super::super::context::Buffer;
 use super::super::error::Error;
 use super::super::VulkanBackend;
-use crate::fn3::dtype::DType;
-use crate::fn3::error::{Fn3Error, Fn3Result};
-use crate::fn3::ops::OpId;
-use crate::fn3::tensor::{TensorMut, TensorView};
+use crate::inference::dtype::DType;
+use crate::inference::error::{Fn3Error, Fn3Result};
+use crate::inference::ops::OpId;
+use crate::inference::tensor::{TensorMut, TensorView};
 
 /// A read-only kernel operand: a device buffer or host bytes.
 pub(super) enum Operand<'a> {

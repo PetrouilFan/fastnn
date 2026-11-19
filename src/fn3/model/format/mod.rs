@@ -125,8 +125,8 @@
 //! The artifact has no KV capacity, no live extent, no batch size, no step
 //! counter, no phase and no device. Those are session or planner state. The
 //! geometry section describes layer/head/vocabulary shape (a property of the
-//! model); how many tokens to allocate is decided by [`crate::fn3::model::Session`]
-//! through [`crate::fn3::import::DecoderGeometry::kv_cache_config`].
+//! model); how many tokens to allocate is decided by [`crate::inference::model::Session`]
+//! through [`crate::inference::import::DecoderGeometry::kv_cache_config`].
 
 pub mod error;
 mod wire;

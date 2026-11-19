@@ -35,12 +35,12 @@
 //! `ConstantOfShape`'s `value`), the value is lifted into a scalar input; the
 //! deviation is documented on the kernel and reported to #54/#56.
 
-use crate::fn3::backend::OpParams;
-use crate::fn3::dtype::DType;
-use crate::fn3::error::Fn3Error;
-use crate::fn3::ops::OpId;
-use crate::fn3::shape::Shape;
-use crate::fn3::tensor::{TensorMut, TensorView};
+use crate::inference::backend::OpParams;
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Error;
+use crate::inference::ops::OpId;
+use crate::inference::shape::Shape;
+use crate::inference::tensor::{TensorMut, TensorView};
 
 use super::{
     at, at_mut, checked_product, copy_element, decompose, kernel_bounds_error, normalize_axis,

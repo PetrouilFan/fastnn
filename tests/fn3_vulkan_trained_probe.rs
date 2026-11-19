@@ -25,12 +25,12 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use fastnn::fn3::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
-use fastnn::fn3::device::DeviceRequest;
-use fastnn::fn3::import::import_onnx_file;
-use fastnn::fn3::model::{ModelWeights, Planner, PreparedModel, Session};
-use fastnn::fn3::shape::Shape;
-use fastnn::fn3::{
+use fastnn::inference::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
+use fastnn::inference::device::DeviceRequest;
+use fastnn::inference::import::import_onnx_file;
+use fastnn::inference::model::{ModelWeights, Planner, PreparedModel, Session};
+use fastnn::inference::shape::Shape;
+use fastnn::inference::{
     Backend, Capabilities, DType, DeviceId, Fn3Error, LiveDims, OpId, OpParams, Support, Tensor,
     TensorMeta, TensorMut, TensorView,
 };
@@ -130,7 +130,7 @@ impl Backend for LoggingBackend {
 
     fn write_resident(
         &self,
-        dst: &fastnn::fn3::Storage,
+        dst: &fastnn::inference::Storage,
         byte_offset: u64,
         bytes: &[u8],
     ) -> Result<(), Fn3Error> {
@@ -139,8 +139,8 @@ impl Backend for LoggingBackend {
 
     fn copy_resident_regions(
         &self,
-        dst: &fastnn::fn3::Storage,
-        src: &fastnn::fn3::Storage,
+        dst: &fastnn::inference::Storage,
+        src: &fastnn::inference::Storage,
         regions: &[(u64, u64, u64)],
     ) -> Result<(), Fn3Error> {
         self.inner.copy_resident_regions(dst, src, regions)
@@ -203,7 +203,7 @@ fn resident_vulkan_trained_prefill_names_the_failing_op() {
     let device = inner.device_id();
     let backend = LoggingBackend { inner };
     let import = import_onnx_file(&path).expect("import");
-    let cpu = fastnn::fn3::CpuBackend::new();
+    let cpu = fastnn::inference::CpuBackend::new();
     let planner = Planner::new(&import, &cpu);
     let envelope = planner.envelope(1, 13, 32, 33).expect("envelope");
     let config = import.geometry().kv_cache_config(32, 1);

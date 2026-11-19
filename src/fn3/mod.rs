@@ -2,10 +2,9 @@
 //!
 //! **This is the primary 3.0 API.** FN3-19 (#65) promoted `src/fn3/` from a
 //! parallel tree to the crate's main surface and deleted training and wgpu.
-//! The module keeps its `fn3` name so downstream paths, the `fastnn.fn3`
-//! Python package and the CLI stay stable for the alpha. It depends on no 2.x
-//! module, and no 2.x module depends on it; `src/lib.rs` is the only shared
-//! file.
+//! The public names are `fastnn::inference`, `fastnn.inference` and
+//! `fastnn-infer`; the source stays in `src/fn3/`. The core depends on no 2.x
+//! module, and no 2.x module depends on it.
 //!
 //! # Layout
 //!
@@ -48,7 +47,7 @@
 //! # Contract entry points
 //!
 //! - [`Backend`] and [`Support`]: how a backend advertises and rejects work.
-//! - [`crate::fn3::model::PreparedModel`] / [`crate::fn3::model::Session`]:
+//! - [`crate::inference::model::PreparedModel`] / [`crate::inference::model::Session`]:
 //!   the immutable-model / mutable-session split.
 //! - [`Fn3Error`]: the only error type, with actionable context.
 //! - `tests/fn3_contracts.rs`: pinned behaviour downstream workers rely on.

@@ -6,9 +6,11 @@
 
 use std::io::Write;
 
-use crate::fn3::import::PositionEmbedding;
-use crate::fn3::model::format::{FormatErrorKind, PreparedArtifact, PreparedHeader, HEADER_BYTES};
-use crate::fn3::Symbol;
+use crate::inference::import::PositionEmbedding;
+use crate::inference::model::format::{
+    FormatErrorKind, PreparedArtifact, PreparedHeader, HEADER_BYTES,
+};
+use crate::inference::Symbol;
 
 use super::args::InspectArgs;
 use super::digest::sha256_hex;
@@ -22,20 +24,21 @@ pub fn execute(args: &InspectArgs, out: &mut dyn Write) -> Result<(), CliError> 
             args.artifact.display()
         ))
         .with_next(
-            "check the path, or create the artifact with `fn3-infer prepare --onnx <model.onnx> \
+            "check the path, or create the artifact with `fastnn-infer prepare --onnx <model.onnx> \
              --out <model.fnn3>`",
         )
     })?;
 
-    let header = PreparedHeader::parse(&bytes).map_err(|error| {
-        let message = format!(
-            "`{}` is not a usable prepared model: {error}",
-            args.artifact.display()
-        );
-        let next = match error.kind() {
+    let header =
+        PreparedHeader::parse(&bytes).map_err(|error| {
+            let message = format!(
+                "`{}` is not a usable prepared model: {error}",
+                args.artifact.display()
+            );
+            let next = match error.kind() {
             FormatErrorKind::UnsupportedVersion { found, supported } => format!(
                 "this file uses format version {found}; this build reads version {supported} \
-                 only. Use a matching `fn3-infer`, or re-prepare the ONNX with this build"
+                 only. Use a matching `fastnn-infer`, or re-prepare the ONNX with this build"
             ),
             FormatErrorKind::BadMagic { .. } => {
                 "the first eight bytes must be `FNN3PREP`. A 2.x `.fnnc` file is a different \
@@ -46,14 +49,14 @@ pub fn execute(args: &InspectArgs, out: &mut dyn Write) -> Result<(), CliError> 
                 "this file uses dtype encoding {found}; this build reads encoding {supported} \
                  only. Rebuild the tool or re-prepare with a build that uses this encoding"
             ),
-            _ => "the file is truncated, corrupt or not an artifact; re-run `fn3-infer prepare` \
+            _ => "the file is truncated, corrupt or not an artifact; re-run `fastnn-infer prepare` \
                   from the source ONNX"
                 .to_string(),
         };
-        CliError::model(message).with_next(next)
-    })?;
+            CliError::model(message).with_next(next)
+        })?;
 
-    let _ = writeln!(out, "fn3-infer inspect");
+    let _ = writeln!(out, "fastnn-infer inspect");
     let _ = writeln!(out, "  artifact: {}", args.artifact.display());
     let _ = writeln!(out, "    bytes:   {}", thousands(header.file_bytes));
     let _ = writeln!(out, "    sha256:  {}", sha256_hex(&bytes));
@@ -81,13 +84,13 @@ pub fn execute(args: &InspectArgs, out: &mut dyn Write) -> Result<(), CliError> 
     if args.sections {
         let artifact = PreparedArtifact::from_bytes(&bytes).map_err(|error| {
             let next = if error.is_version_mismatch() {
-                "this file was written by an incompatible build; use a matching `fn3-infer` or \
+                "this file was written by an incompatible build; use a matching `fastnn-infer` or \
                  re-prepare the ONNX"
             } else if error.is_corruption() {
-                "the payload does not match its checksum; re-run `fn3-infer prepare` from the \
+                "the payload does not match its checksum; re-run `fastnn-infer prepare` from the \
                  source ONNX"
             } else {
-                "the file is well framed but inconsistent; re-run `fn3-infer prepare`"
+                "the file is well framed but inconsistent; re-run `fastnn-infer prepare`"
             };
             CliError::model(format!(
                 "`{}` failed the full decode: {error}",
@@ -171,7 +174,7 @@ fn print_sections(artifact: &PreparedArtifact, out: &mut dyn Write) {
 
 #[cfg(test)]
 mod tests {
-    use crate::fn3::cli::{run, EXIT_MODEL};
+    use crate::inference::cli::{run, EXIT_MODEL};
 
     fn scratch(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -230,6 +233,6 @@ mod tests {
         let path = scratch("missing.fnn3");
         let (code, _, err) = inspect(&["inspect", path.to_str().expect("path")]);
         assert_eq!(code, EXIT_MODEL);
-        assert!(err.contains("fn3-infer prepare"), "{err}");
+        assert!(err.contains("fastnn-infer prepare"), "{err}");
     }
 }

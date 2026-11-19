@@ -32,13 +32,13 @@ no wgpu backend in this tree.
 - **Strict ONNX import** — a bounds-checked protobuf reader maps the pinned
   GPT-2 decoder to a bounded graph, folds integer shape arithmetic at plan
   time, and rejects unsupported ops by name.
-- **Versioned artifact** — the `.fn3prep` payload carries a format version,
+- **Versioned artifact** — the `.fnn3` payload carries a format version,
   dtype codes, the value/node tables and weight bytes with CRC and SHA-256
   verification.
 - **CPU + Vulkan** — a portable FP32 reference backend, plus Vulkan transform,
   embedding, pointwise, matmul, norm, reduce and fused-attention kernels with
   validation-layer-clean dispatch.
-- **Rust, CLI and Python share one engine** — `fn3-infer` and `fastnn.fn3`
+- **Rust, CLI and Python share one engine** — `fastnn-infer` and `fastnn.inference`
   call the same `Session::prefill` / `Session::decode`.
 
 ## Installation
@@ -61,12 +61,12 @@ The Python package is built with `maturin` and exposes the Rust extension as
 ### Python: prepare once, then decode
 
 ```python
-import fastnn.fn3 as fn3
+import fastnn.inference as fn3
 
-report = fn3.prepare("model.onnx", "model.fn3prep")
+report = fn3.prepare("model.onnx", "model.fnn3")
 print(report.status, report.geometry)
 
-model = fn3.load("model.fn3prep", source="model.onnx", device="cpu")
+model = fn3.load("model.fnn3", source="model.onnx", device="cpu")
 session = model.session()
 
 logits = session.prefill([464, 2068, 7586, 21831])
@@ -84,21 +84,21 @@ raises `Fn3DeviceError`; it never falls back to CPU.
 ### CLI
 
 ```bash
-cargo build --release --features cli
-fn3-infer prepare model.onnx model.fn3prep
-fn3-infer inspect model.fn3prep
-fn3-infer run model.fn3prep --source model.onnx --tokens 464,2068,7586
-fn3-infer generate model.fn3prep --source model.onnx --tokens 464,2068 --steps 4
+cargo build --release --no-default-features --features cli --bin fastnn-infer
+./target/release/fastnn-infer prepare --onnx model.onnx --out model.fnn3
+./target/release/fastnn-infer inspect model.fnn3
+./target/release/fastnn-infer run --model model.fnn3 --onnx model.onnx --tokens 464,2068,7586
+./target/release/fastnn-infer generate --model model.fnn3 --onnx model.onnx --tokens 464,2068 --steps 4
 ```
 
 ### Rust
 
 ```rust
-use fastnn::fn3::model::PreparedModel;
-use fastnn::fn3::DeviceRequest;
+use fastnn::inference::model::PreparedModel;
+use fastnn::inference::DeviceRequest;
 
 let request = DeviceRequest::parse("cpu")?;
-let model = PreparedModel::load("model.fn3prep", None, request)?;
+let model = PreparedModel::load("model.fnn3", None, request)?;
 let mut session = model.session()?;
 let logits = session.prefill(&[464, 2068, 7586, 21831])?;
 ```
@@ -110,8 +110,8 @@ See `src/fn3/AGENTS.md` and `docs/roadmap/fn3-architecture.md` for the contract.
 | Component | Description |
 |-----------|-------------|
 | 3.0 inference core | `src/fn3/`: contracts, storage, CPU reference, Vulkan platform and kernels, ONNX import, prepared artifact, planner, session/KV |
-| CLI | `src/bin/fn3-infer.rs`: prepare, inspect, run, generate, diagnose |
-| Python | `fastnn/fn3/` over `fastnn._core.fn3`; CPU and honest Vulkan refusal |
+| CLI | `src/bin/fastnn-infer.rs`: prepare, inspect, run, generate, diagnose |
+| Python | `fastnn/inference/` over `fastnn._core.inference`; CPU and honest Vulkan refusal |
 | Secondary 2.x AOT tree | `src/ir/`, `src/compiler/`, `src/backend/`, eager `src/tensor/`/`src/nn/` forward API, ONNX conversion, `.fnn` I/O. Inference only; kept for the legacy compiled path and its quantized CPU pipeline |
 
 ## Documentation

@@ -42,11 +42,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::fn3::backend::{Backend, Capabilities, OpParams, Support};
-use crate::fn3::device::DeviceId;
-use crate::fn3::error::Fn3Error;
-use crate::fn3::ops::OpId;
-use crate::fn3::tensor::{TensorMut, TensorView};
+use crate::inference::backend::{Backend, Capabilities, OpParams, Support};
+use crate::inference::device::DeviceId;
+use crate::inference::error::Fn3Error;
+use crate::inference::ops::OpId;
+use crate::inference::tensor::{TensorMut, TensorView};
 
 use super::super::CpuBackend;
 use super::kernel::{matmul_quantized, PackedView, WorkHint};
@@ -164,8 +164,8 @@ impl QuantCpuBackend {
 
     /// Register a plan's static projection weights and build the backend.
     pub fn from_plan(
-        plan: &crate::fn3::model::Plan,
-        weights: &crate::fn3::model::ModelWeights,
+        plan: &crate::inference::model::Plan,
+        weights: &crate::inference::model::ModelWeights,
         policy: QuantPolicy,
         hint: WorkHint,
     ) -> Result<QuantCpuBackend, Fn3Error> {

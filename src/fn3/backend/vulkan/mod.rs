@@ -54,10 +54,10 @@ use std::thread::ThreadId;
 use ash::vk;
 
 use super::{Backend, Capabilities, CapabilityFeatures, OpParams, Support};
-use crate::fn3::device::{DeviceId, DeviceRequest, DeviceResolveError, PhysicalDeviceId};
-use crate::fn3::error::{Fn3Error, Fn3Result};
-use crate::fn3::ops::OpId;
-use crate::fn3::tensor::{TensorMut, TensorView};
+use crate::inference::device::{DeviceId, DeviceRequest, DeviceResolveError, PhysicalDeviceId};
+use crate::inference::error::{Fn3Error, Fn3Result};
+use crate::inference::ops::OpId;
+use crate::inference::tensor::{TensorMut, TensorView};
 
 pub mod context;
 pub mod device;
@@ -158,7 +158,7 @@ impl VulkanConfig {
 /// Vulkan devices on this machine, but [`VulkanBackend::open_with`] refuses
 /// them unless [`VulkanConfig::allow_software`] is set: a software run must be
 /// labelled as CI-only evidence, never counted as a GPU result.
-pub fn available_devices() -> Vec<crate::fn3::device::DeviceInfo> {
+pub fn available_devices() -> Vec<crate::inference::device::DeviceInfo> {
     if instance::shared().is_err() {
         instance::report_loader_failure();
     }
@@ -166,7 +166,7 @@ pub fn available_devices() -> Vec<crate::fn3::device::DeviceInfo> {
         .iter()
         .filter(|adapter| adapter.has_compute_queue())
         .map(|adapter| {
-            crate::fn3::device::DeviceInfo::new(
+            crate::inference::device::DeviceInfo::new(
                 DeviceId::Vulkan(PhysicalDeviceId::new(adapter.index)),
                 adapter.name.clone(),
             )
@@ -220,7 +220,7 @@ impl VulkanBackend {
         request: &DeviceRequest,
         config: VulkanConfig,
     ) -> Fn3Result<Arc<VulkanBackend>> {
-        let available = crate::fn3::device::available_devices();
+        let available = crate::inference::device::available_devices();
         if !available
             .iter()
             .any(|info| info.id.vulkan_index().is_some())
@@ -718,8 +718,8 @@ impl Backend for VulkanBackend {
     fn admits(
         &self,
         op: OpId,
-        shapes: &[crate::fn3::shape::Shape],
-        dtypes: &[crate::fn3::dtype::DType],
+        shapes: &[crate::inference::shape::Shape],
+        dtypes: &[crate::inference::dtype::DType],
         params: &OpParams,
     ) -> Support {
         self.kernels.admits(op, shapes, dtypes, params)
@@ -764,19 +764,19 @@ impl Backend for VulkanBackend {
 
     fn allocate_resident(
         &self,
-        shape: &crate::fn3::shape::Shape,
-        dtype: crate::fn3::dtype::DType,
-    ) -> Fn3Result<crate::fn3::tensor::Tensor> {
+        shape: &crate::inference::shape::Shape,
+        dtype: crate::inference::dtype::DType,
+    ) -> Fn3Result<crate::inference::tensor::Tensor> {
         VulkanBackend::allocate_resident(self, shape, dtype)
     }
 
-    fn prepare_persistent(&self, tensors: &[&crate::fn3::tensor::Tensor]) -> Fn3Result<()> {
+    fn prepare_persistent(&self, tensors: &[&crate::inference::tensor::Tensor]) -> Fn3Result<()> {
         self.prepare_persistent_tensors(tensors)
     }
 
     fn write_resident(
         &self,
-        dst: &crate::fn3::storage::Storage,
+        dst: &crate::inference::storage::Storage,
         byte_offset: u64,
         bytes: &[u8],
     ) -> Fn3Result<()> {
@@ -789,8 +789,8 @@ impl Backend for VulkanBackend {
 
     fn copy_resident_regions(
         &self,
-        dst: &crate::fn3::storage::Storage,
-        src: &crate::fn3::storage::Storage,
+        dst: &crate::inference::storage::Storage,
+        src: &crate::inference::storage::Storage,
         regions: &[(u64, u64, u64)],
     ) -> Fn3Result<()> {
         self.copy_resident_storage_regions(dst, src, regions)
@@ -982,7 +982,7 @@ fn capabilities_for(adapter: &AdapterInfo, kernels: &KernelSet) -> Capabilities 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fn3::dtype::DType;
+    use crate::inference::dtype::DType;
 
     #[test]
     fn capabilities_use_the_tighter_of_allocation_and_storage_limits() {

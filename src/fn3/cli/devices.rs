@@ -9,8 +9,8 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::fn3::model::format::PreparedHeader;
-use crate::fn3::{Backend, CpuBackend, DeviceId, DeviceRequest};
+use crate::inference::model::format::PreparedHeader;
+use crate::inference::{Backend, CpuBackend, DeviceId, DeviceRequest};
 
 use super::args::DiagnoseArgs;
 use super::CliError;
@@ -103,13 +103,13 @@ impl DeviceSpec {
             )
             .with_next(
                 "rebuild with `cargo build --release --no-default-features --features cli,vulkan`, \
-                 or pass `--device cpu`; `fn3-infer diagnose` shows the devices in this build",
+                 or pass `--device cpu`; `fastnn-infer diagnose` shows the devices in this build",
             ));
         }
         let request = self.request()?;
         request.resolve_on_host().map_err(|error| {
             CliError::device(error.to_string()).with_next(
-                "run `fn3-infer diagnose` to see every enumerated device; choose `--device cpu` \
+                "run `fastnn-infer diagnose` to see every enumerated device; choose `--device cpu` \
                  to run the reference backend",
             )
         })
@@ -127,7 +127,7 @@ impl DeviceSpec {
             DeviceSpec::Vulkan(VulkanSelector::Uuid(uuid)) => {
                 #[cfg(feature = "vulkan")]
                 {
-                    let adapters = crate::fn3::backend::vulkan::adapters();
+                    let adapters = crate::inference::backend::vulkan::adapters();
                     for adapter in adapters {
                         if normalize_uuid(&adapter.uuid_string()).as_deref() == Some(uuid) {
                             return Ok(DeviceRequest::Vulkan {
@@ -149,7 +149,7 @@ impl DeviceSpec {
                     Err(
                         CliError::device(format!("no Vulkan adapter has UUID `{uuid}`; {listed}"))
                             .with_next(
-                                "run `fn3-infer diagnose` and copy the UUID it prints, or pass \
+                                "run `fastnn-infer diagnose` and copy the UUID it prints, or pass \
                          `vulkan:<index>`",
                             ),
                     )
@@ -208,11 +208,11 @@ impl OpenedBackend {
                     let request = DeviceRequest::Vulkan {
                         index: Some(id.index()),
                     };
-                    let backend = crate::fn3::backend::vulkan::VulkanBackend::open(&request)
+                    let backend = crate::inference::backend::vulkan::VulkanBackend::open(&request)
                         .map_err(|error| {
                             CliError::device(format!("cannot open {device}: {error}")).with_next(
                                 "install or repair the Vulkan ICD/GPU driver, or run `--device \
-                                 cpu`; `fn3-infer diagnose` shows the loader's view",
+                                 cpu`; `fastnn-infer diagnose` shows the loader's view",
                             )
                         })?;
                     let detail = format!(
@@ -243,12 +243,13 @@ impl OpenedBackend {
 
 #[cfg(feature = "vulkan")]
 fn open_vulkan(spec: &DeviceSpec, request: DeviceRequest) -> Result<OpenedBackend, CliError> {
-    let backend = crate::fn3::backend::vulkan::VulkanBackend::open(&request).map_err(|error| {
-        CliError::device(format!("cannot open the requested Vulkan device: {error}")).with_next(
-            "install or repair the Vulkan ICD/GPU driver, or run `--device cpu`; \
-             `fn3-infer diagnose` shows the loader's view",
-        )
-    })?;
+    let backend =
+        crate::inference::backend::vulkan::VulkanBackend::open(&request).map_err(|error| {
+            CliError::device(format!("cannot open the requested Vulkan device: {error}")).with_next(
+                "install or repair the Vulkan ICD/GPU driver, or run `--device cpu`; \
+             `fastnn-infer diagnose` shows the loader's view",
+            )
+        })?;
     let device = backend.device_id();
     let detail = format!(
         "adapter={} software={} validation={}",
@@ -302,7 +303,7 @@ fn normalize_uuid(text: &str) -> Option<String> {
 pub fn execute_diagnose(args: &DiagnoseArgs, out: &mut dyn Write) -> Result<(), CliError> {
     let _ = writeln!(
         out,
-        "fn3-infer {} — build/device/backend diagnosis",
+        "fastnn-infer {} — build/device/backend diagnosis",
         env!("CARGO_PKG_VERSION")
     );
     let _ = writeln!(
@@ -382,22 +383,22 @@ fn diagnose_artifact(path: &Path, out: &mut dyn Write) -> Result<(), CliError> {
             "cannot read artifact `{}`: {error}",
             path.display()
         ))
-        .with_next("check the path, or create it with `fn3-infer prepare`")
+        .with_next("check the path, or create it with `fastnn-infer prepare`")
     })?;
     let header = PreparedHeader::parse(&bytes).map_err(|error| {
         CliError::model(format!(
             "`{}` is not a usable artifact: {error}",
             path.display()
         ))
-        .with_next("re-run `fn3-infer prepare` with the intended ONNX file")
+        .with_next("re-run `fastnn-infer prepare` with the intended ONNX file")
     })?;
     let artifact =
-        crate::fn3::model::format::PreparedArtifact::from_bytes(&bytes).map_err(|error| {
+        crate::inference::model::format::PreparedArtifact::from_bytes(&bytes).map_err(|error| {
             CliError::model(format!(
                 "`{}` failed its payload checks: {error}",
                 path.display()
             ))
-            .with_next("the file is corrupt; re-run `fn3-infer prepare` from the source ONNX")
+            .with_next("the file is corrupt; re-run `fastnn-infer prepare` from the source ONNX")
         })?;
     let geometry = artifact.geometry();
     let envelope = artifact.envelope();
@@ -422,21 +423,21 @@ fn diagnose_artifact(path: &Path, out: &mut dyn Write) -> Result<(), CliError> {
     let _ = writeln!(
         out,
         "  envelope: batch {}..={} seq {}..={} past {}..={} total {}..={}",
-        envelope.get(crate::fn3::Symbol::Batch).min(),
-        envelope.get(crate::fn3::Symbol::Batch).max(),
-        envelope.get(crate::fn3::Symbol::Seq).min(),
-        envelope.get(crate::fn3::Symbol::Seq).max(),
-        envelope.get(crate::fn3::Symbol::Past).min(),
-        envelope.get(crate::fn3::Symbol::Past).max(),
-        envelope.get(crate::fn3::Symbol::Total).min(),
-        envelope.get(crate::fn3::Symbol::Total).max(),
+        envelope.get(crate::inference::Symbol::Batch).min(),
+        envelope.get(crate::inference::Symbol::Batch).max(),
+        envelope.get(crate::inference::Symbol::Seq).min(),
+        envelope.get(crate::inference::Symbol::Seq).max(),
+        envelope.get(crate::inference::Symbol::Past).min(),
+        envelope.get(crate::inference::Symbol::Past).max(),
+        envelope.get(crate::inference::Symbol::Total).min(),
+        envelope.get(crate::inference::Symbol::Total).max(),
     );
     Ok(())
 }
 
 #[cfg(feature = "vulkan")]
 fn diagnose_vulkan(request: Option<&DeviceSpec>, out: &mut dyn Write) -> Result<(), CliError> {
-    use crate::fn3::backend::vulkan::{adapters, VulkanBackend};
+    use crate::inference::backend::vulkan::{adapters, VulkanBackend};
 
     let adapters = adapters();
     if adapters.is_empty() {
@@ -480,7 +481,7 @@ fn diagnose_vulkan(request: Option<&DeviceSpec>, out: &mut dyn Write) -> Result<
             &DeviceRequest::Vulkan {
                 index: Some(adapter.index),
             },
-            crate::fn3::backend::vulkan::VulkanConfig::default(),
+            crate::inference::backend::vulkan::VulkanConfig::default(),
         ) {
             Ok(backend) => {
                 let capabilities = backend.capabilities();

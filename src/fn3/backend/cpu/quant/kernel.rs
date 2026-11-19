@@ -52,12 +52,12 @@ use std::ops::Range;
 
 use half::f16;
 
-use crate::fn3::device::DeviceId;
-use crate::fn3::dtype::DType;
-use crate::fn3::error::Fn3Error;
-use crate::fn3::ops::OpId;
-use crate::fn3::quant::{QuantTensor, GROUP_SIZE};
-use crate::fn3::tensor::{TensorMut, TensorView};
+use crate::inference::device::DeviceId;
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Error;
+use crate::inference::ops::OpId;
+use crate::inference::quant::{QuantTensor, GROUP_SIZE};
+use crate::inference::tensor::{TensorMut, TensorView};
 
 use super::super::kernels::{kernel_bounds_error, require_dtype};
 use super::super::CPU_BACKEND_NAME;

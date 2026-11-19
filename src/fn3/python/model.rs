@@ -40,20 +40,20 @@ use std::time::Instant;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
-use crate::fn3::backend::cpu::CpuBackend;
+use crate::inference::backend::cpu::CpuBackend;
 #[cfg(feature = "vulkan")]
-use crate::fn3::backend::vulkan::VulkanBackend;
-use crate::fn3::backend::Backend;
-use crate::fn3::device::DeviceId;
+use crate::inference::backend::vulkan::VulkanBackend;
+use crate::inference::backend::Backend;
+use crate::inference::device::DeviceId;
 #[cfg(feature = "vulkan")]
-use crate::fn3::device::DeviceRequest;
-use crate::fn3::error::Fn3Error as CoreError;
-use crate::fn3::import::{import_onnx_file, DecoderGeometry, ModelImport, PositionEmbedding};
-use crate::fn3::model::format::{ArtifactMetadata, PreparedArtifact, PreparedHeader};
-use crate::fn3::model::weights::WeightTensor;
-use crate::fn3::model::{ModelWeights, Planner, PreparedModel};
-use crate::fn3::shape::{LiveDims, ShapeEnvelope, Symbol};
-use crate::fn3::tensor::TensorMeta;
+use crate::inference::device::DeviceRequest;
+use crate::inference::error::Fn3Error as CoreError;
+use crate::inference::import::{import_onnx_file, DecoderGeometry, ModelImport, PositionEmbedding};
+use crate::inference::model::format::{ArtifactMetadata, PreparedArtifact, PreparedHeader};
+use crate::inference::model::weights::WeightTensor;
+use crate::inference::model::{ModelWeights, Planner, PreparedModel};
+use crate::inference::shape::{LiveDims, ShapeEnvelope, Symbol};
+use crate::inference::tensor::TensorMeta;
 
 use super::device::{describe as describe_device, resolve as resolve_device, PyDevice};
 use super::errors;
@@ -68,7 +68,7 @@ static MODEL_IDENTITY: AtomicU64 = AtomicU64::new(1);
 // ---------------------------------------------------------------------------
 
 /// Architecture geometry detected by the importer and carried by the artifact.
-#[pyclass(module = "fastnn._core.fn3", name = "Geometry", frozen)]
+#[pyclass(module = "fastnn._core.inference", name = "Geometry", frozen)]
 pub struct PyGeometry {
     layers: u32,
     hidden_size: u32,
@@ -182,7 +182,7 @@ impl PyGeometry {
 }
 
 /// The artifact's declared dynamic window, per symbol.
-#[pyclass(module = "fastnn._core.fn3", name = "Envelope", frozen)]
+#[pyclass(module = "fastnn._core.inference", name = "Envelope", frozen)]
 pub struct PyEnvelope {
     bounds: [(u64, u64); Symbol::COUNT],
 }
@@ -273,7 +273,7 @@ impl PyEnvelope {
 }
 
 /// Provenance recorded in the artifact.
-#[pyclass(module = "fastnn._core.fn3", name = "Metadata", frozen)]
+#[pyclass(module = "fastnn._core.inference", name = "Metadata", frozen)]
 pub struct PyMetadata {
     ir_version: i64,
     opset_version: i64,
@@ -349,7 +349,7 @@ impl PyMetadata {
 }
 
 /// The outcome of [`prepare`].
-#[pyclass(module = "fastnn._core.fn3", name = "PrepareReport", frozen)]
+#[pyclass(module = "fastnn._core.inference", name = "PrepareReport", frozen)]
 pub struct PyPrepareReport {
     path: String,
     status: String,
@@ -460,7 +460,7 @@ impl PyPrepareReport {
 }
 
 /// What [`inspect`] learned about an artifact file.
-#[pyclass(module = "fastnn._core.fn3", name = "ArtifactInfo", frozen)]
+#[pyclass(module = "fastnn._core.inference", name = "ArtifactInfo", frozen)]
 pub struct PyArtifactInfo {
     path: String,
     size_bytes: u64,
@@ -574,7 +574,7 @@ impl PyArtifactInfo {
 /// Immutable and shareable by Python threads: it holds `Arc`s, so every
 /// [`PySession`] created from it shares the weights and the backend and owns its
 /// own KV cache.
-#[pyclass(module = "fastnn._core.fn3", name = "Model", frozen)]
+#[pyclass(module = "fastnn._core.inference", name = "Model", frozen)]
 pub struct PyModel {
     model: Arc<PreparedModel>,
     import: Arc<ModelImport>,
@@ -1151,7 +1151,7 @@ fn check_source_agrees(
             format!(
                 "the ONNX source and the prepared artifact disagree ({}); the artifact is what \
                  would run, so loading both would execute a model that is half of each file — \
-                 regenerate the artifact from this source with fastnn.fn3.prepare",
+                 regenerate the artifact from this source with fastnn.inference.prepare",
                 problems.join("; ")
             ),
         ))
@@ -1175,7 +1175,7 @@ fn open_backend(py: Python<'_>, device: DeviceId) -> PyResult<Arc<dyn Backend>> 
         DeviceId::Vulkan(_) => Err(errors::from_core(
             py,
             CoreError::DeviceUnavailable(
-                crate::fn3::device::DeviceResolveError::unavailable_device(device),
+                crate::inference::device::DeviceResolveError::unavailable_device(device),
             ),
         )),
     }
@@ -1198,7 +1198,8 @@ fn retag_weights(weights: ModelWeights, device: DeviceId) -> Result<ModelWeights
             len: weights.len() as u64,
         })?;
         let meta = TensorMeta::contiguous(tensor.shape().clone(), tensor.dtype(), device)?;
-        let retagged = crate::fn3::tensor::Tensor::from_storage(tensor.storage().clone(), meta)?;
+        let retagged =
+            crate::inference::tensor::Tensor::from_storage(tensor.storage().clone(), meta)?;
         named.push((
             weights
                 .name(index)

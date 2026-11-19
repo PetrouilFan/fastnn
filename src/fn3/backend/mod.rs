@@ -40,12 +40,12 @@
 
 use std::fmt;
 
-use crate::fn3::device::DeviceId;
-use crate::fn3::dtype::DType;
-use crate::fn3::error::Fn3Error;
-use crate::fn3::ops::OpId;
-use crate::fn3::shape::Shape;
-use crate::fn3::tensor::{TensorMut, TensorView};
+use crate::inference::device::DeviceId;
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Error;
+use crate::inference::ops::OpId;
+use crate::inference::shape::Shape;
+use crate::inference::tensor::{TensorMut, TensorView};
 
 pub mod cpu;
 
@@ -344,7 +344,7 @@ pub trait Backend: Send + Sync + fmt::Debug {
     /// for, or return an error. Outputs are pre-allocated by the caller, so a
     /// failed call leaves them in an unspecified but valid state; plan-level
     /// atomicity is the caller's responsibility (see
-    /// [`crate::fn3::model::Session`]).
+    /// [`crate::inference::model::Session`]).
     fn execute_op(
         &self,
         op: OpId,
@@ -369,7 +369,7 @@ pub trait Backend: Send + Sync + fmt::Debug {
     // one submission *without* naming Vulkan.
 
     /// `true` when the backend can allocate and compute on device-resident
-    /// storage ([`crate::fn3::storage::Storage::from_resident`]).
+    /// storage ([`crate::inference::storage::Storage::from_resident`]).
     ///
     /// Reporting `true` is a promise that
     /// [`Backend::allocate_resident`] succeeds for every dtype and shape this
@@ -383,15 +383,15 @@ pub trait Backend: Send + Sync + fmt::Debug {
     /// Allocate a zero-initialised device-resident tensor on [`Backend::device`].
     ///
     /// The returned tensor has device storage: no host bytes, an explicit
-    /// download path ([`crate::fn3::tensor::Tensor::to_host`]), and metadata
-    /// identical to [`crate::fn3::tensor::Tensor::zeros`]. The default body
+    /// download path ([`crate::inference::tensor::Tensor::to_host`]), and metadata
+    /// identical to [`crate::inference::tensor::Tensor::zeros`]. The default body
     /// reports [`Fn3Error::NotImplemented`] naming this backend, so a caller
     /// that checked [`Backend::supports_resident_storage`] never reaches it.
     fn allocate_resident(
         &self,
         shape: &Shape,
         dtype: DType,
-    ) -> Result<crate::fn3::tensor::Tensor, Fn3Error> {
+    ) -> Result<crate::inference::tensor::Tensor, Fn3Error> {
         let _ = (shape, dtype);
         Err(Fn3Error::NotImplemented {
             what: "device-resident allocation on this backend (it has no device allocator); \
@@ -407,7 +407,10 @@ pub trait Backend: Send + Sync + fmt::Debug {
     /// that keeps persistent device copies must be idempotent here (the same
     /// tensor may be presented by several sessions) and must not modify the
     /// tensor: the host storage stays valid for the CPU/fallback path.
-    fn prepare_persistent(&self, tensors: &[&crate::fn3::tensor::Tensor]) -> Result<(), Fn3Error> {
+    fn prepare_persistent(
+        &self,
+        tensors: &[&crate::inference::tensor::Tensor],
+    ) -> Result<(), Fn3Error> {
         let _ = tensors;
         Ok(())
     }
@@ -434,7 +437,7 @@ pub trait Backend: Send + Sync + fmt::Debug {
     /// is given host tensors and never calls it.
     fn write_resident(
         &self,
-        dst: &crate::fn3::storage::Storage,
+        dst: &crate::inference::storage::Storage,
         byte_offset: u64,
         bytes: &[u8],
     ) -> Result<(), Fn3Error> {
@@ -454,8 +457,8 @@ pub trait Backend: Send + Sync + fmt::Debug {
     /// [`Fn3Error::NotImplemented`]; a host-staged session never calls it.
     fn copy_resident_regions(
         &self,
-        dst: &crate::fn3::storage::Storage,
-        src: &crate::fn3::storage::Storage,
+        dst: &crate::inference::storage::Storage,
+        src: &crate::inference::storage::Storage,
         regions: &[(u64, u64, u64)],
     ) -> Result<(), Fn3Error> {
         let _ = (dst, src, regions);
@@ -491,7 +494,7 @@ pub trait Backend: Send + Sync + fmt::Debug {
     /// A backend that returns an error here is poisoned: a session must not
     /// execute another step, because the state of an in-flight fence or
     /// command buffer is unknown. The caller's only recovery is to drop the
-    /// backend and open a new device. [`crate::fn3::model::Session::recover`]
+    /// backend and open a new device. [`crate::inference::model::Session::recover`]
     /// returns this error instead of pretending the session can continue.
     fn terminal_error(&self) -> Option<Fn3Error> {
         None

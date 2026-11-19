@@ -38,7 +38,7 @@
 //! * `load` and `prepare` are separate measured series. `load` parses the
 //!   artifact, imports the ONNX graph and proves they describe the same model;
 //!   `prepare` plans and materialises weights.
-//! * `prefill` and `decode` are timed around [`fastnn::fn3::Session`] calls,
+//! * `prefill` and `decode` are timed around [`fastnn::inference::Session`] calls,
 //!   which return only after every backend instruction completed (the Vulkan
 //!   submission path waits on its fence). The host stopwatch is therefore a
 //!   synchronized wall time, not a submission time.
@@ -76,13 +76,13 @@ pub fn run(suite: Suite, config: &BenchConfig) -> Result<SuiteOutcome, String> {
 mod real {
     use super::{BenchConfig, Suite, SuiteOutcome};
     use crate::schema::{Checksum, DeviceTime, Geometry, Metric, ModelInfo, Precision};
-    use fastnn::fn3::backend::cpu::CpuBackend;
-    use fastnn::fn3::import::{import_onnx_model, ModelImport};
-    use fastnn::fn3::model::format::PreparedArtifact;
-    use fastnn::fn3::model::{ModelWeights, Planner, PreparedModel as CorePreparedModel};
-    use fastnn::fn3::shape::{LiveDims, Symbol};
-    use fastnn::fn3::tensor::Tensor;
-    use fastnn::fn3::{Backend, DeviceId, Fn3Error, Session};
+    use fastnn::inference::backend::cpu::CpuBackend;
+    use fastnn::inference::import::{import_onnx_model, ModelImport};
+    use fastnn::inference::model::format::PreparedArtifact;
+    use fastnn::inference::model::{ModelWeights, Planner, PreparedModel as CorePreparedModel};
+    use fastnn::inference::shape::{LiveDims, Symbol};
+    use fastnn::inference::tensor::Tensor;
+    use fastnn::inference::{Backend, DeviceId, Fn3Error, Session};
     use serde::{Deserialize, Serialize};
     use std::collections::BTreeMap;
     use std::fmt;
@@ -433,10 +433,10 @@ mod real {
         }
         #[cfg(feature = "vulkan")]
         {
-            use fastnn::fn3::backend::vulkan::{
+            use fastnn::inference::backend::vulkan::{
                 adapters as vulkan_adapters, VulkanBackend, VulkanConfig,
             };
-            use fastnn::fn3::DeviceRequest;
+            use fastnn::inference::DeviceRequest;
             let request = if device == "vulkan" {
                 DeviceRequest::Vulkan { index: None }
             } else if let Some(rest) = device.strip_prefix("vulkan:") {
@@ -455,7 +455,7 @@ mod real {
                         })
                         .ok_or_else(|| BenchError::Device {
                             detail: format!(
-                                "no Vulkan adapter has UUID `{uuid}`; `fn3-infer diagnose` lists \
+                                "no Vulkan adapter has UUID `{uuid}`; `fastnn-infer diagnose` lists \
                                  the adapters this loader reports"
                             ),
                         })?;
@@ -540,7 +540,7 @@ mod real {
         } else {
             Err(BenchError::Disagree {
                 detail: format!(
-                    "{}; regenerate the artifact from this source with `fn3-infer prepare`",
+                    "{}; regenerate the artifact from this source with `fastnn-infer prepare`",
                     problems.join("; ")
                 ),
             })
@@ -556,7 +556,7 @@ mod real {
             let tensor = weights.get(index).ok_or_else(|| BenchError::Plan {
                 detail: format!("weight index {index} is out of range"),
             })?;
-            let meta = fastnn::fn3::tensor::TensorMeta::contiguous(
+            let meta = fastnn::inference::tensor::TensorMeta::contiguous(
                 tensor.shape().clone(),
                 tensor.dtype(),
                 device,

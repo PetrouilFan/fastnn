@@ -2,7 +2,7 @@
 //!
 //! # Why a format-local error type
 //!
-//! [`crate::fn3::error::Fn3Error`] is the core's single error type, but it is
+//! [`crate::inference::error::Fn3Error`] is the core's single error type, but it is
 //! owned by FN3-02 (#48) and its `InvalidFormat` variant carries one flat
 //! string. A reader of an untrusted file has to distinguish cases that a caller
 //! acts on differently: *this file is from the future* (upgrade the reader),
@@ -15,8 +15,8 @@
 
 use std::fmt;
 
-use crate::fn3::dtype::UnknownDTypeCode;
-use crate::fn3::error::Fn3Error;
+use crate::inference::dtype::UnknownDTypeCode;
+use crate::inference::error::Fn3Error;
 
 /// A prepared-model artifact could not be written, read or validated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,7 +292,7 @@ impl fmt::Display for FormatError {
             FormatErrorKind::UnknownDType(error) => write!(f, "{error}"),
             FormatErrorKind::UnknownOpCode { code } => {
                 write!(f, "unknown op code {code}")?;
-                if crate::fn3::ops::OpId::is_reserved(*code) {
+                if crate::inference::ops::OpId::is_reserved(*code) {
                     write!(
                         f,
                         " (it falls in a reserved range this build does not define)"

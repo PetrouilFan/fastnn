@@ -4,7 +4,7 @@
 # Builds the extension with maturin and runs the Python suite marked
 # "not slow". This is the second half of the cpu lane: it still touches no GPU.
 #
-# The suite exercises the Python binding: the 3.0 fastnn.fn3 surface plus the
+# The suite exercises the Python binding: the 3.0 fastnn.inference surface plus the
 # surviving 2.x forward facade and its tooling.
 set -uo pipefail
 

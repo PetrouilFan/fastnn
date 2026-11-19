@@ -80,12 +80,12 @@ use super::super::VulkanBackend;
 use super::io;
 use super::norm::{execute_staged, require_shape, unsupported, BufferSource, ParamWriter};
 use super::{BindingSpec, GridInput, KernelSet, KernelSpec, OpKernel};
-use crate::fn3::backend::{CapabilityFeatures, OpParams, Support};
-use crate::fn3::dtype::DType;
-use crate::fn3::error::{Fn3Error, Fn3Result};
-use crate::fn3::ops::OpId;
-use crate::fn3::shape::Shape;
-use crate::fn3::tensor::{TensorMut, TensorView};
+use crate::inference::backend::{CapabilityFeatures, OpParams, Support};
+use crate::inference::dtype::DType;
+use crate::inference::error::{Fn3Error, Fn3Result};
+use crate::inference::ops::OpId;
+use crate::inference::shape::Shape;
+use crate::inference::tensor::{TensorMut, TensorView};
 
 /// Owning issue named in this family's rejection messages.
 const KERNEL_OWNER: &str = "FN3-15 (#61)";

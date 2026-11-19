@@ -35,13 +35,13 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyModule};
 
-use crate::fn3::backend::Backend;
-use crate::fn3::device::DeviceId;
-use crate::fn3::dtype::DType;
-use crate::fn3::error::Fn3Error as CoreError;
-use crate::fn3::import::ModelImport;
-use crate::fn3::model::{PreparedModel, Session};
-use crate::fn3::tensor::Tensor;
+use crate::inference::backend::Backend;
+use crate::inference::device::DeviceId;
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Error as CoreError;
+use crate::inference::import::ModelImport;
+use crate::inference::model::{PreparedModel, Session};
+use crate::inference::tensor::Tensor;
 
 use super::device::{describe as describe_device, PyDevice};
 use super::errors;
@@ -115,7 +115,7 @@ impl OwnedSession {
 /// copy. `np.asarray(logits)` and `logits.to_numpy()` both give that
 /// zero-extra-copy, read-only `float32` view; `np.array(logits)` copies if a
 /// writable array is wanted.
-#[pyclass(module = "fastnn._core.fn3", name = "Logits", frozen)]
+#[pyclass(module = "fastnn._core.inference", name = "Logits", frozen)]
 pub struct PyLogits {
     bytes: Py<PyBytes>,
     shape: Vec<u64>,
@@ -262,7 +262,7 @@ impl PyLogits {
 // ---------------------------------------------------------------------------
 
 /// A snapshot of everything a session reports about itself.
-#[pyclass(module = "fastnn._core.fn3", name = "SessionStats", frozen)]
+#[pyclass(module = "fastnn._core.inference", name = "SessionStats", frozen)]
 pub struct PySessionStats {
     phase: String,
     step: u64,
@@ -410,7 +410,7 @@ impl PySessionStats {
 /// the same model share the immutable weights and nothing else; the Python
 /// object serialises concurrent calls on *one* session and lets different
 /// sessions run in parallel.
-#[pyclass(module = "fastnn._core.fn3", name = "Session")]
+#[pyclass(module = "fastnn._core.inference", name = "Session")]
 pub struct PySession {
     inner: parking_lot::Mutex<OwnedSession>,
     device: DeviceId,

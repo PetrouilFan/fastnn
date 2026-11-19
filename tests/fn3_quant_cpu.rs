@@ -33,16 +33,16 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use fastnn::fn3::backend::cpu::quant::{
+use fastnn::inference::backend::cpu::quant::{
     matmul_quantized, registration, ActivationSpec, CoverageReport, PackedView, PackedWeight,
     ProjectionKind, ProjectionSpec, QuantCpuBackend, QuantDecision, QuantPolicy, QuantWeightSet,
     WorkHint,
 };
-use fastnn::fn3::import::{import_onnx_file, ModelImport};
-use fastnn::fn3::model::{ModelWeights, Plan, Planner, PreparedModel, Session};
-use fastnn::fn3::quant::{crc32, QuantBlob, QuantError};
-use fastnn::fn3::shape::{LiveDims, Shape, Strides};
-use fastnn::fn3::{CpuBackend, DType, DeviceId, Fn3Error, OpId, Tensor, TensorMeta};
+use fastnn::inference::import::{import_onnx_file, ModelImport};
+use fastnn::inference::model::{ModelWeights, Plan, Planner, PreparedModel, Session};
+use fastnn::inference::quant::{crc32, QuantBlob, QuantError};
+use fastnn::inference::shape::{LiveDims, Shape, Strides};
+use fastnn::inference::{CpuBackend, DType, DeviceId, Fn3Error, OpId, Tensor, TensorMeta};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -387,7 +387,7 @@ fn coverage_policy_matches_the_format_and_names_every_fallback() {
     };
     assert_eq!(
         registration(&qkv, contiguous, &policy).support(),
-        fastnn::fn3::Support::Full
+        fastnn::inference::Support::Full
     );
     let partial = registration(
         &qkv,
@@ -399,13 +399,13 @@ fn coverage_policy_matches_the_format_and_names_every_fallback() {
     );
     assert!(matches!(
         partial.support(),
-        fastnn::fn3::Support::Partial { .. }
+        fastnn::inference::Support::Partial { .. }
     ));
     assert_eq!(partial.code(), "activation-layout");
     assert!(!partial.is_admitted());
 
     // `CpuBackend::admits` is untouched: its default body is `supports`.
-    use fastnn::fn3::backend::Backend;
+    use fastnn::inference::backend::Backend;
     let backend = CpuBackend::new();
     let shapes = [
         Shape::from_dims([13, 768]),
@@ -446,7 +446,7 @@ fn synthetic_projection() -> (Tensor, PackedWeight) {
 
 #[test]
 fn an_unregistered_or_strided_matmuls_falls_back_explicitly() {
-    use fastnn::fn3::backend::Backend;
+    use fastnn::inference::backend::Backend;
     let policy = QuantPolicy::default();
     let (source, weight) = synthetic_projection();
     let mut set = QuantWeightSet::default();
@@ -670,7 +670,7 @@ fn work_hint_partitions_are_deterministic_and_bit_identical() {
 
 #[test]
 fn batched_activations_use_the_same_group_arithmetic() {
-    use fastnn::fn3::backend::Backend;
+    use fastnn::inference::backend::Backend;
     let k = 130usize;
     let n = 16usize;
     let values: Vec<f32> = (0..k * n)
@@ -1069,7 +1069,7 @@ fn load_model(path: &Path, heads: u64, kv_heads: u64, head_dim: u64) -> Loaded {
 
 fn run_logits<'a>(
     loaded: &'a Loaded,
-    backend: &'a dyn fastnn::fn3::Backend,
+    backend: &'a dyn fastnn::inference::Backend,
     prompt: &[u32],
     decode: &[u32],
 ) -> Vec<Vec<f32>> {
@@ -1515,7 +1515,7 @@ fn print_latency(label: &str, samples: &[Duration]) {
 
 fn latencies(
     loaded: &Loaded,
-    backend: &dyn fastnn::fn3::Backend,
+    backend: &dyn fastnn::inference::Backend,
     prefill_runs: usize,
     decode_runs: usize,
 ) -> (Vec<Duration>, Vec<Duration>) {
@@ -1548,7 +1548,7 @@ fn time_loop(iterations: usize, mut call: impl FnMut()) -> f64 {
 }
 
 fn dispatch_overhead(loaded: &Loaded, backend: &QuantCpuBackend) {
-    use fastnn::fn3::backend::Backend;
+    use fastnn::inference::backend::Backend;
     let inner = CpuBackend::new();
 
     // A 64x64 MatMul whose right-hand side is not registered.

@@ -31,11 +31,11 @@
 //! must supply the model's `1e-5`. A zero epsilon is legal (it is the
 //! `OpParams` default) and simply removes the numerical floor.
 
-use crate::fn3::backend::OpParams;
-use crate::fn3::dtype::DType;
-use crate::fn3::error::Fn3Error;
-use crate::fn3::ops::OpId;
-use crate::fn3::tensor::{TensorMut, TensorView};
+use crate::inference::backend::OpParams;
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Error;
+use crate::inference::ops::OpId;
+use crate::inference::tensor::{TensorMut, TensorView};
 
 use super::{
     at, at_mut, checked_product, decompose, normalize_axis, require_dtype, require_output_shape,
@@ -102,7 +102,7 @@ pub(crate) fn layer_norm(
         if axis != rank - 1 {
             return Err(Fn3Error::UnsupportedOp {
                 op,
-                backend: crate::fn3::backend::cpu::CPU_BACKEND_NAME,
+                backend: crate::inference::backend::cpu::CPU_BACKEND_NAME,
                 reason: format!(
                     "the fn3 LayerNorm contract normalizes the trailing axis only; axis {axis} \
                      of {} was requested (owner: FN3-07 / #53)",
@@ -113,7 +113,7 @@ pub(crate) fn layer_norm(
     } else if params.axes.len() > 1 {
         return Err(Fn3Error::UnsupportedOp {
             op,
-            backend: crate::fn3::backend::cpu::CPU_BACKEND_NAME,
+            backend: crate::inference::backend::cpu::CPU_BACKEND_NAME,
             reason: format!(
                 "the fn3 LayerNorm contract normalizes the trailing axis only; axes {:?} were \
                  requested (owner: FN3-07 / #53)",
@@ -189,25 +189,25 @@ mod tests {
 
     #[test]
     fn epsilon_must_be_usable() {
-        let input = crate::fn3::tensor::Tensor::from_f32(
-            crate::fn3::shape::Shape::from_dims([1, 2]),
+        let input = crate::inference::tensor::Tensor::from_f32(
+            crate::inference::shape::Shape::from_dims([1, 2]),
             &[1.0, 2.0],
         )
         .unwrap();
-        let weight = crate::fn3::tensor::Tensor::from_f32(
-            crate::fn3::shape::Shape::from_dims([2]),
+        let weight = crate::inference::tensor::Tensor::from_f32(
+            crate::inference::shape::Shape::from_dims([2]),
             &[1.0, 1.0],
         )
         .unwrap();
-        let bias = crate::fn3::tensor::Tensor::from_f32(
-            crate::fn3::shape::Shape::from_dims([2]),
+        let bias = crate::inference::tensor::Tensor::from_f32(
+            crate::inference::shape::Shape::from_dims([2]),
             &[0.0, 0.0],
         )
         .unwrap();
-        let mut out = crate::fn3::tensor::Tensor::zeros(
-            crate::fn3::shape::Shape::from_dims([1, 2]),
+        let mut out = crate::inference::tensor::Tensor::zeros(
+            crate::inference::shape::Shape::from_dims([1, 2]),
             DType::F32,
-            crate::fn3::device::DeviceId::Cpu,
+            crate::inference::device::DeviceId::Cpu,
         )
         .unwrap();
         let input_view = input.as_view().unwrap();

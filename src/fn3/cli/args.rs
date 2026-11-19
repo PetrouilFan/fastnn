@@ -1,4 +1,4 @@
-//! Command-line syntax for `fn3-infer`.
+//! Command-line syntax for `fastnn-infer`.
 //!
 //! Hand-written rather than derived so every rejection names the offending flag
 //! and the accepted forms, and so the same parser is callable from tests. The
@@ -232,7 +232,7 @@ fn parse_inspect(args: &[String]) -> Result<Command, CliError> {
         }
     }
     let artifact = artifact.or(positional).ok_or_else(|| {
-        CliError::usage("`inspect` needs an artifact path: `fn3-infer inspect model.fnn3`")
+        CliError::usage("`inspect` needs an artifact path: `fastnn-infer inspect model.fnn3`")
     })?;
     Ok(Command::Inspect(InspectArgs { artifact, sections }))
 }
@@ -450,7 +450,7 @@ fn no_inline(inline: Option<&str>, flag: &str) -> Result<(), CliError> {
 
 fn unknown_flag(command: &str, flag: &str) -> CliError {
     CliError::usage(format!(
-        "unknown flag `{flag}` for `{command}`; run `fn3-infer help {command}`"
+        "unknown flag `{flag}` for `{command}`; run `fastnn-infer help {command}`"
     ))
 }
 
@@ -521,10 +521,10 @@ pub fn help_text(topic: HelpTopic) -> String {
 }
 
 const HELP_ALL: &str = "\
-fn3-infer — FastNN 3.0 inference CLI (FN3-17)
+fastnn-infer — FastNN 3.0 inference CLI (FN3-17)
 
 USAGE:
-  fn3-infer <command> [options]
+  fastnn-infer <command> [options]
 
 COMMANDS:
   prepare    ONNX -> versioned .fnn3 artifact (atomic write, read-back check)
@@ -557,14 +557,14 @@ TEXT INPUT:
 EXIT CODES:
   0 success  2 usage  3 model/input  4 device  5 inference  1 internal
 
-Run `fn3-infer help <command>` for one command.
+Run `fastnn-infer help <command>` for one command.
 ";
 
 const HELP_PREPARE: &str = "\
-fn3-infer prepare — ONNX -> versioned prepared artifact
+fastnn-infer prepare — ONNX -> versioned prepared artifact
 
 USAGE:
-  fn3-infer prepare --onnx <model.onnx> --out <model.fnn3> [options]
+  fastnn-infer prepare --onnx <model.onnx> --out <model.fnn3> [options]
 
 OPTIONS:
   --max-seq <n>     maximum new tokens in one call (default 128)
@@ -577,10 +577,10 @@ The source ONNX is not modified.
 ";
 
 const HELP_INSPECT: &str = "\
-fn3-infer inspect — what is this artifact?
+fastnn-infer inspect — what is this artifact?
 
 USAGE:
-  fn3-infer inspect <model.fnn3> [--sections]
+  fastnn-infer inspect <model.fnn3> [--sections]
 
 OPTIONS:
   --sections, --full   decode META, GEOM, ENV, VALS, NODE and WGHT and print
@@ -589,11 +589,11 @@ OPTIONS:
 ";
 
 const HELP_RUN: &str = "\
-fn3-infer run — token-ID prefill and cached decode
+fastnn-infer run — token-ID prefill and cached decode
 
 USAGE:
-  fn3-infer run --model <model.fnn3> --tokens <ids> [options]
-  fn3-infer run --model <model.fnn3> --onnx <model.onnx> --tokens <ids> [options]
+  fastnn-infer run --model <model.fnn3> --tokens <ids> [options]
+  fastnn-infer run --model <model.fnn3> --onnx <model.onnx> --tokens <ids> [options]
 
 OPTIONS:
   --decode <ids>    feed these token IDs one at a time after the prompt
@@ -610,12 +610,12 @@ logit, ties broken by the lowest token ID. No sampling.
 ";
 
 const HELP_GENERATE: &str = "\
-fn3-infer generate — greedy, deterministic generation
+fastnn-infer generate — greedy, deterministic generation
 
 USAGE:
-  fn3-infer generate --model <model.fnn3> --tokens <ids> \\
+  fastnn-infer generate --model <model.fnn3> --tokens <ids> \\
       --max-new-tokens <n> [options]
-  fn3-infer generate --model <model.fnn3> --onnx <model.onnx> --tokens <ids> \\
+  fastnn-infer generate --model <model.fnn3> --onnx <model.onnx> --tokens <ids> \\
       --max-new-tokens <n> [options]
 
 OPTIONS:
@@ -633,10 +633,10 @@ the same IDs.
 ";
 
 const HELP_DIAGNOSE: &str = "\
-fn3-infer diagnose — build, device and backend matrix
+fastnn-infer diagnose — build, device and backend matrix
 
 USAGE:
-  fn3-infer diagnose [--artifact <model.fnn3>] [--device <request>]
+  fastnn-infer diagnose [--artifact <model.fnn3>] [--device <request>]
 
 Without --device it reports every device the loader lists and, with the vulkan
 feature, whether the backend can open each one. It does not execute the model:

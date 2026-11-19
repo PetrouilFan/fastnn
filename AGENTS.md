@@ -19,9 +19,9 @@ bindings. There is no autograd, optimizer, training loop or wgpu backend.
 - AOT compilation pipeline: `src/backend/executor.rs`.
 - IR and graph construction: `src/ir/`.
 - CPU execution: `src/backend/cpu/` and `src/fn3/backend/cpu/`.
-- Inference CLI: `src/bin/fn3-infer.rs`.
+- Inference CLI: `src/bin/fastnn-infer.rs`.
 - Python extension registration: `src/python/mod.rs`.
-- Python public facade: `fastnn/fn3/__init__.py`.
+- Python public facade: `fastnn/inference/__init__.py`.
 - Rust integration tests and Python tests: `tests/`.
 
 ## Change rules
@@ -34,7 +34,7 @@ bindings. There is no autograd, optimizer, training loop or wgpu backend.
 - Keep mechanical moves separate from incidental numerical or performance
   changes. Do not retain compatibility re-exports solely for hypothetical users.
 - Do not resolve a dependency cycle by broadly changing items to `pub`.
-- `src/fn3/` imports no 2.x module and 2.x imports nothing from `fn3`.
+- `src/fn3/` imports no 2.x module and 2.x imports nothing from `inference`.
 - Rust unsafe code requires a local `SAFETY:` justification covering aliasing,
   bounds, alignment and lifetime assumptions.
 - Quantized execution must preserve integer-space behavior. Do not introduce

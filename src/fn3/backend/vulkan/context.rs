@@ -22,7 +22,7 @@ use ash::vk;
 use super::device::Device;
 use super::error::{Error, Result};
 use super::memory::{MemoryAllocation, MemoryClass};
-use crate::fn3::backend::vulkan::pipeline::Kernel;
+use crate::inference::backend::vulkan::pipeline::Kernel;
 
 /// What a buffer will be used for. Drives usage flags and the memory class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

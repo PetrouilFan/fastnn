@@ -14,7 +14,7 @@
 //!   only possible through `&mut self`, so the borrow checker statically
 //!   excludes any live `&[T]` alias while a kernel writes.
 //! - [`Storage`] is a cheap `Arc` handle for sharing a buffer between a
-//!   `PreparedModel`, its plans and every [`crate::fn3::tensor::Tensor`] view.
+//!   `PreparedModel`, its plans and every [`crate::inference::tensor::Tensor`] view.
 //!   Shared access is **read-only**: `Storage::as_slice` takes `&self`.
 //! - Mutation through a shared handle requires exclusive ownership:
 //!   [`Storage::try_make_mut`] fails with [`Fn3Error::StorageShared`] while any
@@ -72,8 +72,8 @@ use std::sync::Arc;
 
 use bytemuck::Pod;
 
-use crate::fn3::dtype::DType;
-use crate::fn3::error::Fn3Error;
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Error;
 
 /// What a resident storage tells its owner.
 ///
@@ -586,8 +586,8 @@ impl Storage {
     /// 2. `offset + len <= self.len()`, with the addition checked.
     ///
     /// The window shares the allocation through `Arc`; it never copies. Use it
-    /// with [`crate::fn3::tensor::TensorView::from_window`] or
-    /// [`crate::fn3::tensor::Tensor::from_window`] to build a tensor whose
+    /// with [`crate::inference::tensor::TensorView::from_window`] or
+    /// [`crate::inference::tensor::Tensor::from_window`] to build a tensor whose
     /// element offset refers to the same allocation.
     pub fn window(
         &self,

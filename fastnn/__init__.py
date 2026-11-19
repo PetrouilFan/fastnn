@@ -2,7 +2,7 @@
 
 AOT-compiled inference pipeline with a Rust IR, operator fusion, per-channel
 weight quantization (U4/U8), and arena-based memory planning, plus the 3.0
-`fastnn.fn3` session API.
+`fastnn.inference` session API.
 See https://github.com/PetrouilFan/fastnn for full documentation.
 """
 
@@ -356,13 +356,13 @@ __all__ = [
     "xywh2xyxy",
     "scale_boxes",
     # 3.0 inference surface (FN3-18 / #64)
-    "fn3",
+    "inference",
 ]
 
 # ---------------------------------------------------------------------------
 # 3.0 inference surface (FN3-18 / #64)
 # ---------------------------------------------------------------------------
-# `fastnn.fn3` is the FastNN 3.0 inference API: an explicit device, one
+# `fastnn.inference` is the FastNN 3.0 inference API: an explicit device, one
 # versioned artifact, and sessions that own their cache. New code should use
 # it; the 2.x eager/AOT names above are a secondary inference surface.
-from fastnn import fn3 as fn3  # noqa: E402
+from . import inference as inference  # noqa: E402

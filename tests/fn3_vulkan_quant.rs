@@ -35,19 +35,19 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use fastnn::fn3::backend::vulkan::kernels::quant::{
+use fastnn::inference::backend::vulkan::kernels::quant::{
     admit_projection, encode_projection, PackedProjection, ProjectionRequest, QuantKernelSet,
     QuantSections, WeightSource,
 };
-use fastnn::fn3::backend::vulkan::resident::ResidencyPhase;
-use fastnn::fn3::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
-use fastnn::fn3::backend::{Backend, Capabilities, OpParams, Support};
-use fastnn::fn3::device::{DeviceId, DeviceRequest};
-use fastnn::fn3::model::SessionOptions;
-use fastnn::fn3::model::{ModelWeights, Planner, PreparedModel, SlotRole};
-use fastnn::fn3::quant::QuantBlob;
-use fastnn::fn3::shape::Shape;
-use fastnn::fn3::{
+use fastnn::inference::backend::vulkan::resident::ResidencyPhase;
+use fastnn::inference::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
+use fastnn::inference::backend::{Backend, Capabilities, OpParams, Support};
+use fastnn::inference::device::{DeviceId, DeviceRequest};
+use fastnn::inference::model::SessionOptions;
+use fastnn::inference::model::{ModelWeights, Planner, PreparedModel, SlotRole};
+use fastnn::inference::quant::QuantBlob;
+use fastnn::inference::shape::Shape;
+use fastnn::inference::{
     DType, Fn3Error, Fn3Result, LiveDims, OpId, Session, Tensor, TensorMut, TensorView,
 };
 
@@ -68,12 +68,13 @@ use harness::*;
 /// persistent table keys on is preserved.
 fn host_tensor(shape: Shape, dtype: DType, device: DeviceId) -> Fn3Result<Tensor> {
     let tensor = Tensor::zeros(shape.clone(), dtype, DeviceId::Cpu)?;
-    let meta = fastnn::fn3::TensorMeta::contiguous(shape, dtype, device)?;
+    let meta = fastnn::inference::TensorMeta::contiguous(shape, dtype, device)?;
     Tensor::from_storage(tensor.storage().clone(), meta)
 }
 
 fn retag(tensor: &Tensor, device: DeviceId) -> Fn3Result<Tensor> {
-    let meta = fastnn::fn3::TensorMeta::contiguous(tensor.shape().clone(), tensor.dtype(), device)?;
+    let meta =
+        fastnn::inference::TensorMeta::contiguous(tensor.shape().clone(), tensor.dtype(), device)?;
     Tensor::from_storage(tensor.storage().clone(), meta)
 }
 
@@ -344,7 +345,7 @@ impl PackedSet {
     /// the FP32 projection the quantized one replaces.
     fn quantize(
         backend: &VulkanBackend,
-        model: &fastnn::fn3::PreparedModel,
+        model: &fastnn::inference::PreparedModel,
         head: HeadRoute,
         capture: bool,
     ) -> Fn3Result<PackedSet> {
@@ -610,12 +611,13 @@ impl Backend for QuantBackend<'_> {
                     Shape::from_dims(dims.iter().copied()),
                 );
                 if admit_projection(&request).is_ok() {
-                    let launch = fastnn::fn3::backend::vulkan::kernels::quant::launch_projection(
-                        self.inner,
-                        &projection.packed,
-                        &inputs[0],
-                        &mut outputs[0],
-                    )?;
+                    let launch =
+                        fastnn::inference::backend::vulkan::kernels::quant::launch_projection(
+                            self.inner,
+                            &projection.packed,
+                            &inputs[0],
+                            &mut outputs[0],
+                        )?;
                     {
                         let mut stats = self
                             .stats
@@ -659,7 +661,7 @@ impl Backend for QuantBackend<'_> {
 
     fn write_resident(
         &self,
-        dst: &fastnn::fn3::storage::Storage,
+        dst: &fastnn::inference::storage::Storage,
         byte_offset: u64,
         bytes: &[u8],
     ) -> Result<(), Fn3Error> {
@@ -668,8 +670,8 @@ impl Backend for QuantBackend<'_> {
 
     fn copy_resident_regions(
         &self,
-        dst: &fastnn::fn3::storage::Storage,
-        src: &fastnn::fn3::storage::Storage,
+        dst: &fastnn::inference::storage::Storage,
+        src: &fastnn::inference::storage::Storage,
         regions: &[(u64, u64, u64)],
     ) -> Result<(), Fn3Error> {
         self.inner.copy_resident_regions(dst, src, regions)
@@ -712,7 +714,7 @@ impl QuantBackend<'_> {
         let mut probe = host_tensor(shape, DType::F32, self.inner.device_id())?;
         {
             let mut view = probe.as_mut_view()?;
-            fastnn::fn3::backend::vulkan::kernels::quant::launch_projection(
+            fastnn::inference::backend::vulkan::kernels::quant::launch_projection(
                 self.inner,
                 &projection.packed,
                 activation,
@@ -769,12 +771,12 @@ struct CoverageRow {
 
 /// Classify every `MatMul` in one plan of the pinned graph.
 fn coverage(
-    import: &fastnn::fn3::import::ModelImport,
-    model: &fastnn::fn3::PreparedModel,
-    family: fastnn::fn3::backend::vulkan::kernels::quant::QuantFamily,
-    live: fastnn::fn3::LiveDims,
+    import: &fastnn::inference::import::ModelImport,
+    model: &fastnn::inference::PreparedModel,
+    family: fastnn::inference::backend::vulkan::kernels::quant::QuantFamily,
+    live: fastnn::inference::LiveDims,
 ) -> Vec<CoverageRow> {
-    let backend = fastnn::fn3::CpuBackend::new();
+    let backend = fastnn::inference::CpuBackend::new();
     let planner = Planner::new(import, &backend);
     let envelope = envelope(&planner, FIXTURE_CONTEXT);
     let plan = planner
@@ -877,11 +879,11 @@ fn print_coverage(label: &str, rows: &[CoverageRow]) {
 /// trained graph rejects (`DimOutOfEnvelope` on `n_heads`), so this version asks
 /// the geometry instead. Everything else is the harness's sequence.
 fn prepare_model(
-    import: &fastnn::fn3::import::ModelImport,
+    import: &fastnn::inference::import::ModelImport,
     device: DeviceId,
     context: u64,
-) -> (PreparedModel, fastnn::fn3::ShapeEnvelope) {
-    let backend = fastnn::fn3::CpuBackend::new();
+) -> (PreparedModel, fastnn::inference::ShapeEnvelope) {
+    let backend = fastnn::inference::CpuBackend::new();
     let planner = Planner::new(import, &backend);
     let envelope = harness::envelope(&planner, context);
     let config = import.geometry().kv_cache_config(context, 1);
@@ -965,7 +967,7 @@ fn check_projection(
     let launch = {
         let activation_view = activation.as_view().expect("activation view");
         let mut out_view = out.as_mut_view().expect("output view");
-        fastnn::fn3::backend::vulkan::kernels::quant::launch_projection(
+        fastnn::inference::backend::vulkan::kernels::quant::launch_projection(
             backend,
             &packed,
             &activation_view,
@@ -1037,7 +1039,7 @@ fn format_parity_on_the_committed_blobs() {
             }
         }
     }
-    let (errors, warnings) = fastnn::fn3::backend::vulkan::instance::validation_counts();
+    let (errors, warnings) = fastnn::inference::backend::vulkan::instance::validation_counts();
     assert_eq!((errors, warnings), (0, 0), "validation counts");
 }
 
@@ -1080,7 +1082,7 @@ fn projection_shapes_match_the_reference() {
             assert!(relative < 4e-6, "N={n} K={k} M={m}: relative {relative:e}");
         }
     }
-    let (errors, warnings) = fastnn::fn3::backend::vulkan::instance::validation_counts();
+    let (errors, warnings) = fastnn::inference::backend::vulkan::instance::validation_counts();
     assert_eq!((errors, warnings), (0, 0), "validation counts");
 }
 
@@ -1157,7 +1159,7 @@ fn encoder_cross_check_dump() {
 
 #[test]
 fn the_selection_rule_falls_back_where_the_format_says() {
-    let family = fastnn::fn3::backend::vulkan::kernels::quant::QuantFamily::GroupedW8A16;
+    let family = fastnn::inference::backend::vulkan::kernels::quant::QuantFamily::GroupedW8A16;
     let kernels = QuantKernelSet::alpha();
     let cases: [(&str, ProjectionRequest); 7] = [
         (
@@ -1239,7 +1241,7 @@ fn coverage_of_the_pinned_graphs() {
     };
     let device = DeviceId::Cpu;
     let (model, _) = prepared(&import, device, FIXTURE_CONTEXT);
-    let family = fastnn::fn3::backend::vulkan::kernels::quant::QuantFamily::GroupedW8A16;
+    let family = fastnn::inference::backend::vulkan::kernels::quant::QuantFamily::GroupedW8A16;
     print_coverage(
         "tiny prefill(13,0)",
         &coverage(&import, &model, family, dims(13, 0)),
@@ -1322,13 +1324,14 @@ fn resident_quantized_projections_upload_nothing() {
         packed.smallest_payload()
     );
     let prefill_records = backend.residency().records();
-    let quantized = |records: &[fastnn::fn3::backend::vulkan::residency::ExecutionRecord]| {
-        records
-            .iter()
-            .filter(|record| record.kernel == "quant.matmul.w8a16")
-            .cloned()
-            .collect::<Vec<_>>()
-    };
+    let quantized =
+        |records: &[fastnn::inference::backend::vulkan::residency::ExecutionRecord]| {
+            records
+                .iter()
+                .filter(|record| record.kernel == "quant.matmul.w8a16")
+                .cloned()
+                .collect::<Vec<_>>()
+        };
     let prefill_quantized = quantized(&prefill_records);
     assert_eq!(
         prefill_quantized.len(),
@@ -1441,7 +1444,7 @@ fn resident_quantized_projections_upload_nothing() {
         decode.staged_upload_bytes[ResidencyPhase::Decode.index()],
     );
 
-    let (errors, warnings) = fastnn::fn3::backend::vulkan::instance::validation_counts();
+    let (errors, warnings) = fastnn::inference::backend::vulkan::instance::validation_counts();
     assert_eq!((errors, warnings), (0, 0), "validation counts");
     println!("[fn3-24][validation] errors {errors} warnings {warnings}");
 }
@@ -1522,7 +1525,7 @@ fn a_declined_projection_falls_back_to_the_fp32_kernel() {
         "[fn3-24][fallback] pack 2 of 8 projections: quantized records {quantized}, FP32 matmul \
          records {fp32_matmul}"
     );
-    let (errors, warnings) = fastnn::fn3::backend::vulkan::instance::validation_counts();
+    let (errors, warnings) = fastnn::inference::backend::vulkan::instance::validation_counts();
     assert_eq!((errors, warnings), (0, 0), "validation counts");
 }
 
@@ -1665,8 +1668,8 @@ struct ArmLogits {
 
 fn run_arm(
     backend: &dyn Backend,
-    import: &fastnn::fn3::import::ModelImport,
-    model: &fastnn::fn3::PreparedModel,
+    import: &fastnn::inference::import::ModelImport,
+    model: &fastnn::inference::PreparedModel,
     tokens: &[u32],
     options: SessionOptions,
 ) -> ArmLogits {
@@ -1786,7 +1789,7 @@ fn end_to_end_accuracy_against_fp32() {
         worst_activation,
         logit_rows.len()
     );
-    let (errors, warnings) = fastnn::fn3::backend::vulkan::instance::validation_counts();
+    let (errors, warnings) = fastnn::inference::backend::vulkan::instance::validation_counts();
     assert_eq!((errors, warnings), (0, 0), "validation counts");
 }
 
@@ -1801,7 +1804,7 @@ const TRAINED_SHA256: &str = "42c1e92a21c41ebd3c536d4c6f09732450a43db35977593236
 ///
 /// The digest is the one in `fixtures/parity/trained-gpt2/model.lock.json`
 /// (`onnx/model.onnx`), checked against the file rather than quoted.
-fn trained() -> Option<fastnn::fn3::import::ModelImport> {
+fn trained() -> Option<fastnn::inference::import::ModelImport> {
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(path) = std::env::var("FN3_QUANT_TRAINED_MODEL") {
         candidates.push(std::path::PathBuf::from(path));
@@ -1830,7 +1833,7 @@ fn trained() -> Option<fastnn::fn3::import::ModelImport> {
             TRAINED_BYTES
         );
         return Some(
-            fastnn::fn3::import::import_onnx_model(&bytes)
+            fastnn::inference::import::import_onnx_model(&bytes)
                 .unwrap_or_else(|error| panic!("the trained model failed to import:\n{error}")),
         );
     }
@@ -1889,10 +1892,10 @@ fn trained_accuracy_and_coverage() {
     );
 
     // ---- coverage ---------------------------------------------------------
-    let family = fastnn::fn3::backend::vulkan::kernels::quant::QuantFamily::GroupedW8A16;
+    let family = fastnn::inference::backend::vulkan::kernels::quant::QuantFamily::GroupedW8A16;
     let geometry = import.geometry();
     let live = |seq: u64, past: u64| {
-        fastnn::fn3::LiveDims::new(
+        fastnn::inference::LiveDims::new(
             1,
             seq,
             past,
@@ -1995,7 +1998,7 @@ fn trained_accuracy_and_coverage() {
         worst_weight,
         logits.len()
     );
-    let (errors, warnings) = fastnn::fn3::backend::vulkan::instance::validation_counts();
+    let (errors, warnings) = fastnn::inference::backend::vulkan::instance::validation_counts();
     assert_eq!((errors, warnings), (0, 0), "validation counts");
 }
 
@@ -2098,7 +2101,7 @@ fn trained_staged_latency() {
             arm.host_peak_rss_bytes
         );
     }
-    let (errors, warnings) = fastnn::fn3::backend::vulkan::instance::validation_counts();
+    let (errors, warnings) = fastnn::inference::backend::vulkan::instance::validation_counts();
     assert_eq!((errors, warnings), (0, 0), "validation counts");
 }
 
@@ -2167,8 +2170,8 @@ struct MeasurePlan {
 
 fn measure_arm(
     backend: &VulkanBackend,
-    import: &fastnn::fn3::import::ModelImport,
-    model: &fastnn::fn3::PreparedModel,
+    import: &fastnn::inference::import::ModelImport,
+    model: &fastnn::inference::PreparedModel,
     decorated: Option<&QuantBackend<'_>>,
     label: &'static str,
     plan: MeasurePlan,
@@ -2422,7 +2425,7 @@ fn quantized_latency_and_memory() {
         println!("[fn3-24][perf] wrote {}", directory.display());
     }
 
-    let (errors, warnings) = fastnn::fn3::backend::vulkan::instance::validation_counts();
+    let (errors, warnings) = fastnn::inference::backend::vulkan::instance::validation_counts();
     assert_eq!(
         (errors, warnings),
         (0, 0),

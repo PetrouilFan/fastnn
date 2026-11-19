@@ -75,7 +75,7 @@ vulkan-fault-injection = ["vulkan"]
 # Off by default: the adapter reads a model manifest and a 28 MB artifact, and a
 # benchmark harness must not imply that it measured a model it was not given.
 fn3 = []
-# FastNN 3.0 Python bindings (`fastnn._core.fn3`).
+# FastNN 3.0 Python bindings (`fastnn._core.inference`).
 python = ["dep:pyo3"]
 # CPU acceleration.
 openblas = ["blas-src/openblas-src"]
@@ -153,7 +153,7 @@ path = "tools/bench/main.rs"
 # reason as `fastnn-runtime`: a standalone binary is built without the default
 # `python` feature, whose pyo3 extension-module mode is for shared libraries.
 [[bin]]
-name = "fn3-infer"
-path = "src/bin/fn3-infer.rs"
+name = "fastnn-infer"
+path = "src/bin/fastnn-infer.rs"
 required-features = ["cli"]
 
