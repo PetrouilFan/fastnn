@@ -100,6 +100,18 @@ pub enum ProtoError {
         /// Absolute byte offset of the nested message.
         offset: usize,
     },
+    /// A repeated field or a string exceeded this build's documented budget.
+    ///
+    /// Reported while decoding, before the element is added, so a declared
+    /// count costs one comparison rather than memory.
+    LimitExceeded {
+        /// What is capped, e.g. `"graph nodes"`.
+        what: &'static str,
+        /// The cap this build enforces.
+        limit: usize,
+        /// Absolute byte offset of the field that exceeded the budget.
+        offset: usize,
+    },
     /// One protobuf message carried two payload fields that are mutually
     /// exclusive (for example `AttributeProto.f` and `AttributeProto.ints`).
     ConflictingPayload {
@@ -158,6 +170,14 @@ impl fmt::Display for ProtoError {
             ProtoError::DepthExceeded { offset } => write!(
                 f,
                 "protobuf message at byte {offset} is nested deeper than the ONNX schema allows"
+            ),
+            ProtoError::LimitExceeded {
+                what,
+                limit,
+                offset,
+            } => write!(
+                f,
+                "protobuf {what} at byte {offset} exceeds this build's limit of {limit}"
             ),
             ProtoError::ConflictingPayload { message, detail } => write!(
                 f,
@@ -275,6 +295,19 @@ pub enum ImportProblemKind {
         expected: u64,
         /// Bytes the payload actually holds.
         actual: u64,
+    },
+    /// A tensor carries a typed payload field that its dtype does not use.
+    ///
+    /// ONNX pairs `float_data` with FLOAT, `int32_data` with INT32/BOOL/... and
+    /// `int64_data` with INT64. A file that sets the wrong one is rejected by
+    /// name instead of being read as zeros or as the other field's bytes.
+    TensorDataKind {
+        /// Tensor name.
+        tensor: String,
+        /// Declared dtype.
+        dtype: DType,
+        /// The field that was populated.
+        found: &'static str,
     },
     /// An initializer or attribute tensor has a negative extent.
     NegativeExtent {
@@ -423,6 +456,19 @@ pub enum ImportProblemKind {
         /// Operating-system error text.
         detail: String,
     },
+    /// A count or declared size exceeds this build's documented budget.
+    ///
+    /// Reported *before* the object is allocated, so a hostile count costs one
+    /// comparison, not memory. The budget is documented in
+    /// [`super::budget`].
+    LimitExceeded {
+        /// What is capped, e.g. `"graph nodes"`.
+        what: &'static str,
+        /// The count the file declares or the importer reached.
+        requested: u64,
+        /// The cap this build enforces.
+        limit: u64,
+    },
     /// More problems were found than [`MAX_PROBLEMS`].
     TooManyProblems {
         /// How many additional problems were dropped.
@@ -507,6 +553,15 @@ impl fmt::Display for ImportProblemKind {
                 f,
                 "tensor `{tensor}` declares {dtype} {shape}, which needs {expected} payload \
                  bytes, but the payload holds {actual}"
+            ),
+            ImportProblemKind::TensorDataKind {
+                tensor,
+                dtype,
+                found,
+            } => write!(
+                f,
+                "tensor `{tensor}` is {dtype} but carries `{found}`, which ONNX reserves for a \
+                 different element type"
             ),
             ImportProblemKind::NegativeExtent { tensor, shape } => write!(
                 f,
@@ -617,6 +672,14 @@ impl fmt::Display for ImportProblemKind {
             ImportProblemKind::TooManyProblems { omitted } => write!(
                 f,
                 "{omitted} further problem(s) were not reported (the limit is {MAX_PROBLEMS})"
+            ),
+            ImportProblemKind::LimitExceeded {
+                what,
+                requested,
+                limit,
+            } => write!(
+                f,
+                "{what} counts {requested}, above this build's limit of {limit}"
             ),
         }
     }

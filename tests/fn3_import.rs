@@ -34,7 +34,7 @@
 use std::path::PathBuf;
 
 use fastnn::fn3::import::{
-    import_onnx_model, ImportError, ImportProblemKind, ModelImport, WeightSource,
+    import_onnx_model, ImportError, ImportProblemKind, ModelImport, ProtoError, WeightSource,
 };
 use fastnn::fn3::OpId;
 
@@ -545,6 +545,7 @@ mod encode {
         pub external: bool,
         pub data_location: i64,
         pub float_data: Option<Vec<f32>>,
+        pub int32_data: Option<Vec<i32>>,
     }
 
     impl Tensor {
@@ -561,6 +562,7 @@ mod encode {
                 external: false,
                 data_location: 0,
                 float_data: None,
+                int32_data: None,
             }
         }
 
@@ -577,6 +579,7 @@ mod encode {
                 external: false,
                 data_location: 0,
                 float_data: None,
+                int32_data: None,
             }
         }
 
@@ -587,6 +590,22 @@ mod encode {
                 .product::<usize>()
                 .max(1);
             Tensor::f32(name, dims, &vec![0.0; elements])
+        }
+
+        /// An F32 tensor whose payload is written as `int32_data`, which ONNX
+        /// reserves for INT32/BOOL. Used to prove the importer pairs the field
+        /// with the dtype instead of reading whichever field is present.
+        pub fn f32_with_int32_data(name: &str, dims: &[i64], values: &[i32]) -> Tensor {
+            Tensor {
+                name: name.to_string(),
+                dtype: 1,
+                dims: dims.to_vec(),
+                raw: Vec::new(),
+                external: false,
+                data_location: 0,
+                float_data: None,
+                int32_data: Some(values.to_vec()),
+            }
         }
 
         pub fn encode(&self) -> Vec<u8> {
@@ -604,6 +623,12 @@ mod encode {
                     packed.extend_from_slice(&value.to_le_bytes());
                 }
                 field_bytes(4, &packed, &mut out);
+            } else if let Some(values) = &self.int32_data {
+                let mut packed = Vec::new();
+                for value in values {
+                    packed.extend_from_slice(&value.to_le_bytes());
+                }
+                field_bytes(5, &packed, &mut out);
             } else {
                 field_bytes(9, &self.raw, &mut out);
             }
@@ -1415,4 +1440,402 @@ fn truncated_and_corrupted_input_never_panics() {
         }
     }
     assert!(flipped > 0, "at least one header byte must be load-bearing");
+}
+
+// ---------------------------------------------------------------------------
+// FN3-27 (#73): parser budgets and malformed-input regressions
+// ---------------------------------------------------------------------------
+
+/// The first problem whose kind matches, rendered, or a panic naming the file.
+fn problem_text(error: &ImportError, predicate: impl Fn(&ImportProblemKind) -> bool) -> String {
+    error
+        .problems()
+        .iter()
+        .find(|problem| predicate(&problem.kind))
+        .unwrap_or_else(|| panic!("no matching problem in:\n{error}"))
+        .to_string()
+}
+
+#[test]
+fn a_slice_with_a_short_step_list_is_a_typed_error_not_a_panic() {
+    // A five-operand `Slice` whose `steps` list is shorter than `starts`. The
+    // extent loop indexes `steps[position]`; before FN3-27 this read past the
+    // end of the vector and panicked instead of returning a typed error.
+    let mut model = synthetic_gpt2();
+    model
+        .initializers
+        .push(Tensor::i64("slice_starts", &[2], &[0, 0]));
+    model
+        .initializers
+        .push(Tensor::i64("slice_ends", &[2], &[1, 8]));
+    model
+        .initializers
+        .push(Tensor::i64("slice_axes", &[2], &[0, 1]));
+    model
+        .initializers
+        .push(Tensor::i64("slice_steps", &[1], &[1]));
+    model.nodes.push(Node::new(
+        "short_steps",
+        "Slice",
+        &[
+            "emb2d",
+            "slice_starts",
+            "slice_ends",
+            "slice_axes",
+            "slice_steps",
+        ],
+        &["short_steps_out"],
+        vec![],
+    ));
+    let error = import(&model).unwrap_err();
+    let text = problem_text(&error, |kind| {
+        matches!(kind, ImportProblemKind::ShapeMismatch { .. })
+    });
+    assert!(text.contains("2 starts and 1 steps"), "{text}");
+}
+
+#[test]
+fn a_slice_with_a_long_step_list_is_rejected_too() {
+    let mut model = synthetic_gpt2();
+    model
+        .initializers
+        .push(Tensor::i64("slice_starts", &[1], &[0]));
+    model
+        .initializers
+        .push(Tensor::i64("slice_ends", &[1], &[1]));
+    model
+        .initializers
+        .push(Tensor::i64("slice_axes", &[1], &[0]));
+    model
+        .initializers
+        .push(Tensor::i64("slice_steps", &[3], &[1, 1, 1]));
+    model.nodes.push(Node::new(
+        "long_steps",
+        "Slice",
+        &[
+            "emb2d",
+            "slice_starts",
+            "slice_ends",
+            "slice_axes",
+            "slice_steps",
+        ],
+        &["long_steps_out"],
+        vec![],
+    ));
+    let error = import(&model).unwrap_err();
+    assert!(
+        error.contains(|kind| matches!(kind, ImportProblemKind::ShapeMismatch { .. })),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_transpose_permutation_that_repeats_an_axis_is_rejected() {
+    // `[0, 0, 1, 2]` is in range but is not a permutation. Accepting it would
+    // hand the planner `OpParams.axes = [0, 0, 1, 2]` for a non-transpose.
+    let mut model = synthetic_gpt2();
+    model.nodes.push(Node::new(
+        "bad_perm",
+        "Transpose",
+        &["past_key_values.0.key"],
+        &["bad_perm_out"],
+        vec![Attr::Ints("perm", vec![0, 0, 1, 2])],
+    ));
+    let error = import(&model).unwrap_err();
+    let text = problem_text(&error, |kind| {
+        matches!(kind, ImportProblemKind::ShapeMismatch { .. })
+    });
+    assert!(text.contains("permutation"), "{text}");
+}
+
+#[test]
+fn a_tensor_rank_beyond_the_budget_is_rejected() {
+    // 65 axes on one initializer: one more than the artifact can store, so the
+    // importer refuses it by name instead of building a shape the writer cannot
+    // serialize.
+    let mut model = synthetic_gpt2();
+    let dims = vec![1i64; 65];
+    model
+        .initializers
+        .push(Tensor::f32("too_deep", &dims, &[0.0]));
+    let error = import(&model).unwrap_err();
+    let text = problem_text(&error, |kind| {
+        matches!(
+            kind,
+            ImportProblemKind::Proto(ProtoError::LimitExceeded { .. })
+        )
+    });
+    assert!(text.contains("tensor rank"), "{text}");
+    assert!(text.contains("64"), "{text}");
+}
+
+#[test]
+fn a_declared_shape_rank_beyond_the_budget_is_rejected() {
+    let mut model = synthetic_gpt2();
+    model
+        .outputs
+        .push(ValueInfo::concrete("deep_output", 1, &vec![1i64; 65]));
+    let error = import(&model).unwrap_err();
+    let text = problem_text(&error, |kind| {
+        matches!(
+            kind,
+            ImportProblemKind::Proto(ProtoError::LimitExceeded { .. })
+        )
+    });
+    assert!(text.contains("shape dimensions"), "{text}");
+}
+
+#[test]
+fn an_over_long_name_is_rejected_by_the_reader_budget() {
+    // A 5,000-byte name is inside the file but outside the documented 4 KiB
+    // name budget; the refusal names the field and the limit.
+    let mut model = synthetic_gpt2();
+    let name = "n".repeat(5_000);
+    model.nodes.push(Node::new(
+        &name,
+        "Transpose",
+        &["past_key_values.0.key"],
+        &["deep_name_out"],
+        vec![Attr::Ints("perm", vec![0, 1, 2, 3])],
+    ));
+    let error = import(&model).unwrap_err();
+    let text = problem_text(&error, |kind| {
+        matches!(
+            kind,
+            ImportProblemKind::Proto(ProtoError::LimitExceeded { .. })
+        )
+    });
+    assert!(text.contains("NodeProto.name"), "{text}");
+    assert!(text.contains("4096"), "{text}");
+}
+
+#[test]
+fn too_many_node_operands_are_rejected_by_the_reader_budget() {
+    let mut model = synthetic_gpt2();
+    let inputs = vec!["emb"; 1_025];
+    model.nodes.push(Node::new(
+        "wide",
+        "Concat",
+        &inputs,
+        &["wide_out"],
+        vec![Attr::Int("axis", 0)],
+    ));
+    let error = import(&model).unwrap_err();
+    let text = problem_text(&error, |kind| {
+        matches!(
+            kind,
+            ImportProblemKind::Proto(ProtoError::LimitExceeded { .. })
+        )
+    });
+    assert!(text.contains("node inputs"), "{text}");
+    assert!(text.contains("1024"), "{text}");
+}
+
+#[test]
+fn too_many_attributes_are_rejected_by_the_reader_budget() {
+    let mut model = synthetic_gpt2();
+    let attrs = (0..1_025).map(|_| Attr::Int("axis", 0)).collect();
+    model.nodes.push(Node::new(
+        "many_attrs",
+        "Transpose",
+        &["past_key_values.0.key"],
+        &["many_attrs_out"],
+        attrs,
+    ));
+    let error = import(&model).unwrap_err();
+    let text = problem_text(&error, |kind| {
+        matches!(
+            kind,
+            ImportProblemKind::Proto(ProtoError::LimitExceeded { .. })
+        )
+    });
+    assert!(text.contains("node attributes"), "{text}");
+}
+
+#[test]
+fn a_typed_payload_of_the_wrong_kind_is_named() {
+    // `int32_data` on a FLOAT tensor. Before FN3-27 the field was read as an
+    // empty `float_data` and reported as "missing payload"; now the mismatch is
+    // named, and no `expected`-sized buffer is built first.
+    let mut model = synthetic_gpt2();
+    model
+        .initializers
+        .push(Tensor::f32_with_int32_data("wrong_field", &[2], &[1, 2]));
+    let error = import(&model).unwrap_err();
+    let text = problem_text(&error, |kind| {
+        matches!(kind, ImportProblemKind::TensorDataKind { .. })
+    });
+    assert!(text.contains("wrong_field"), "{text}");
+    assert!(text.contains("int32_data"), "{text}");
+}
+
+#[test]
+fn an_external_data_reference_is_refused_even_when_bytes_are_present() {
+    // Containment is a property of the *reference*, not of whether the payload
+    // happens to be embedded: a tensor that names external storage must be
+    // refused, or a loader would silently ignore the reference and use the
+    // in-file bytes for a tensor the exporter says lives elsewhere.
+    let mut model = synthetic_gpt2();
+    let mut tensor = Tensor::f32("external_but_present", &[1], &[1.0]);
+    tensor.external = true;
+    model.initializers.push(tensor);
+    let error = import(&model).unwrap_err();
+    assert!(
+        error.contains(|kind| matches!(
+            kind,
+            ImportProblemKind::ExternalTensorData { tensor } if tensor == "external_but_present"
+        )),
+        "{error}"
+    );
+
+    let mut model = synthetic_gpt2();
+    let mut tensor = Tensor::f32("location_one", &[1], &[1.0]);
+    tensor.data_location = 1;
+    model.initializers.push(tensor);
+    let error = import(&model).unwrap_err();
+    assert!(
+        error.contains(|kind| matches!(
+            kind,
+            ImportProblemKind::ExternalTensorData { tensor } if tensor == "location_one"
+        )),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_non_finite_layer_norm_scale_is_reported() {
+    // The exporter's LayerNorm is `Add(ReduceMean(square), eps)`. A NaN in the
+    // epsilon slot used to slip past the detector (`NaN > 0.0` is false) and
+    // leave the geometry with no epsilon; it is corrupt input, not a shape to
+    // decline.
+    let mut model = synthetic_gpt2();
+    model
+        .initializers
+        .push(Tensor::f32("eps_nan", &[1], &[f32::NAN]));
+    model.nodes.push(Node::new(
+        "variance",
+        "ReduceMean",
+        &["emb"],
+        &["variance_mean"],
+        vec![Attr::Ints("axes", vec![2]), Attr::Int("keepdims", 1)],
+    ));
+    model.nodes.push(Node::new(
+        "norm_add",
+        "Add",
+        &["variance_mean", "eps_nan"],
+        &["norm_add_out"],
+        vec![],
+    ));
+    let error = import(&model).unwrap_err();
+    let text = problem_text(&error, |kind| {
+        matches!(kind, ImportProblemKind::Architecture { .. })
+    });
+    assert!(text.contains("non-finite LayerNorm scale"), "{text}");
+}
+
+#[test]
+fn a_negative_extent_names_the_tensor() {
+    let mut model = synthetic_gpt2();
+    model
+        .initializers
+        .push(Tensor::f32("negative", &[-1, 4], &[]));
+    let error = import(&model).unwrap_err();
+    let text = problem_text(&error, |kind| {
+        matches!(kind, ImportProblemKind::NegativeExtent { .. })
+    });
+    assert!(text.contains("negative"), "{text}");
+    assert!(text.contains("[-1, 4]"), "{text}");
+}
+
+#[test]
+fn zero_element_weights_are_legal_and_nan_payloads_are_preserved() {
+    let mut model = synthetic_gpt2();
+    // A zero-extent initializer is a legal empty tensor, not a malformed one.
+    model.initializers.push(Tensor::f32("empty", &[0, 4], &[]));
+    // NaN and infinity are payload, not metadata: they must survive bit-exact.
+    let special = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY];
+    model
+        .initializers
+        .push(Tensor::f32("special", &[3], &special));
+    let imported = import(&model).expect("the synthetic decoder still imports");
+    let empty = imported.weights().find("empty").expect("empty weight");
+    assert_eq!(empty.byte_len(), 0);
+    assert_eq!(empty.shape().numel().unwrap(), 0);
+    let special = imported.weights().find("special").expect("special weight");
+    let bits: Vec<u32> = special
+        .bytes()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| u32::from_le_bytes(*word))
+        .collect();
+    assert_eq!(
+        bits,
+        vec![
+            f32::NAN.to_bits(),
+            f32::INFINITY.to_bits(),
+            f32::NEG_INFINITY.to_bits()
+        ]
+    );
+}
+
+#[test]
+fn the_import_budgets_are_public_and_match_the_format() {
+    // Documented budget values, asserted so a change is deliberate. The equality
+    // with the artifact's caps is what makes "imports but cannot be written" a
+    // contradiction rather than a surprise.
+    assert_eq!(fastnn::fn3::import::MAX_MODEL_BYTES, 8 * (1 << 30));
+    assert_eq!(fastnn::fn3::import::MAX_NODES, 1 << 20);
+    assert_eq!(fastnn::fn3::import::MAX_VALUES, 1 << 20);
+    assert_eq!(fastnn::fn3::import::MAX_WEIGHTS, 1 << 20);
+    assert_eq!(fastnn::fn3::import::MAX_RANK, 64);
+    assert_eq!(fastnn::fn3::import::MAX_PARAM_AXES, 1024);
+    assert_eq!(
+        fastnn::fn3::import::MAX_MODEL_BYTES,
+        fastnn::fn3::model::format::MAX_PAYLOAD_BYTES
+    );
+}
+
+#[test]
+fn a_maximum_extent_overflows_a_byte_count_before_allocating() {
+    // `i64::MAX` is a positive ONNX extent, so it is not a `NegativeExtent`;
+    // the byte count is what cannot be represented. The refusal must come from
+    // checked arithmetic, not from `Vec::with_capacity`.
+    let mut model = synthetic_gpt2();
+    model
+        .initializers
+        .push(Tensor::f32("huge", &[i64::MAX], &[]));
+    let error = import(&model).unwrap_err();
+    let text = problem_text(&error, |kind| {
+        matches!(kind, ImportProblemKind::ShapeMismatch { .. })
+    });
+    assert!(text.contains("overflows a byte count"), "{text}");
+}
+
+/// Write the synthetic decoder as a fuzz seed.
+///
+/// The fuzz corpus in `fuzz/corpus/fn3_onnx_import/` needs one *valid* model:
+/// every other seed is a malformed file, so without this the importer's plan
+/// stage (where the short-`steps` panic lived) is only reached by chance. This
+/// is a generator, not a check, so it is ignored by default. Regenerate with:
+///
+/// ```text
+/// cargo test --test fn3_import write_fuzz_seed -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "corpus generator: run explicitly with --ignored"]
+fn write_fuzz_seed_for_the_synthetic_decoder() {
+    let bytes = synthetic_gpt2().encode();
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fuzz/corpus/fn3_onnx_import/synthetic_gpt2.onnx");
+    std::fs::create_dir_all(path.parent().expect("a parent directory"))
+        .expect("create the seed dir");
+    std::fs::write(&path, &bytes).expect("write the seed");
+    println!(
+        "[fn3import][seed] wrote {} bytes to {}",
+        bytes.len(),
+        path.display()
+    );
+    // The seed is only useful if it imports.
+    import_onnx_model(&bytes).expect("the synthetic decoder imports");
 }
