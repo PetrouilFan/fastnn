@@ -94,10 +94,12 @@ exits 0. Hosted packaging CI names an absent path explicitly so `not_run` is
 deterministic. That is a packaging check, not a release gate, and the
 distinction is recorded in `tools/ci/lanes.json`.
 
-This is the `tiny-gpt2-cpu-fp32` Python-wheel case only. A future quantized CLI
-release gate must add a separate required case with its own pinned inputs,
-packaged CLI, source-free replay and quantized acceptance oracle; CPU FP32
-success is not evidence for that case, trained models, or Vulkan.
+This is the `tiny-gpt2-cpu-fp32` Python-wheel case, extended with an INT8-weight
+replay of the same artifact. Both replays are separate source-free processes;
+the INT8 one opts in at load time, so the artifact bytes are identical. A
+quantized CLI release gate would still need its own pinned inputs, a packaged
+CLI, a source-free replay and a quantized acceptance oracle; these CPU cases are
+not evidence for trained models or Vulkan.
 
 ## How to Run a Release
 

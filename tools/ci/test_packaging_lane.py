@@ -159,18 +159,38 @@ class PackagingLaneTests(unittest.TestCase):
                 else:
                     self.assertIsNotNone(prepare_dir)
                     self.assertFalse(prepare_dir.exists())
-                    self.assertEqual(command[1:-2], ["replay", "--expect-artifact-sha256", digest])
+                    weight_int8 = "--weight-int8" in command
+                    expected = ["replay", "--expect-artifact-sha256", digest]
+                    if weight_int8:
+                        expected = ["replay", "--weight-int8", "--expect-artifact-sha256", digest]
+                    self.assertEqual(command[1:-2], expected)
                     self.assertEqual(list(cwd.iterdir()), [cwd / smoke.ARTIFACT])
                     self.assertEqual((cwd / smoke.ARTIFACT).read_bytes(), artifact)
-                    fields = {"artifact_only": True, "artifact_sha256": digest}
+                    if weight_int8:
+                        fields = {
+                            "artifact_only": True,
+                            "artifact_sha256": digest,
+                            "precision": "int8-weights",
+                            "weight_int8": {
+                                "packed_matmuls": 8,
+                                "fp32_matmuls": 5,
+                                "packed_payload": 417_792,
+                                "packed_source": 1_572_864,
+                                "dense_weight": 26_260_132,
+                                "dense_label": "fp32-retained",
+                            },
+                        }
+                    else:
+                        fields = {"artifact_only": True, "artifact_sha256": digest}
                 Path(command[-1]).write_text(json.dumps({"status": "passed", **fields}), encoding="utf-8")
                 return subprocess.CompletedProcess(command, 0)
 
             with patch.object(lane, "_run", side_effect=worker), patch.dict(os.environ, {smoke.MODEL_ENV: str(model)}):
                 evidence = lane._artifact_inference(["worker"], scratch, model, pin)
-            self.assertEqual(phases, ["prepare", "replay"])
+            self.assertEqual(phases, ["prepare", "replay", "replay"])
             self.assertEqual(evidence["model_sha256"], pin.sha256)
             self.assertTrue(evidence["artifact_only"])
+            self.assertEqual(evidence["weight_int8_case"]["precision"], "int8-weights")
             self.assertTrue(model.is_file())
 
     def test_phase_fails_if_success_exit_has_no_report(self):

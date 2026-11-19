@@ -110,7 +110,7 @@ def top_k(logits, k: int, stage: str) -> list[int]:
     return sorted(range(VOCAB), key=lambda i: (-float(values[i]), i))[:k]
 
 
-def replay(fn3, expected_sha256: str) -> dict:
+def replay(fn3, expected_sha256: str, *, weight_int8: bool = False) -> dict:
     artifact = Path(ARTIFACT)
     if set(Path.cwd().iterdir()) != {artifact.absolute()} or artifact.is_symlink():
         raise AssertionError("replay must start in a directory containing only the regular .fnn3 artifact")
@@ -119,18 +119,26 @@ def replay(fn3, expected_sha256: str) -> dict:
     digest = sha256(artifact)
     if digest != expected_sha256:
         raise AssertionError("replay artifact sha256 differs from the prepare phase")
+    precision = "int8-weights" if weight_int8 else "fp32"
     print(
-        f"replay: cwd={Path.cwd()} entries={sorted(path.name for path in Path.cwd().iterdir())}; "
+        f"replay[{precision}]: cwd={Path.cwd()} entries={sorted(path.name for path in Path.cwd().iterdir())}; "
         f"{MODEL_ENV} unset; source=None; device=cpu"
     )
 
     # Intentionally no source= argument, no ONNX input, and no re-prepare.
-    loaded = _load_artifact_only(fn3, artifact)
+    if weight_int8:
+        loaded = fn3.load(artifact, device="cpu", weight_int8=True)
+        if loaded.source is not None:
+            raise AssertionError(f"artifact-only replay loaded with a source attached: {loaded.source!r}")
+    else:
+        loaded = _load_artifact_only(fn3, artifact)
     if loaded.sha256 != digest:
         raise AssertionError("the loaded model does not report the artifact digest that was verified")
     print(f"model: source={loaded.source!r} device={loaded.device.kind} sha256={loaded.sha256}")
     if loaded.device.kind != "cpu" or loaded.geometry.vocab_size != VOCAB:
         raise AssertionError("expected the pinned tiny-GPT-2 model on the explicit CPU device")
+    if loaded.weight_int8 is not weight_int8:
+        raise AssertionError(f"expected weight_int8={weight_int8}, got {loaded.weight_int8}")
     session = loaded.session()
     observed = top_k(session.prefill(PROMPT), 5, "prefill")
     if observed != EXPECTED_TOP5 or session.cache_len != len(PROMPT):
@@ -147,9 +155,10 @@ def replay(fn3, expected_sha256: str) -> dict:
             )
         decoded.append({"token": token, "top1": observed_top1})
     print(f"decode: {decoded}, cache={session.cache_len}")
-    return {
+
+    record = {
         "device": "cpu",
-        "precision": "fp32",
+        "precision": precision,
         "artifact_only": loaded.source is None,
         "artifact_sha256": digest,
         "prompt_tokens": PROMPT,
@@ -157,6 +166,32 @@ def replay(fn3, expected_sha256: str) -> dict:
         "decode": decoded,
         "cache_len": session.cache_len,
     }
+    if weight_int8:
+        report = session.weight_int8_report
+        if report is None:
+            raise AssertionError("an INT8 session completed a step without a report")
+        if (report.packed_matmuls, report.fp32_matmuls) != (8, 5):
+            raise AssertionError(
+                f"INT8 coverage {report.packed_matmuls}/{report.packed_matmuls + report.fp32_matmuls}, "
+                "expected 8/13 on the pinned tiny artifact"
+            )
+        if report.packed_payload != 417_792 or report.dense_label != "fp32-retained":
+            raise AssertionError(
+                f"INT8 byte report payload={report.packed_payload} label={report.dense_label!r}"
+            )
+        print(
+            f"int8: packed={report.packed_matmuls}/{report.packed_matmuls + report.fp32_matmuls} "
+            f"payload={report.packed_payload}B dense={report.dense_weight}B ({report.dense_label})"
+        )
+        record["weight_int8"] = {
+            "packed_matmuls": report.packed_matmuls,
+            "fp32_matmuls": report.fp32_matmuls,
+            "packed_payload": report.packed_payload,
+            "packed_source": report.packed_source,
+            "dense_weight": report.dense_weight,
+            "dense_label": report.dense_label,
+        }
+    return record
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -171,6 +206,11 @@ def main(argv: list[str] | None = None) -> int:
     prepare_parser.add_argument("--report", required=True, type=Path)
     replay_parser = phases.add_parser("replay")
     replay_parser.add_argument("--expect-artifact-sha256", required=True)
+    replay_parser.add_argument(
+        "--weight-int8",
+        action="store_true",
+        help="opt into INT8 weights with FP32 activations; the source artifact is unchanged",
+    )
     replay_parser.add_argument("--report", required=True, type=Path)
     args = parser.parse_args(argv)
 
@@ -181,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.phase == "prepare":
             record = prepare(fn3, args.model, args.expect_model_bytes, args.expect_model_sha256)
         else:
-            record = replay(fn3, args.expect_artifact_sha256)
+            record = replay(fn3, args.expect_artifact_sha256, weight_int8=args.weight_int8)
     except Exception as error:  # phase-specific diagnostic for CI, including native exceptions
         print(f"WHEEL SMOKE {args.phase} FAILED: {error}", file=sys.stderr)
         if args.phase != "import":

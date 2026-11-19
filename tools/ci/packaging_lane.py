@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
-"""Build/install a wheel outside the checkout and replay CPU FP32 inference.
+"""Build/install a wheel outside the checkout and replay CPU inference.
 
 Prepare from the locked tiny-GPT-2 ONNX in one process, then replay prefill and
-cached decode in a fresh process given only the .fnn3. --require-inference is the
-release gate: a missing fixture, failed prepare, or failed replay fails the
-lane. Without it a missing fixture is explicitly not_run. This lane does not
-test quantized inference, the Rust test suites, or GPU support.
+cached decode twice in fresh processes given only the .fnn3: once with FP32
+weights and once with ``--weight-int8``. --require-inference is the release
+gate: a missing fixture, failed prepare, or failed replay fails the lane.
+Without it a missing fixture is explicitly not_run.
+
+PROVES: the wheel builds, installs outside the checkout, imports, prepares the
+pinned tiny model, and replays both precision modes from the artifact alone;
+the INT8 arm packs 8 of 13 MatMuls and matches the pinned logits.
+
+DOES NOT PROVE: GPU support, the Rust test suites, trained-model INT8, long
+context, or anything about latency. The model fixture itself remains readable
+on disk; isolation is by construction, not a sandbox.
 """
 
 from __future__ import annotations
@@ -168,11 +176,17 @@ def _phase(command: list[str], *, phase: str, cwd: Path, env: dict) -> dict:
 
 
 def _artifact_inference(worker: list[str], scratch: Path, model: Path, pin: ModelPin) -> dict:
-    """CPU FP32 wheel case. A future quant CLI case needs its own pin and oracle."""
+    """CPU wheel cases: FP32 and INT8-weight replay of the same prepared artifact.
+
+    Both replays are separate processes started from a directory holding only
+    the artifact. INT8 is a runtime option; the artifact bytes do not change.
+    """
     env = os.environ.copy()
     env.pop(wheel_smoke.MODEL_ENV, None)
     replay_dir = scratch / "replay"
     replay_dir.mkdir()
+    quant_dir = scratch / "replay-int8"
+    quant_dir.mkdir()
     with tempfile.TemporaryDirectory(prefix="prepare-", dir=scratch) as directory:
         prepare_dir = Path(directory)
         staged = prepare_dir / "model.onnx"
@@ -182,18 +196,32 @@ def _artifact_inference(worker: list[str], scratch: Path, model: Path, pin: Mode
              "--expect-model-sha256", pin.sha256],
             phase="prepare", cwd=prepare_dir, env=env,
         )
-        (prepare_dir / wheel_smoke.ARTIFACT).rename(replay_dir / wheel_smoke.ARTIFACT)
+        artifact = prepare_dir / wheel_smoke.ARTIFACT
+        digest = prepared["artifact_sha256"]
+        if wheel_smoke.sha256(artifact) != digest:
+            raise ValueError("the prepared artifact digest changed before replay")
+        shutil.copyfile(artifact, replay_dir / wheel_smoke.ARTIFACT)
+        shutil.copyfile(artifact, quant_dir / wheel_smoke.ARTIFACT)
 
-    # The staged ONNX is gone before launching the second Python process. The
+    # The staged ONNX is gone before launching either replay process. The
     # caller's fixture is never mutated and its path is not passed to replay.
-    digest = prepared["artifact_sha256"]
     replayed = _phase(
         [*worker, "replay", "--expect-artifact-sha256", digest],
         phase="replay", cwd=replay_dir, env=env,
     )
     if replayed.get("artifact_only") is not True or replayed.get("artifact_sha256") != digest:
         raise ValueError("replay did not attest to artifact-only inference with the prepared digest")
-    return {**prepared, **replayed}
+    quantized = _phase(
+        [*worker, "replay", "--weight-int8", "--expect-artifact-sha256", digest],
+        phase="replay-int8", cwd=quant_dir, env=env,
+    )
+    if quantized.get("precision") != "int8-weights" or quantized.get("artifact_only") is not True:
+        raise ValueError("the INT8 replay did not attest to artifact-only INT8-weight inference")
+    if quantized.get("artifact_sha256") != digest:
+        raise ValueError("the INT8 replay ran on a different artifact digest")
+    if not quantized.get("weight_int8"):
+        raise ValueError("the INT8 replay recorded no coverage report")
+    return {**prepared, **replayed, "weight_int8_case": quantized}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -360,10 +388,15 @@ def main(argv: list[str] | None = None) -> int:
             del inference["status"]
             inference_status = "passed"
             inference_fields = inference
-            inference_detail = f"CPU FP32 artifact-only replay top-5 {inference['top5']}"
+            quant = inference["weight_int8_case"]
+            inference_detail = (
+                f"CPU artifact-only replay top-5 {inference['top5']} (FP32) and "
+                f"top-5 {quant['top5']} (INT8 weights, "
+                f"{quant['weight_int8']['packed_matmuls']}/{quant['weight_int8']['packed_matmuls'] + quant['weight_int8']['fp32_matmuls']} packed)"
+            )
         else:
             inference_reason = _absent_model_reason(model)
-            inference_detail = f"CPU FP32 artifact-only replay NOT RUN: {inference_reason}"
+            inference_detail = f"CPU artifact-only replay NOT RUN: {inference_reason}"
 
     # The scratch directory (and any staging model) is gone before a success is
     # recorded, so a passed report can never describe a run that then failed.
