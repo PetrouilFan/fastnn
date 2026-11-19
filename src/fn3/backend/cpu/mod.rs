@@ -55,6 +55,7 @@ use crate::fn3::ops::OpId;
 use crate::fn3::tensor::{TensorMut, TensorView};
 
 pub(crate) mod kernels;
+pub mod quant;
 pub(crate) mod support;
 
 /// Backend name used in every CPU diagnostic.
