@@ -290,6 +290,13 @@ impl OpParams {
 /// own thread. Per-step mutable state belongs to the session, never to the
 /// backend.
 pub trait Backend: Send + Sync + fmt::Debug {
+    /// Concrete Vulkan backend, for session-owned packed projections.
+    #[cfg(feature = "vulkan")]
+    #[doc(hidden)]
+    fn as_vulkan(&self) -> Option<&vulkan::VulkanBackend> {
+        None
+    }
+
     /// Stable backend name used in diagnostics (`"cpu"`, `"vulkan"`).
     fn name(&self) -> &'static str;
 

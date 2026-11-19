@@ -125,12 +125,17 @@ const MAX_SESSION_PLAN_CACHE: usize = 64;
 pub struct SessionOptions {
     /// Keep value slots and the KV cache in host memory.
     pub staged: bool,
+    /// Pack eligible FP32 projection weights as INT8; keep activations FP32.
+    pub weight_int8: bool,
 }
 
 impl SessionOptions {
     /// Host staging, the alpha behaviour.
     pub fn staged() -> SessionOptions {
-        SessionOptions { staged: true }
+        SessionOptions {
+            staged: true,
+            ..Self::default()
+        }
     }
 }
 
@@ -226,6 +231,7 @@ struct StepRuntime<'model> {
     /// Allocate device-resident slots and KV (FN3-26). `false` under
     /// `FN3_VK_STAGED=1` or on a backend with no device allocator.
     resident: bool,
+    weight_int8: Option<super::weight_int8::WeightInt8>,
 }
 
 impl StepRuntime<'_> {
@@ -500,15 +506,25 @@ impl<'model> Session<'model> {
         // persistence, the Vulkan backend uploads each weight exactly once and
         // resolves later binds by handle. The host tensors are untouched, so the
         // CPU/fallback path keeps its bytes.
-        let weights = model.weights();
-        let mut persistent: Vec<&Tensor> = Vec::with_capacity(weights.len());
-        for index in 0..weights.len() {
-            if let Some(tensor) = weights.get(index) {
-                persistent.push(tensor);
-            }
-        }
-        backend.prepare_persistent(&persistent)?;
         let resident = resident_enabled(backend, options);
+        if options.weight_int8 {
+            let supported = backend.device() == DeviceId::Cpu;
+            #[cfg(feature = "vulkan")]
+            let supported = supported || (resident && backend.as_vulkan().is_some());
+            if !supported {
+                return Err(Fn3Error::UnsupportedOp {
+                    op: crate::inference::OpId::MatMul,
+                    backend: backend.name(),
+                    reason: "INT8 weights require CPU or resident Vulkan".into(),
+                });
+            }
+        } else {
+            let weights = model.weights();
+            let persistent: Vec<_> = (0..weights.len())
+                .filter_map(|index| weights.get(index))
+                .collect();
+            backend.prepare_persistent(&persistent)?;
+        }
         let caches = Session::allocate_caches_with(model, Some((backend, resident)))?;
         let capacity =
             (config.capacity_tokens.saturating_mul(2) as usize + 1).min(MAX_SESSION_PLAN_CACHE);
@@ -527,6 +543,7 @@ impl<'model> Session<'model> {
                 last_plan: None,
                 last_dims: None,
                 resident,
+                weight_int8: options.weight_int8.then(Default::default),
             }),
             geometry: Some(SessionGeometry {
                 batch: config.batch,
@@ -572,6 +589,15 @@ impl<'model> Session<'model> {
     /// The immutable model this session runs.
     pub fn model(&self) -> &'model PreparedModel {
         self.model
+    }
+
+    /// Per-MatMul INT8/FP32 coverage and preparation cost of the last completed step.
+    pub fn weight_int8_report(&self) -> Option<&super::WeightInt8Report> {
+        self.runtime
+            .as_ref()?
+            .weight_int8
+            .as_ref()
+            .map(|state| &state.report)
     }
 
     /// The backend every instruction of this session is executed by, when the
@@ -1064,8 +1090,16 @@ impl<'model> Session<'model> {
         // device buffer, so nothing needs to reach the host before the batch
         // completes. A staged step submits per op (it reads each output back),
         // so it does not batch.
+        let quant = runtime
+            .weight_int8
+            .as_mut()
+            .map(|state| state.prepare_step(backend, &plan, self.model.weights(), &slots))
+            .transpose()?;
         backend.begin_step(label, runtime.resident)?;
-        let executed = plan.execute(backend, &mut slots);
+        let executed = match (&runtime.weight_int8, &quant) {
+            (Some(state), Some((routes, _))) => state.execute(backend, &plan, &mut slots, routes),
+            _ => plan.execute(backend, &mut slots),
+        };
         let closed = backend.end_step();
         executed?;
         closed?;
@@ -1105,6 +1139,9 @@ impl<'model> Session<'model> {
         }
         drop(presents);
 
+        if let (Some(state), Some((_, report))) = (&mut runtime.weight_int8, quant) {
+            state.report = report;
+        }
         runtime.recycle(&plan, slots);
         runtime.last_plan = Some(plan.identity());
         runtime.last_dims = Some(dims);

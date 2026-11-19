@@ -23,7 +23,7 @@ use crate::inference::import::{import_onnx_model, ModelImport};
 use crate::inference::model::format::{
     FormatError, FormatErrorKind, PreparedArtifact, PreparedHeader,
 };
-use crate::inference::model::{ModelWeights, Planner, PreparedModel, Session};
+use crate::inference::model::{ModelWeights, Planner, PreparedModel, Session, SessionOptions};
 use crate::inference::{
     DType, DeviceId, Fn3Error, LiveDims, ShapeEnvelope, Symbol, Tensor, TensorMeta,
 };
@@ -67,7 +67,7 @@ pub fn execute_run(args: &RunArgs, out: &mut dyn Write) -> Result<(), CliError> 
     check_sequence(&setup, decode.len() as u64, "decode tokens")?;
     print_header(&setup, out);
 
-    let mut session = open_session(&setup)?;
+    let mut session = open_session(&setup, &args.infer)?;
     print_counters(&setup, &session, args.infer.steps, out);
 
     let mut logits = prefill(&setup, &mut session, &args.infer, out)?;
@@ -95,7 +95,7 @@ pub fn execute_generate(args: &GenerateArgs, out: &mut dyn Write) -> Result<(), 
     check_sequence(&setup, args.max_new_tokens, "generated tokens")?;
     print_header(&setup, out);
 
-    let mut session = open_session(&setup)?;
+    let mut session = open_session(&setup, &args.infer)?;
     print_counters(&setup, &session, args.infer.steps, out);
 
     let mut logits = prefill(&setup, &mut session, &args.infer, out)?;
@@ -247,9 +247,17 @@ fn build_setup(args: &InferArgs) -> Result<Setup, CliError> {
     })
 }
 
-fn open_session<'a>(setup: &'a Setup) -> Result<Session<'a>, CliError> {
-    Session::with_runtime(&setup.model, &setup.import, setup.backend.backend.as_ref())
-        .map_err(|error| failure("Session::with_runtime", error, setup.backend.device))
+fn open_session<'a>(setup: &'a Setup, args: &InferArgs) -> Result<Session<'a>, CliError> {
+    Session::with_runtime_options(
+        &setup.model,
+        &setup.import,
+        setup.backend.backend.as_ref(),
+        SessionOptions {
+            weight_int8: args.weight_int8,
+            ..SessionOptions::default()
+        },
+    )
+    .map_err(|error| failure("Session::with_runtime", error, setup.backend.device))
 }
 
 fn read_artifact(path: &Path) -> Result<(PreparedArtifact, String, u32, u64), CliError> {
@@ -597,6 +605,7 @@ fn prefill(
             session.phase().name()
         );
     }
+    print_quantization(session, args.steps, out);
     Ok(logits)
 }
 
@@ -636,7 +645,37 @@ fn decode_one(
             session.cache_len()
         );
     }
+    print_quantization(session, args.steps, out);
     Ok(logits)
+}
+
+fn print_quantization(session: &Session<'_>, details: bool, out: &mut dyn Write) {
+    if let Some(report) = session.weight_int8_report() {
+        let weights = session.model().weights();
+        let model_bytes: u64 = (0..weights.len())
+            .filter_map(|index| weights.get(index))
+            .map(|tensor| tensor.storage().len() as u64)
+            .sum();
+        let packed = report
+            .routes
+            .iter()
+            .filter(|route| route.fallback.is_none())
+            .count();
+        let _ = writeln!(out, "    weight-int8: packed-matmuls={packed}/{} fp32-matmuls={} packed-payload={}B dense-weight={}B model-weight={model_bytes}B route/pack/upload={}",
+            report.routes.len(), report.routes.len() - packed, report.packed_payload_bytes,
+            report.dense_weight_bytes, milliseconds(report.prepare));
+        if details {
+            for route in &report.routes {
+                let _ = writeln!(
+                    out,
+                    "      matmul[{}] {}: {}",
+                    route.instruction,
+                    route.rhs,
+                    route.fallback.as_deref().unwrap_or("packed")
+                );
+            }
+        }
+    }
 }
 
 fn plan_label(session: &Session<'_>) -> String {

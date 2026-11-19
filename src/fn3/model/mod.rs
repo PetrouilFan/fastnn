@@ -55,6 +55,7 @@ pub mod kv;
 pub mod plan;
 pub mod session;
 pub mod specialize;
+mod weight_int8;
 pub mod weights;
 
 pub use kv::{KvCacheConfig, KvCacheLayout, KvCacheState, MAX_KV_LAYERS};
@@ -64,6 +65,7 @@ pub use plan::{
 };
 pub use session::{Session, SessionOptions, SessionPhase};
 pub use specialize::{PlanAttr, Planner};
+pub use weight_int8::{WeightInt8Report, WeightInt8Route};
 pub use weights::{WeightId, WeightSet, WeightSource, WeightTensor};
 
 use std::sync::Arc;
@@ -73,7 +75,7 @@ use crate::inference::device::DeviceId;
 use crate::inference::error::Fn3Error;
 use crate::inference::ops::OpId;
 use crate::inference::shape::{LiveDims, ShapeEnvelope};
-use crate::inference::tensor::Tensor;
+use crate::inference::tensor::{Tensor, TensorMut, TensorView};
 
 /// One op invocation inside an [`ExecutionPlan`].
 #[derive(Debug, Clone, PartialEq)]
@@ -215,6 +217,21 @@ impl ExecutionPlan {
         backend: &dyn Backend,
         slots: &mut [Option<Tensor>],
     ) -> Result<(), Fn3Error> {
+        self.execute_with(slots, |_, instruction, inputs, outputs| {
+            backend.execute_op(instruction.op, inputs, outputs, &instruction.params)
+        })
+    }
+
+    pub(crate) fn execute_with(
+        &self,
+        slots: &mut [Option<Tensor>],
+        mut dispatch: impl FnMut(
+            usize,
+            &Instruction,
+            &[TensorView<'_>],
+            &mut [TensorMut<'_>],
+        ) -> Result<(), Fn3Error>,
+    ) -> Result<(), Fn3Error> {
         if slots.len() != self.value_count as usize {
             return Err(Fn3Error::CapacityExceeded {
                 what: "execution plan value slots",
@@ -223,17 +240,19 @@ impl ExecutionPlan {
             });
         }
         for (index, instruction) in self.instructions.iter().enumerate() {
-            execute_instruction(backend, slots, instruction)
-                .map_err(|error| context_note(error, instruction.op, index))?;
+            execute_instruction(slots, instruction, |inputs, outputs| {
+                dispatch(index, instruction, inputs, outputs)
+            })
+            .map_err(|error| context_note(error, instruction.op, index))?;
         }
         Ok(())
     }
 }
 
 fn execute_instruction(
-    backend: &dyn Backend,
     slots: &mut [Option<Tensor>],
     instruction: &Instruction,
+    dispatch: impl FnOnce(&[TensorView<'_>], &mut [TensorMut<'_>]) -> Result<(), Fn3Error>,
 ) -> Result<(), Fn3Error> {
     for &slot in &instruction.outputs {
         if slots[slot as usize].is_none() {
@@ -273,12 +292,7 @@ fn execute_instruction(
         for tensor in taken.iter_mut() {
             output_views.push(tensor.as_mut_view()?);
         }
-        backend.execute_op(
-            instruction.op,
-            &input_views,
-            &mut output_views,
-            &instruction.params,
-        )
+        dispatch(&input_views, &mut output_views)
     })();
 
     for (&slot, tensor) in instruction.outputs.iter().zip(taken) {

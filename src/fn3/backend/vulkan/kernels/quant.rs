@@ -94,7 +94,7 @@ use crate::inference::error::{Fn3Error, Fn3Result};
 use crate::inference::ops::OpId;
 use crate::inference::quant::{QuantBlob, QuantTensor, GROUP_SIZE};
 use crate::inference::shape::Shape;
-use crate::inference::tensor::{TensorMut, TensorView};
+use crate::inference::tensor::{TensorMeta, TensorMut, TensorView};
 
 /// Owning issue named in this family's rejection messages.
 pub const KERNEL_OWNER: &str = "FN3-24 (#70)";
@@ -462,6 +462,38 @@ pub struct QuantSections {
 }
 
 impl QuantSections {
+    /// Convert the CPU packer's row-major codes to the aligned device layout.
+    pub(crate) fn from_packed(
+        view: crate::inference::backend::cpu::quant::PackedView<'_>,
+    ) -> Fn3Result<Self> {
+        let k = check_u32("packed K", view.k() as u64)?;
+        let n_rows = check_u32("packed N", view.n_rows() as u64)?;
+        let stride = check_u32("packed row stride", u64::from(k).div_ceil(16) * 16)?;
+        let mut codes = Vec::new();
+        for row in view.codes().chunks_exact(view.row_stride()) {
+            codes.extend_from_slice(&row[..k as usize]);
+            codes.resize(codes.len() + (stride - k) as usize, 0);
+        }
+        Ok(Self {
+            n_rows,
+            k,
+            groups_per_row: check_u32("packed groups", view.groups_per_row() as u64)?,
+            row_stride_bytes: stride,
+            codes,
+            scales: view.scales().to_vec(),
+            zeros: view.zero_points().to_vec(),
+        })
+    }
+
+    pub(crate) fn fits(&self, backend: &VulkanBackend) -> bool {
+        [
+            self.codes_bytes(),
+            self.scales_bytes().next_multiple_of(4),
+            self.zeros_bytes().next_multiple_of(4),
+        ]
+        .into_iter()
+        .all(|n| backend.capabilities().check_buffer(n).is_ok() && n / 4 <= u64::from(u32::MAX))
+    }
     /// Packed weight rows (N).
     pub fn n_rows(&self) -> u32 {
         self.n_rows
@@ -542,6 +574,34 @@ pub struct PackedProjection {
 }
 
 impl PackedProjection {
+    pub(crate) fn admits_session(
+        &self,
+        backend: &VulkanBackend,
+        activation: &TensorMeta,
+        out: &TensorMeta,
+    ) -> bool {
+        let shape = activation.shape();
+        if shape.rank() < 2
+            || !leading_extents_are_one(shape)
+            || super::super::resident::require_whole_meta(activation, "packed activation").is_err()
+            || super::super::resident::require_whole_meta(out, "packed output").is_err()
+        {
+            return false;
+        }
+        let m = shape.dims()[shape.rank() - 2];
+        let limits = backend
+            .vulkan_device()
+            .limits()
+            .max_compute_work_group_count;
+        m.div_ceil(u64::from(ROWS_PER_WORKGROUP)) <= u64::from(limits[1])
+            && self.n_rows.div_ceil(COLUMNS_PER_WORKGROUP) <= limits[0]
+            && [activation, out].into_iter().all(|meta| {
+                meta.byte_len().is_ok_and(|bytes| {
+                    bytes / 4 <= u32::MAX as usize
+                        && backend.capabilities().check_buffer(bytes as u64).is_ok()
+                })
+            })
+    }
     /// The name this projection was prepared under.
     pub fn name(&self) -> &str {
         &self.name
