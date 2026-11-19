@@ -701,3 +701,38 @@ that softmax removes. Proposed scale-relative replacement is documented but
 decision before the stable gate.
 
 Resident-trained fix in progress on `fn3/resident-trained` from `6e1d564`.
+
+## Release candidate (3.0.0)
+
+The candidate is the tip of `rewrite/fastnn-3`; every commit below descends from
+the alpha review commit `672cec9` and the audited wave report `7836a65`.
+
+| Commit | Content |
+|---|---|
+| `0bcf2ef` | trained GPT-2 FP32 aggregate bounds: both owner-approved f64 rules enforced on CPU and resident Vulkan for prefill, decode 1 and decode 2; the legacy 5e-5 mean bound stays visible as a diagnostic |
+| `95a44e9` | session-only identity `Reshape` alias, declared-output validation, typed `Gather` bounds error |
+| `9c7a281` | canonical `fastnn::inference`, `fastnn.inference`, `fastnn-infer`; artifact format and digest domain unchanged |
+| `2022de4` | seven-store `3.0.0` metadata alignment |
+| `cf4ecf6` | allocation diagnostics report the failed request size |
+| `e0557f2` | 2.x audit: `fastnn-runtime` retired, everything else classified with its callers, `docs/internals/legacy-2x.md` and `docs/guides/migrate-from-2x.md` |
+| `eac7bc6` | strict artifact-only wheel replay: prepare, delete the source, replay in a separate process with no `--model` |
+| `17eee5f` | opt-in INT8 weights with FP32 activations, artifact-only, CPU and resident Vulkan, closed fallback enum |
+| `14260bf` | the same opt-in through `fastnn.inference.load(..., weight_int8=True)` and `session.weight_int8_report` |
+| `fec9826` | #74 measured support matrix: 64/256/1024-token trained FP32 and INT8, staged control, queue and memory limits |
+| `d9ec36f` | the `3.0.0` changelog section as the release record |
+| `0818348`, `6c1504d`, `59db947`, `a0c5f49`, `b623213` | Python report label parity, automated trained INT8 resident gate, FP32 and INT8 wheel replays, ownership guides, tensor-device diagnostics |
+
+Gates at `b623213` are recorded in `docs/reports/fn3-3.0.0-release.md` §9–§11:
+fmt, 705/768/771 library tests, fourteen `fn3_*` binaries, clippy in three
+feature sets, the Python lane (384 passed), eleven physical-Vulkan binaries with
+validation 0/0, the artifact-only FP32/INT8 CLI matrix on CPU and the GTX 1080
+Ti, and the strict packaging lane (wheel
+`34951bba41f3d5b53a50aed63a72eeeb6f6532564af3a2962ec40b6a678def11`, two
+source-free replays). Hosted CI is dispatched on `ci.yml` for
+`rewrite/fastnn-3`; the run is recorded below once it completes.
+
+Deferred and recorded in the release report, not passed: unknown fence
+completion can release resources still in use (owner deferred), concurrent
+prepare races with an executing step, `end_step` reports `Ok(0)` for a discarded
+batch, `Submission::Drop` re-waits a poisoned device, and `PersistentKey` is an
+allocation address held alive by a pinned `Storage`.
