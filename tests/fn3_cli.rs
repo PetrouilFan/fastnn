@@ -103,9 +103,21 @@ fn usage_errors_are_usage_exit_codes_with_a_next_step() {
     assert!(output.stderr.contains("next:"), "{}", output.stderr);
     assert!(output.stdout.is_empty());
 
+    // `--onnx` is optional now; the missing required flag is the prompt.
     let output = cli(&["run", "--model", "x"]);
     assert_eq!(output.code, EXIT_USAGE);
+    assert!(output.stderr.contains("--tokens"), "{}", output.stderr);
+
+    // `--verify-source` is an explicit request for the source check, so asking
+    // for it without a source is a usage error, not a silent no-op.
+    let output = cli(&["run", "--model", "x", "--verify-source", "--tokens", "1"]);
+    assert_eq!(output.code, EXIT_USAGE);
     assert!(output.stderr.contains("--onnx"), "{}", output.stderr);
+    assert!(
+        output.stderr.contains("--verify-source"),
+        "{}",
+        output.stderr
+    );
 }
 
 #[test]
@@ -373,6 +385,201 @@ fn the_pinned_model_prepares_inspects_runs_and_generates_on_cpu() {
         output.stderr
     );
     assert!(output.stderr.contains("--max-seq"), "{}", output.stderr);
+
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// Token IDs of the top-k line, in order.
+fn top_ids(stdout: &str, heading: &str, k: usize) -> Vec<usize> {
+    let line = stdout
+        .lines()
+        .find(|line| line.trim_start().starts_with(heading))
+        .unwrap_or_else(|| panic!("no `{heading}` line in:\n{stdout}"));
+    let rest = line
+        .split_once(':')
+        .unwrap_or_else(|| panic!("no colon in `{line}`"))
+        .1;
+    let ids: Vec<usize> = rest
+        .split(',')
+        .map(|item| {
+            item.split_whitespace()
+                .next()
+                .and_then(|id| id.parse().ok())
+                .unwrap_or_else(|| panic!("no token ID in `{item}`"))
+        })
+        .collect();
+    assert_eq!(ids.len(), k, "`{line}` does not hold {k} tokens");
+    ids
+}
+
+#[test]
+fn the_artifact_runs_alone_with_its_onnx_moved_away() {
+    let Some(onnx) = pinned() else {
+        return;
+    };
+    let directory = scratch("artifact-only");
+    // Prepare from a copy, so moving it away does not disturb the pinned model
+    // the other tests and workers read.
+    let source = directory.join("source.onnx");
+    std::fs::copy(&onnx, &source).expect("copy the pinned ONNX");
+    let artifact = directory.join("tiny-gpt2.fnn3");
+
+    let output = cli(&[
+        "prepare",
+        "--onnx",
+        path_text(&source),
+        "--out",
+        path_text(&artifact),
+    ]);
+    assert_eq!(output.code, EXIT_OK, "{}", output.stderr);
+    assert!(artifact.is_file());
+
+    // The two-file path first, for the reference answer.
+    let two_file = cli(&[
+        "run",
+        "--model",
+        path_text(&artifact),
+        "--onnx",
+        path_text(&source),
+        "--tokens",
+        PROMPT_10,
+        "--device",
+        "cpu",
+        "--top-k",
+        "5",
+    ]);
+    assert_eq!(two_file.code, EXIT_OK, "{}", two_file.stderr);
+    let reference = top_ids(&two_file.stdout, "top-5:", 5);
+    assert_eq!(reference, vec![46_737, 28_597, 16_571, 7_868, 13]);
+
+    // Now the source is gone: renamed out of the path `prepare` used.
+    let moved = directory.join("source.onnx.moved-away");
+    std::fs::rename(&source, &moved).expect("move the ONNX away");
+    assert!(!source.exists(), "the source ONNX is still at its path");
+
+    let artifact_only = cli(&[
+        "run",
+        "--model",
+        path_text(&artifact),
+        "--tokens",
+        PROMPT_10,
+        "--device",
+        "cpu",
+        "--top-k",
+        "5",
+    ]);
+    assert_eq!(artifact_only.code, EXIT_OK, "{}", artifact_only.stderr);
+    assert!(
+        artifact_only.stdout.contains("source: none (artifact-only"),
+        "{}",
+        artifact_only.stdout
+    );
+    assert!(
+        !artifact_only.stdout.contains("source.onnx"),
+        "the artifact-only run still names an ONNX path:\n{}",
+        artifact_only.stdout
+    );
+    assert_eq!(
+        top_ids(&artifact_only.stdout, "top-5:", 5),
+        reference,
+        "artifact-only top-5 differs from the two-file path:\n{}",
+        artifact_only.stdout
+    );
+    assert!(
+        artifact_only.stdout.contains("argmax: 46737"),
+        "{}",
+        artifact_only.stdout
+    );
+
+    // Generation is artifact-only too, and reproduces the documented IDs.
+    let generated = cli(&[
+        "generate",
+        "--model",
+        path_text(&artifact),
+        "--tokens",
+        PROMPT_10,
+        "--max-new-tokens",
+        "2",
+        "--device",
+        "cpu",
+        "--top-k",
+        "1",
+    ]);
+    assert_eq!(generated.code, EXIT_OK, "{}", generated.stderr);
+    assert!(
+        generated
+            .stdout
+            .contains("generated token IDs: [46737, 46737]"),
+        "{}",
+        generated.stdout
+    );
+
+    // `--verify-source` with `--onnx` still proves the pair; the moved file is
+    // gone, so this is the one case where the check must fail loudly.
+    let missing = cli(&[
+        "run",
+        "--model",
+        path_text(&artifact),
+        "--onnx",
+        path_text(&source),
+        "--verify-source",
+        "--tokens",
+        PROMPT_10,
+    ]);
+    assert_eq!(missing.code, EXIT_MODEL, "{}", missing.stderr);
+    assert!(
+        missing.stderr.contains("cannot read ONNX model"),
+        "{}",
+        missing.stderr
+    );
+
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn a_truncated_artifact_fails_as_a_model_error_with_no_onnx_present() {
+    let Some(onnx) = pinned() else {
+        return;
+    };
+    let directory = scratch("artifact-only-truncated");
+    let source = directory.join("source.onnx");
+    std::fs::copy(&onnx, &source).expect("copy the pinned ONNX");
+    let artifact = directory.join("tiny-gpt2.fnn3");
+    let output = cli(&[
+        "prepare",
+        "--onnx",
+        path_text(&source),
+        "--out",
+        path_text(&artifact),
+    ]);
+    assert_eq!(output.code, EXIT_OK, "{}", output.stderr);
+
+    let bytes = std::fs::read(&artifact).expect("read the artifact");
+    let truncated = directory.join("truncated.fnn3");
+    std::fs::write(&truncated, &bytes[..100_000]).expect("write a truncated artifact");
+    std::fs::remove_file(&source).expect("remove the source ONNX");
+    assert!(!source.exists());
+
+    let output = cli(&[
+        "run",
+        "--model",
+        path_text(&truncated),
+        "--tokens",
+        PROMPT_10,
+    ]);
+    assert_eq!(output.code, EXIT_MODEL, "{}", output.stderr);
+    assert!(
+        output.stderr.contains("is not a usable prepared model"),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        output.stderr.contains("truncated") || output.stderr.contains("declares"),
+        "{}",
+        output.stderr
+    );
+    assert!(output.stderr.contains("next:"), "{}", output.stderr);
+    assert!(output.stdout.is_empty(), "{}", output.stdout);
 
     let _ = std::fs::remove_dir_all(&directory);
 }

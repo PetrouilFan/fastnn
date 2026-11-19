@@ -10,10 +10,12 @@
 //! ([`ValueInfo`], [`GraphNode`], [`ValueId`]); it mirrors `GraphIr`'s accessors
 //! one for one so a planner written against `GraphIr` reads the same way here.
 //!
-//! The follow-up that collapses this duplication is a validated
+//! The follow-up this file looked forward to — a validated
 //! `GraphIr::from_parts(values, nodes, inputs, outputs)` on the importer's side
-//! (reported in `docs/reports/fn3-09-model-format.md`); until then, converting
-//! back is [`PreparedGraph::parts`].
+//! — exists, so converting back is [`PreparedGraph::into_graph_ir`]. The mirror
+//! is retained because it is the format's own read representation and because
+//! [`PreparedGraph::check`] states the invariants the importer also enforces;
+//! [`PreparedArtifact::into_model_import`] is the one call a consumer needs.
 //!
 //! # Invariants (enforced by [`PreparedGraph::new`])
 //!
@@ -136,10 +138,21 @@ impl PreparedGraph {
 
     /// Consume into the four parts a `GraphIr` is built from.
     ///
-    /// This is the conversion seam for the follow-up
-    /// `GraphIr::from_parts(values, nodes, inputs, outputs)`.
+    /// [`PreparedGraph::into_graph_ir`] is the usual caller; these parts are
+    /// also what a caller that wants the vectors themselves takes.
     pub fn parts(self) -> (Vec<ValueInfo>, Vec<GraphNode>, Vec<ValueId>, Vec<ValueId>) {
         (self.values, self.nodes, self.inputs, self.outputs)
+    }
+
+    /// Rebuild the importer's graph container, with no ONNX file present.
+    ///
+    /// The mirror is kept because it is the format's own read representation
+    /// and [`PreparedGraph::check`] states the invariants the importer also
+    /// enforces. A graph that reached a file and came back is therefore safe to
+    /// hand to the planner and the session in the importer's own type.
+    pub fn into_graph_ir(self) -> GraphIr {
+        let (values, nodes, inputs, outputs) = self.parts();
+        GraphIr::from_parts(values, nodes, inputs, outputs)
     }
 
     /// Check the invariants documented at module level.

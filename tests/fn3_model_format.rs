@@ -494,6 +494,123 @@ fn pinned_model_round_trips_with_exact_bytes_and_structure() {
 }
 
 #[test]
+fn an_artifact_alone_plans_and_runs_with_no_onnx_source() {
+    let Some(imported) = pinned_import() else {
+        return;
+    };
+
+    // The two-file path, as a reference: plan and prefill from the import.
+    let reference = prefill_logits(&imported);
+    let expected_summary = imported.summary().clone();
+
+    // Prepare, encode, and then drop the import and the artifact object: from
+    // here on the only thing that exists is a file.
+    let artifact = PreparedArtifact::from_import(&imported, pinned_envelope())
+        .expect("the pinned import is a consistent artifact");
+    let bytes = artifact.to_bytes().expect("the artifact encodes");
+    drop(artifact);
+    drop(imported);
+
+    let directory =
+        std::env::temp_dir().join(format!("fastnn-fn3-artifact-only-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("scratch directory");
+    let path = directory.join("tiny-gpt2.fnn3");
+    std::fs::write(&path, &bytes).expect("write the artifact");
+    drop(bytes);
+
+    // `read_file` is the only input. No ONNX path is passed, stored or read.
+    let loaded = PreparedArtifact::read_file(&path).expect("the artifact reads back");
+    let metadata = loaded.metadata().clone();
+    let weight_bytes = loaded.weight_bytes();
+
+    // Both conversion forms agree, so a caller holding `&PreparedArtifact`
+    // gets the same input as one that can consume it.
+    assert_eq!(loaded.to_model_import(), loaded.clone().into_model_import());
+    let graph = loaded.into_model_import();
+
+    // The artifact rebuilt the importer's exact input: its own metadata
+    // round-trips (a verifier can check this), and the summary is reproduced
+    // from the graph and weight tables rather than degraded.
+    assert_eq!(ArtifactMetadata::from_import(&graph), metadata);
+    assert_eq!(*graph.summary(), expected_summary);
+    assert_eq!(graph.summary().onnx_nodes, 257);
+    assert_eq!(graph.summary().fn3_nodes, 265);
+    assert_eq!(graph.summary().weight_bytes, weight_bytes);
+    assert_eq!(graph.weights().len(), 50);
+
+    let artifact_only = prefill_logits(&graph);
+    assert_eq!(
+        artifact_only.len(),
+        reference.len(),
+        "the logits shape changed between the two paths"
+    );
+    for (index, (left, right)) in artifact_only.iter().zip(reference.iter()).enumerate() {
+        assert_eq!(
+            left.to_bits(),
+            right.to_bits(),
+            "logit {index} differs: {left} from the artifact alone, {right} with the ONNX"
+        );
+    }
+
+    // The documented top-5 for the 10-token prompt, from the artifact alone.
+    let top5 = top_k(&artifact_only, 5);
+    assert_eq!(top5, vec![46_737, 28_597, 16_571, 7_868, 13]);
+
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// The pinned 10-token prompt used by the CLI, the Python tests and the docs.
+const PROMPT_10: [u32; 10] = [464, 2068, 7586, 21831, 18045, 625, 262, 16931, 3290, 13];
+
+/// Plan, run and prefill `prompt` through one CPU session over `import`.
+fn prefill_logits(import: &ModelImport) -> Vec<f32> {
+    use fastnn::fn3::model::Planner;
+    use fastnn::fn3::{CpuBackend, LiveDims};
+
+    let backend = CpuBackend::new();
+    let envelope = pinned_envelope();
+    let geometry = import.geometry();
+    let dims = LiveDims::new(
+        1,
+        4,
+        0,
+        u64::from(geometry.query_heads),
+        u64::from(geometry.kv_heads),
+        u64::from(geometry.head_dim),
+    )
+    .expect("head geometry");
+    let plan = Planner::new(import, &backend)
+        .plan(&envelope, dims)
+        .expect("the envelope and dims are admissible")
+        .execution()
+        .clone();
+    let config = geometry.kv_cache_config(envelope.get(Symbol::Total).max(), 1);
+    let weights = import.to_model_weights().expect("host weights");
+    let model = PreparedModel::new(plan, weights, DeviceId::Cpu, envelope, Some(config))
+        .expect("the model is consistent");
+    let mut session =
+        Session::with_runtime(&model, import, &backend).expect("the session opens on cpu");
+    let logits = session.prefill(&PROMPT_10).expect("prefill runs");
+    logits
+        .as_f32_slice()
+        .expect("cpu logits are host memory")
+        .to_vec()
+}
+
+/// Token IDs of the `k` highest logits, ties broken by the lower ID.
+fn top_k(logits: &[f32], k: usize) -> Vec<usize> {
+    let mut ranked: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    ranked[..k].iter().map(|(index, _)| *index).collect()
+}
+
+#[test]
 fn two_independent_imports_write_identical_artifacts() {
     let Some(first_import) = pinned_import() else {
         return;

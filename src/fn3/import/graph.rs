@@ -380,6 +380,29 @@ impl GraphIr {
     pub fn value_count(&self) -> usize {
         self.values.len()
     }
+
+    /// Build a graph from parts a caller already validated.
+    ///
+    /// The importer builds a `GraphIr` while decoding an ONNX file. A reader of
+    /// a serialized model ([`crate::fn3::model::format::PreparedGraph`], which
+    /// validates the same invariants) needs the identical container without an
+    /// ONNX file present, and private fields make that otherwise impossible.
+    /// This is the additive seam those callers use; it performs no validation,
+    /// so the caller owns the invariants listed on
+    /// [`crate::fn3::model::format::PreparedGraph`].
+    pub fn from_parts(
+        values: Vec<ValueInfo>,
+        nodes: Vec<GraphNode>,
+        inputs: Vec<ValueId>,
+        outputs: Vec<ValueId>,
+    ) -> GraphIr {
+        GraphIr {
+            values,
+            nodes,
+            inputs,
+            outputs,
+        }
+    }
 }
 
 /// The `OperatorSetIdProto` the model declares for the default domain.
@@ -578,6 +601,26 @@ impl ImportSummary {
     }
 }
 
+/// The provenance an assembled model carries.
+///
+/// [`ModelImport`] normally gets these five values from the ONNX header. A
+/// caller that rebuilds a model from a serialized artifact (where the metadata
+/// is a section of the file) has them already and supplies them here instead of
+/// re-reading the source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelProvenance {
+    /// ONNX IR version the graph was imported from.
+    pub ir_version: i64,
+    /// Opset import for the default domain.
+    pub opset: OpsetImport,
+    /// Exporter name.
+    pub producer: String,
+    /// Exporter version.
+    pub producer_version: String,
+    /// Source graph name.
+    pub graph_name: String,
+}
+
 /// A validated ONNX model, ready for a planner.
 ///
 /// Immutable after construction. Nothing here borrows the model file: names,
@@ -597,6 +640,40 @@ pub struct ModelImport {
 }
 
 impl ModelImport {
+    /// Assemble a model from parts that were not decoded from an ONNX file.
+    ///
+    /// The artifact reader is the caller: it has already validated the graph,
+    /// the weights and the geometry (see
+    /// [`crate::fn3::model::format::PreparedArtifact::validate`]), and the
+    /// metadata section supplies [`ModelProvenance`]. Nothing here re-detects
+    /// the architecture, so a caller that has no validated geometry must use
+    /// the ONNX path instead.
+    ///
+    /// `summary` is recomputed from `graph` and `weights`. Every field is
+    /// derivable because a graph node keeps its ONNX provenance and a weight
+    /// keeps its source, so an artifact built from an import reproduces that
+    /// import's summary exactly rather than carrying a partial one.
+    pub fn from_parts(
+        graph: GraphIr,
+        weights: WeightSet,
+        geometry: DecoderGeometry,
+        provenance: ModelProvenance,
+    ) -> ModelImport {
+        let summary = summarize(&graph, &weights);
+        ModelImport {
+            ir_version: provenance.ir_version,
+            producer: provenance.producer,
+            producer_version: provenance.producer_version,
+            opset: provenance.opset,
+            graph_name: provenance.graph_name,
+            graph,
+            weights,
+            geometry,
+            summary,
+            warnings: Vec::new(),
+        }
+    }
+
     /// ONNX IR version of the file.
     pub fn ir_version(&self) -> i64 {
         self.ir_version

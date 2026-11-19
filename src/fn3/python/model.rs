@@ -5,7 +5,7 @@
 //! ```text
 //! prepare(onnx, artifact)   ONNX ──► versioned artifact        (writes a file)
 //! inspect(artifact)         bytes ──► geometry/size/checksum   (no device)
-//! load(artifact, source=…)  artifact ► Model ──► Session        (needs a device)
+//! load(artifact, source=None) artifact ► Model ──► Session     (needs a device)
 //! ```
 //!
 //! `prepare` is idempotent in the useful sense: if the destination already
@@ -14,19 +14,17 @@
 //! already there and valid" are therefore different, observable outcomes
 //! ([`PyPrepareReport::wrote`]).
 //!
-//! # Why `load` also takes the ONNX source
+//! # The artifact is the input
 //!
-//! `Session::with_runtime` borrows a [`ModelImport`], because the planner
-//! consumes the importer's graph. At this base a loaded
-//! [`PreparedArtifact`] cannot produce one: `GraphIr` has no public constructor
-//! and the format's `PreparedGraph` is a mirror of it (see
-//! `docs/reports/fn3-09-model-format.md` §12-13). The artifact is still the
-//! authority — its envelope, geometry and **weights** are what run — and
-//! [`check_source_agrees`] refuses a source that disagrees with it in any value,
-//! node, weight or geometry. Removing the `source` argument is one upstream
-//! addition (`GraphIr::from_parts` plus an import-side constructor), owned by
-//! #62; it is not something this binding may work around by planning over a
-//! different graph from the one in the file.
+//! `load` reads one file. The prepared artifact carries the graph, the weights,
+//! the geometry and the declared window, so the planner and the session are fed
+//! from it and no ONNX file is needed. `source=<ONNX path>` is optional and
+//! only adds the proof that the two files still describe the same model:
+//! [`check_source_agrees`] compares provenance, geometry, every value, every
+//! node and every weight byte before anything executes, and a disagreement is
+//! refused. The artifact's bytes are what run either way — with no source they
+//! are used directly, with a source they are first proved byte-identical — so
+//! the two paths cannot drift numerically.
 //!
 //! # Device selection
 //!
@@ -606,7 +604,8 @@ impl PyModel {
         &self.path
     }
 
-    /// Path of the ONNX source whose graph the planner consumes.
+    /// Path of the ONNX source this model was verified against, when one was
+    /// given; `None` for an artifact-only load.
     #[getter]
     fn source(&self) -> Option<&str> {
         self.source.as_deref()
@@ -1048,10 +1047,10 @@ fn weight_difference(index: usize, left: &WeightTensor, right: &WeightTensor) ->
 
 /// Check that an ONNX source describes the same model as the artifact.
 ///
-/// The artifact is the authority for weights, geometry and bounds; the source
-/// provides the planner input. A source that disagrees in *any* of those is a
-/// mistake worth refusing rather than running a model that is half one file and
-/// half another.
+/// This is the optional `source=` proof, not the input path: the artifact alone
+/// plans and runs. A source that disagrees in provenance, geometry, values,
+/// nodes or weight bytes is a mistake worth refusing rather than accepting as a
+/// verification of a model that is half one file and half another.
 fn check_source_agrees(
     py: Python<'_>,
     artifact: &PreparedArtifact,
@@ -1243,27 +1242,28 @@ pub fn load(
         .map_err(|error| errors::from_format(py, error))?;
     drop(bytes);
 
-    // 3. The planner input. See the module docs for why this is still needed.
-    let source = match source {
-        Some(source) => source,
-        None => {
-            return Err(errors::model_error(
-                py,
-                format!(
-                    "load({artifact:?}) needs source=<ONNX path>: a prepared artifact does not \
-                     yet carry the graph in a form the planner can consume (#62 must add \
-                     GraphIr::from_parts), so the session planner is fed from the ONNX source \
-                     while the artifact supplies the weights, geometry and window that run. \
-                     The source is validated against the artifact before anything executes."
-                ),
-            ))
+    // 3. The planner and session input. The artifact is the input: with no
+    // `source`, the graph, weights, geometry and window it carries are exactly
+    // what plans and runs. A `source` only adds the verification that the two
+    // files still describe the same model.
+    let geometry = parsed.geometry().clone();
+    let envelope = parsed.envelope();
+    let provenance = Py::new(py, PyMetadata::of(parsed.metadata()))?;
+    let weight_bytes = parsed.weight_bytes();
+    let weight_count = parsed.weights().len();
+    let value_count = parsed.graph().value_count();
+    let node_count = parsed.graph().nodes().len();
+
+    let (import, source) = match source {
+        Some(source) => {
+            let import = import_onnx(py, &source)?;
+            check_source_agrees(py, &parsed, &import)?;
+            (import, Some(source))
         }
+        None => (parsed.into_model_import(), None),
     };
-    let import = import_onnx(py, &source)?;
-    check_source_agrees(py, &parsed, &import)?;
 
     // 4. Capacity, the one session-scoped bound.
-    let envelope = parsed.envelope();
     let capacity = capacity.unwrap_or(envelope.get(Symbol::Total).max());
     if capacity == 0 {
         return Err(errors::capacity(
@@ -1278,7 +1278,6 @@ pub fn load(
             envelope.get(Symbol::Total).max(),
         ));
     }
-    let geometry = parsed.geometry().clone();
     let kv_config = geometry.kv_cache_config(capacity, 1);
     kv_config
         .validate(&envelope)
@@ -1302,8 +1301,11 @@ pub fn load(
         .map_err(|error| errors::from_core(py, error))?
         .execution()
         .clone();
+    // Weights come from the import that will run the plan. Without a source
+    // that import *is* the artifact; with one, `check_source_agrees` proved
+    // every weight byte identical, so the artifact is still what executes.
     let weights = py
-        .detach(|| parsed.to_model_weights())
+        .detach(|| import_arc.to_model_weights())
         .map_err(|error| errors::from_core(py, error))?;
     let weights = retag_weights(weights, device).map_err(|error| errors::from_core(py, error))?;
     let model = PreparedModel::new(plan, weights, device, envelope, Some(kv_config))
@@ -1317,16 +1319,16 @@ pub fn load(
         capacity,
         instance: MODEL_IDENTITY.fetch_add(1, Ordering::Relaxed),
         path: artifact.to_string(),
-        source: Some(source),
+        source,
         sha256: digest,
         size_bytes,
         geometry: Py::new(py, PyGeometry::of(&geometry))?,
         envelope: Py::new(py, PyEnvelope::of(&envelope))?,
-        metadata: Py::new(py, PyMetadata::of(parsed.metadata()))?,
-        weight_bytes: parsed.weight_bytes(),
-        weight_count: parsed.weights().len(),
-        value_count: parsed.graph().value_count(),
-        node_count: parsed.graph().nodes().len(),
+        metadata: provenance,
+        weight_bytes,
+        weight_count,
+        value_count,
+        node_count,
         kv_bytes: kv_bytes_for(&geometry, capacity),
     };
     Py::new(py, report)

@@ -1,8 +1,10 @@
 # FastNN 3.0 inference quickstart
 
-**Alpha.** One path: prepare a `.fnn3` artifact from ONNX, inspect it, then run
-token IDs on an explicit device. No network is used after the model files are on
-disk.
+**Alpha.** One path: prepare a `.fnn3` artifact from ONNX once, then run token
+IDs from that artifact alone on an explicit device. The artifact carries the
+graph, the weights, the geometry and the declared window, so a deployment never
+needs the ONNX it was prepared from. No network is used after the model file is
+on disk.
 
 The CLI takes **token IDs**, not text. This alpha does not ship a tokenizer and
 does not approximate one; see [Token IDs](#token-ids) at the end.
@@ -47,6 +49,8 @@ MODEL=/tmp/opencode/parity-fresh/models/tiny-gpt2/onnx/model.onnx
 ```
 
 ## 2. Prepare
+
+`prepare` is the only command that reads ONNX. It runs once per model.
 
 ```bash
 mkdir -p /tmp/opencode/fn3-cli/release
@@ -115,7 +119,68 @@ fn3-infer inspect
     payload checksum: verified (crc32 matches)
 ```
 
-## 4. Run token IDs on the CPU
+## 4. Verify against the source (optional)
+
+The artifact is self-sufficient. `--onnx` is an **optional** verification: when
+you pass it, `run`/`generate` re-read that ONNX and refuse to continue unless
+its provenance, geometry, every value, every operation and every weight byte
+still match the artifact. `--verify-source` states that intent explicitly and
+requires `--onnx`.
+
+```bash
+./target/release/fn3-infer run \
+  --model /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3 \
+  --onnx "$MODEL" \
+  --verify-source \
+  --tokens 464,2068,7586,21831,18045,625,262,16931,3290,13 \
+  --device cpu \
+  --top-k 5
+```
+
+```text
+fn3-infer inference
+  artifact: /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3
+    bytes:  27,879,928  sha256: 33cf409006d9d9538712486d45e9d3cdf1e3cf9176fdfe3c9af477630ca30122
+    payload crc32: 0xe02e9330
+  source: /tmp/opencode/parity-fresh/models/tiny-gpt2/onnx/model.onnx (sha256 e18370ba6247c564a4aef7b6a83aa86d5d036f47a73c0935e51bbcfe178141a1, verified against the artifact: metadata, geometry and 50 weight payloads match)
+  device: requested cpu, resolved cpu, backend cpu (reference implementation)
+  envelope: batch 1..=1 seq 1..=128 past 0..=1023 total 1..=1024
+  kv: capacity=1024 tokens, 2 layers x 2 KV heads x 64 head_dim = 2,097,152 bytes
+  prompt: 10 token IDs [464, 2068, 7586, 21831, 18045, 625, 262, 16931, 3290, 13]
+  input: token IDs (this alpha has no text tokenizer)
+  session: phase=empty cache=0 kv_bytes=2,097,152
+  execution: cpu on cpu
+  prefill: seq=10 past=0 cache=10 plan=e6e4191a3d58f621d9f9438e1b6f6cc8 plan-cache=0hit/1miss wall=332.14ms
+  logits: shape=[1, 1, 50257] f32 finite=50,257 min=-0.9519 max=1.0020 mean=0.000426
+  top-5: 46737 (1.0020), 28597 (0.9756), 16571 (0.9148), 7868 (0.9042), 13 (0.8694)
+  argmax: 46737 (logit 1.0020)
+  predicted next token: 46737 (logit 1.0020)
+```
+
+The verification is identical to the run in [section 5](#5-run-token-ids-on-the-cpu) —
+same plan id, same logits — because it is the same model either way.
+
+A source that disagrees is refused before any step runs (exit code 3), and the
+message names the first difference:
+
+```text
+error: `/tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3` and `/tmp/opencode/fn3-artifact-exec/flipped.onnx` do not describe the same model: weight `transformer.h.1.mlp.c_proj.weight` differs
+next: pass the exact ONNX the artifact was prepared from, or re-run `fn3-infer prepare` with this ONNX; without `--onnx` the artifact runs on its own
+```
+
+`--verify-source` without `--onnx` is a usage error (exit code 2), so a script
+cannot ask for a check that silently does not happen:
+
+```text
+error: `--verify-source` asks for a source check, but no source was given
+next: pass the ONNX the artifact was prepared from with `--onnx <model.onnx>`, or drop `--verify-source` to run the artifact alone
+```
+
+## 5. Run token IDs on the CPU
+
+From here on the artifact is the **only** input. It holds the graph, the 50
+weight payloads, the geometry and the envelope; the ONNX file can be moved,
+renamed or deleted without affecting any command below.
 
 This is the 10-token prompt used in the examples. Token IDs are comma or
 whitespace separated, or `@file`.
@@ -125,7 +190,6 @@ TOKENS=464,2068,7586,21831,18045,625,262,16931,3290,13
 
 ./target/release/fn3-infer run \
   --model /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3 \
-  --onnx "$MODEL" \
   --tokens "$TOKENS" \
   --device cpu \
   --top-k 5
@@ -136,7 +200,7 @@ fn3-infer inference
   artifact: /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3
     bytes:  27,879,928  sha256: 33cf409006d9d9538712486d45e9d3cdf1e3cf9176fdfe3c9af477630ca30122
     payload crc32: 0xe02e9330
-  onnx: /tmp/opencode/parity-fresh/models/tiny-gpt2/onnx/model.onnx (sha256 e18370ba6247c564a4aef7b6a83aa86d5d036f47a73c0935e51bbcfe178141a1, verified: metadata, geometry and 50 weight payloads match)
+  source: none (artifact-only: the artifact carries the graph, 50 weight payloads, the geometry and the envelope)
   device: requested cpu, resolved cpu, backend cpu (reference implementation)
   envelope: batch 1..=1 seq 1..=128 past 0..=1023 total 1..=1024
   kv: capacity=1024 tokens, 2 layers x 2 KV heads x 64 head_dim = 2,097,152 bytes
@@ -144,7 +208,7 @@ fn3-infer inference
   input: token IDs (this alpha has no text tokenizer)
   session: phase=empty cache=0 kv_bytes=2,097,152
   execution: cpu on cpu
-  prefill: seq=10 past=0 cache=10 plan=e6e4191a3d58f621d9f9438e1b6f6cc8 plan-cache=0hit/1miss wall=264.75ms
+  prefill: seq=10 past=0 cache=10 plan=e6e4191a3d58f621d9f9438e1b6f6cc8 plan-cache=0hit/1miss wall=325.12ms
   logits: shape=[1, 1, 50257] f32 finite=50,257 min=-0.9519 max=1.0020 mean=0.000426
   top-5: 46737 (1.0020), 28597 (0.9756), 16571 (0.9148), 7868 (0.9042), 13 (0.8694)
   argmax: 46737 (logit 1.0020)
@@ -156,12 +220,11 @@ not a useful text model; the predicted token is what the weights say, not a
 quality claim. The output names the requested and resolved device and the
 backend that actually executed.
 
-## 5. Generate greedily
+## 6. Generate greedily
 
 ```bash
 ./target/release/fn3-infer generate \
   --model /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3 \
-  --onnx "$MODEL" \
   --tokens "$TOKENS" \
   --max-new-tokens 3 \
   --device cpu \
@@ -174,7 +237,7 @@ fn3-infer inference
   artifact: /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3
     bytes:  27,879,928  sha256: 33cf409006d9d9538712486d45e9d3cdf1e3cf9176fdfe3c9af477630ca30122
     payload crc32: 0xe02e9330
-  onnx: /tmp/opencode/parity-fresh/models/tiny-gpt2/onnx/model.onnx (sha256 e18370ba6247c564a4aef7b6a83aa86d5d036f47a73c0935e51bbcfe178141a1, verified: metadata, geometry and 50 weight payloads match)
+  source: none (artifact-only: the artifact carries the graph, 50 weight payloads, the geometry and the envelope)
   device: requested cpu, resolved cpu, backend cpu (reference implementation)
   envelope: batch 1..=1 seq 1..=128 past 0..=1023 total 1..=1024
   kv: capacity=1024 tokens, 2 layers x 2 KV heads x 64 head_dim = 2,097,152 bytes
@@ -182,14 +245,15 @@ fn3-infer inference
   input: token IDs (this alpha has no text tokenizer)
   session: phase=empty cache=0 kv_bytes=2,097,152
   execution: cpu on cpu
-  prefill: seq=10 past=0 cache=10 plan=e6e4191a3d58f621d9f9438e1b6f6cc8 plan-cache=0hit/1miss wall=325.66ms
+  timing: wall-clock around each call; the Vulkan backend records per-dispatch gpu_ns, but Session does not aggregate a device time in this build
+  prefill: seq=10 past=0 cache=10 plan=e6e4191a3d58f621d9f9438e1b6f6cc8 plan-cache=0hit/1miss wall=332.25ms
     counters: slot_allocations=148 slot_reuses=0 plan_cache=1 phase=ready
   logits: shape=[1, 1, 50257] f32 finite=50,257 min=-0.9519 max=1.0020 mean=0.000426
   top-3: 46737 (1.0020), 28597 (0.9756), 16571 (0.9148)
   argmax: 46737 (logit 1.0020)
-  decode 1: token=46737 past=10 seq=1 cache=11 plan=d968f0e1457e7a6a925a18d38ab75bca plan-cache=0hit/1miss wall=205.86ms slots=295/1 phase=ready
-  decode 2: token=46737 past=11 seq=1 cache=12 plan=86826574e44fb91c6337c96538a51e41 plan-cache=0hit/1miss wall=207.95ms slots=323/121 phase=ready
-  decode 3: token=46737 past=12 seq=1 cache=13 plan=cbc06edcef4251404f5d6951d0ab17af plan-cache=0hit/1miss wall=208.24ms slots=351/241 phase=ready
+  decode 1: token=46737 past=10 seq=1 cache=11 plan=d968f0e1457e7a6a925a18d38ab75bca plan-cache=0hit/1miss wall=216.87ms slots=295/1 phase=ready
+  decode 2: token=46737 past=11 seq=1 cache=12 plan=86826574e44fb91c6337c96538a51e41 plan-cache=0hit/1miss wall=203.34ms slots=323/121 phase=ready
+  decode 3: token=46737 past=12 seq=1 cache=13 plan=cbc06edcef4251404f5d6951d0ab17af plan-cache=0hit/1miss wall=208.31ms slots=351/241 phase=ready
   generated token IDs: [46737, 46737, 46737]
   predicted next token: 46737 (logit 1.1304)
 ```
@@ -198,7 +262,7 @@ Greedy argmax only: no temperature, top-k sampling, top-p or RNG. Ties go to the
 lowest token ID. `--steps` adds the token, cache length, plan id, cumulative plan
 hits/misses and wall time for every decode.
 
-## 6. Decode explicit token IDs
+## 7. Decode explicit token IDs
 
 `--decode` feeds the listed IDs one at a time through the cache. With the
 13-token fixture prefix and three cached steps:
@@ -206,7 +270,6 @@ hits/misses and wall time for every decode.
 ```bash
 ./target/release/fn3-infer run \
   --model /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3 \
-  --onnx "$MODEL" \
   --tokens 464,2068,7586,21831,18045,625,262,16931,3290,13,4874,2402,257 \
   --decode 640,11,612 \
   --device cpu \
@@ -218,7 +281,7 @@ fn3-infer inference
   artifact: /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3
     bytes:  27,879,928  sha256: 33cf409006d9d9538712486d45e9d3cdf1e3cf9176fdfe3c9af477630ca30122
     payload crc32: 0xe02e9330
-  onnx: /tmp/opencode/parity-fresh/models/tiny-gpt2/onnx/model.onnx (sha256 e18370ba6247c564a4aef7b6a83aa86d5d036f47a73c0935e51bbcfe178141a1, verified: metadata, geometry and 50 weight payloads match)
+  source: none (artifact-only: the artifact carries the graph, 50 weight payloads, the geometry and the envelope)
   device: requested cpu, resolved cpu, backend cpu (reference implementation)
   envelope: batch 1..=1 seq 1..=128 past 0..=1023 total 1..=1024
   kv: capacity=1024 tokens, 2 layers x 2 KV heads x 64 head_dim = 2,097,152 bytes
@@ -226,7 +289,7 @@ fn3-infer inference
   input: token IDs (this alpha has no text tokenizer)
   session: phase=empty cache=0 kv_bytes=2,097,152
   execution: cpu on cpu
-  prefill: seq=13 past=0 cache=13 plan=5baea64ce096acaa9aa09e5f6e7caf41 plan-cache=0hit/1miss wall=364.21ms
+  prefill: seq=13 past=0 cache=13 plan=5baea64ce096acaa9aa09e5f6e7caf41 plan-cache=0hit/1miss wall=370.12ms
   logits: shape=[1, 1, 50257] f32 finite=50,257 min=-0.9061 max=1.1973 mean=0.001263
   top-1: 257 (1.1973)
   argmax: 257 (logit 1.1973)
@@ -245,7 +308,7 @@ fn3-infer inference
   predicted next token: 612 (logit 1.1293)
 ```
 
-## 7. Vulkan: what this machine actually does
+## 8. Vulkan: what this machine actually does
 
 Build with Vulkan and diagnose first:
 
@@ -280,7 +343,6 @@ The equivalent run command on a physical GPU is:
 ```bash
 ./target/release/fn3-infer run \
   --model /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3 \
-  --onnx "$MODEL" \
   --tokens "$TOKENS" \
   --device vulkan \
   --top-k 3
@@ -294,7 +356,7 @@ fn3-infer inference
   artifact: /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3
     bytes:  27,879,928  sha256: 33cf409006d9d9538712486d45e9d3cdf1e3cf9176fdfe3c9af477630ca30122
     payload crc32: 0xe02e9330
-  onnx: /tmp/opencode/parity-fresh/models/tiny-gpt2/onnx/model.onnx (sha256 e18370ba6247c564a4aef7b6a83aa86d5d036f47a73c0935e51bbcfe178141a1, verified: metadata, geometry and 50 weight payloads match)
+  source: none (artifact-only: the artifact carries the graph, 50 weight payloads, the geometry and the envelope)
   device: requested vulkan, resolved vulkan(0), backend vulkan (adapter=NVIDIA GeForce GTX 1080 Ti software=false validation=false)
   envelope: batch 1..=1 seq 1..=128 past 0..=1023 total 1..=1024
   kv: capacity=1024 tokens, 2 layers x 2 KV heads x 64 head_dim = 2,097,152 bytes
@@ -302,7 +364,7 @@ fn3-infer inference
   input: token IDs (this alpha has no text tokenizer)
   session: phase=empty cache=0 kv_bytes=2,097,152
   execution: vulkan on vulkan(0)
-  prefill: seq=10 past=0 cache=10 plan=bc15e5dfdd8171156113b43736e55066 plan-cache=0hit/1miss wall=164.63ms
+  prefill: seq=10 past=0 cache=10 plan=bc15e5dfdd8171156113b43736e55066 plan-cache=0hit/1miss wall=183.10ms
   logits: shape=[1, 1, 50257] f32 finite=50,257 min=-0.9519 max=1.0020 mean=0.000426
   top-3: 46737 (1.0020), 28597 (0.9756), 16571 (0.9148)
   argmax: 46737 (logit 1.0020)
@@ -315,7 +377,6 @@ The cached decode path runs on the same device (the full gate is
 ```bash
 ./target/release/fn3-infer generate \
   --model /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3 \
-  --onnx "$MODEL" \
   --tokens "$TOKENS" \
   --max-new-tokens 3 \
   --device vulkan \
@@ -324,9 +385,9 @@ The cached decode path runs on the same device (the full gate is
 ```
 
 ```text
-  decode 1: token=46737 past=10 seq=1 cache=11 plan=c35b87ea3285e6d2e486c099b8d2879e plan-cache=0hit/1miss wall=122.37ms slots=295/1 phase=ready
-  decode 2: token=46737 past=11 seq=1 cache=12 plan=484c7ad6e270ab6c03373fb2e49c572b plan-cache=0hit/1miss wall=122.76ms slots=323/121 phase=ready
-  decode 3: token=46737 past=12 seq=1 cache=13 plan=b18c41f9289b0daf0c333112b1f99f0c plan-cache=0hit/1miss wall=121.55ms slots=351/241 phase=ready
+  decode 1: token=46737 past=10 seq=1 cache=11 plan=c35b87ea3285e6d2e486c099b8d2879e plan-cache=0hit/1miss wall=122.13ms slots=295/1 phase=ready
+  decode 2: token=46737 past=11 seq=1 cache=12 plan=484c7ad6e270ab6c03373fb2e49c572b plan-cache=0hit/1miss wall=124.28ms slots=323/121 phase=ready
+  decode 3: token=46737 past=12 seq=1 cache=13 plan=b18c41f9289b0daf0c333112b1f99f0c plan-cache=0hit/1miss wall=120.52ms slots=351/241 phase=ready
   generated token IDs: [46737, 46737, 46737]
 ```
 
@@ -339,7 +400,6 @@ driver the failure is earlier and is exit code 4:
 VK_ICD_FILENAMES=/nonexistent/icd.json VK_DRIVER_FILES=/nonexistent/icd.json \
 ./target/release/fn3-infer run \
   --model /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3 \
-  --onnx "$MODEL" \
   --tokens "$TOKENS" \
   --device vulkan
 ```
@@ -371,9 +431,9 @@ The Python workflow (#64) uses the same artifact and the same token-ID rule.
 ## Offline
 
 After step 1, every command reads local files only: `prepare` the ONNX,
-`run`/`generate` the artifact and ONNX, `inspect` the artifact, `diagnose` the
-artifact and the Vulkan loader. There is no download, cache fill or registry
-lookup in the CLI.
+`run`/`generate` the artifact (and the ONNX only when you ask it to verify one),
+`inspect` the artifact, `diagnose` the artifact and the Vulkan loader. There is
+no download, cache fill or registry lookup in the CLI.
 
 ## Exit codes
 
@@ -381,8 +441,11 @@ lookup in the CLI.
 |---:|---|
 | 0 | success |
 | 2 | usage |
-| 3 | model/input |
+| 3 | model/input: missing artifact, bad magic, future version, truncated or corrupt artifact, `--onnx` mismatch |
 | 4 | device |
 | 5 | inference (bounds, capacity, unsupported op, invalid logits) |
 
 Every error prints `error:` and a `next:` line naming the action that fixes it.
+A truncated, corrupt or wrong-version artifact is refused with code 3 even when
+no ONNX file exists anywhere: the artifact is checked on its own, before any
+device work or plan is built.
