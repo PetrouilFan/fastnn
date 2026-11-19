@@ -210,23 +210,23 @@ measured step is a plan-cache hit (88 hits, 4 misses, 0 evictions).
 | Metric | CPU | GTX 1080 Ti (Vulkan) |
 |---|---|---|
 | Model (verified against `model.lock.json`) | 27,897,974 B, sha256 `e18370ba…141a1` | same |
-| `model.load` (read + digest + ONNX import), single shot | 5.76 ms | 7.64 ms |
-| `model.prepare` (planner + weights + `PreparedModel`), single shot | 5.93 ms | 11.35 ms |
-| **Prefill TTFT p50**, host wall | **271.64 ms** (36.81 tok/s) | **194.04 ms** (51.54 tok/s) |
-| **Prefill TTFT p95**, host wall | **278.39 ms** | **254.91 ms** |
-| Prefill device time p50 / p95 | unavailable — no CPU device clock | **19.36 ms / 55.40 ms** |
-| **Decode p50 per token**, host wall | **189.81 ms** (5.27 tok/s) | **170.56 ms** (5.86 tok/s) |
-| **Decode p95 per token**, host wall | **197.66 ms** | **240.60 ms** |
-| Decode device time p50 per step | unavailable | **28.05 ms** (steps 1/2/3: 28.05, 28.05, 28.05) |
-| Decode device time p95 per step | unavailable | 54.28 / 54.31 / 54.29 ms |
+| `model.load` (read + digest + ONNX import), single shot | 5.30 ms | 5.61 ms |
+| `model.prepare` (planner + weights + `PreparedModel`), single shot | 6.15 ms | 6.84 ms |
+| **Prefill TTFT p50**, host wall | **240.31 ms** (41.61 tok/s) | **204.76 ms** (48.84 tok/s) |
+| **Prefill TTFT p95**, host wall | **246.02 ms** | **245.12 ms** |
+| Prefill device time p50 / p95 | unavailable — no CPU device clock | **13.22 ms / 55.33 ms** (bimodal, see below) |
+| **Decode p50 per token**, host wall | **158.33 ms** (6.32 tok/s) | **190.64 ms** (5.25 tok/s) |
+| **Decode p95 per token**, host wall | **179.98 ms** | **228.22 ms** |
+| Decode device time p50 per step | unavailable | **12.93 ms** (steps 1/2/3: 12.93, 12.93, 28.03) |
+| Decode device time p95 per step | unavailable | 54.21 / 54.21 / 54.26 ms |
 | Upload bytes, one prefill + 3 decodes | unavailable — no ledger | 318,880,260 B |
 | Readback bytes, one prefill + 3 decodes | unavailable — no ledger | 106,941,352 B |
 | Submissions, one prefill + 3 decodes | unavailable — no ledger | 575 (143 prefill + 3 × 144) |
 | Executions, 20 iterations | unavailable — no ledger | 11,500, **11,500 proven on the device**, 0 input readbacks |
-| Peak host RSS (`VmHWM`) | 88.88 MiB | 396.58 MiB |
+| Peak host RSS (`VmHWM`) | 88.76 MiB | 396.72 MiB |
 | Peak device memory | unavailable — no device allocator | allocator high-water **120,669,184 B** (115.08 MiB); `live_device_local_bytes` **0 B**; device-local-only peak **unavailable** |
 | Validation layer | n/a | **0 errors / 0 warnings** |
-| 1-min load average at start / end | 9.87 / 8.79 | 8.16 / 7.33 |
+| 1-min load average at start / end | 6.29 / 6.67 | 5.86 / 6.01 |
 
 Percentiles are nearest-rank over 20 samples (`rank = ceil(p/100 · n)`, 1-based);
 p95 is therefore the 19th of 20.
@@ -259,21 +259,33 @@ Definitions, so the numbers cannot be read as something they are not:
   artifact. Only the new column is a matched CPU/Vulkan comparison.
 
 The dominant fact at this commit: the Vulkan device executes a decode step in
-28.05 ms but the call takes 170.56 ms. The host-staged alpha path uploads
-79,476,896 B and reads back 26,071,080 B per decode step, one fence wait and
-one submission per instruction. That is the alpha storage contract working as
-specified, not a kernel problem; closing the gap is the device-resident
-storage work (#72) and the performance wave (#73), not a release blocker.
+12.93–28.03 ms depending on the GPU clock state, but the call takes 190.64 ms.
+The host-staged alpha path uploads 79,476,896 B and reads back 26,071,080 B per
+decode step, one fence wait and one submission per instruction. That is the
+alpha storage contract working as specified, not a kernel problem; closing the
+gap is the device-resident storage work (#72) and the performance wave (#73),
+not a release blocker.
 
-**Repeatability.** A second independent run per backend was committed as
-`release-*-run2.json`: CPU prefill p50 288.31 ms / p95 307.80 ms, decode p50
-204.94 ms; Vulkan prefill p50 231.52 ms (device 28.55 ms), decode p50 195.93 ms
-(device 28.03 ms). The machine is shared with other release work, so the
-host-side percentiles move by roughly 10–20 % between runs while the Vulkan
-device-time p50 stays at 28.0–28.6 ms per step. Both runs agree on every
-correctness and counter fact: top-5 `[46737, 28597, 16571, 7868, 13]`, decode
-argmax 32493, 11724, 612, 4 plans and 0 evictions, 0 input readbacks, 0
-validation errors/warnings.
+**Repeatability and the GPU clock.** A second independent run per backend was
+committed as `release-*-run2.json`: CPU prefill p50 288.31 ms / p95 307.80 ms,
+decode p50 204.94 ms / p95 227.84 ms; Vulkan prefill p50 231.52 ms (device
+28.55 ms), decode p50 195.93 ms (device 28.03 ms). The machine is shared with
+other release work, so the host-side p50 moves by about 20 % on the CPU and
+13 % on Vulkan between the two runs; the conclusions do not change.
+
+The Vulkan device time is **not** a stable estimate at this commit. Its p50
+spans 12.93–28.55 ms per step across runs, and within this run steps 1–2 report
+12.93 ms while step 3 reports 28.03 ms. The cause is the power state of the
+card, not the workload: `nvidia-smi` reports 139 MHz SM clock at idle against a
+1911 MHz maximum, and the per-instruction fenced kernels in this small model are
+too short to hold a boost clock. The p95 of 54 ms is the same effect at the low
+clock. Pinning the clock (`nvidia-smi -lgc`) needs root and is an owner
+decision; until then the host wall clock is the metric to compare and the
+device timestamps are a lower bound that also proves the kernels ran.
+
+Both runs agree on every correctness and counter fact: top-5
+`[46737, 28597, 16571, 7868, 13]`, decode argmax 32493, 11724, 612, 4 plans and
+0 evictions, 0 input readbacks, 0 validation errors/warnings.
 
 ### Correction: the superseded `--quick` figures
 
@@ -295,9 +307,10 @@ What was wrong with it:
 1. **Profile not pinned in the evidence.** The table did not record the build
    profile it was measured on; the follow-up was tasked on the basis that it
    was a debug/`--quick` run. The new measurement shows something more useful
-   than a profile correction: the CPU p50 is nearly identical (271.64 ms vs
-   271.77 ms prefill, 189.81 ms vs 179.74 ms decode). Code generation was not
-   the problem — the alpha CPU backend is dominated by per-step overhead. But
+   than a profile correction: the CPU p50 across the two committed release runs
+   is 240.31–288.31 ms prefill and 158.33–204.94 ms decode, and the superseded
+   271.77 ms / 179.74 ms sit inside that range. Code generation was not the
+   problem — the alpha CPU backend is dominated by per-step overhead. But
    without a recorded profile the old table could not distinguish the two, and
    a number that cannot say what binary produced it is not release evidence.
 2. **`--quick` mode.** It shortened the sample count, published a median with
