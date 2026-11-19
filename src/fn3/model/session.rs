@@ -408,6 +408,19 @@ impl<'model> Session<'model> {
                 ),
             });
         }
+        // Keep every immutable weight on the device once per backend (FN3-26).
+        // The backend decides what that means: the CPU backend has no-op
+        // persistence, the Vulkan backend uploads each weight exactly once and
+        // resolves later binds by handle. The host tensors are untouched, so the
+        // CPU/fallback path keeps its bytes.
+        let weights = model.weights();
+        let mut persistent: Vec<&Tensor> = Vec::with_capacity(weights.len());
+        for index in 0..weights.len() {
+            if let Some(tensor) = weights.get(index) {
+                persistent.push(tensor);
+            }
+        }
+        backend.prepare_persistent(&persistent)?;
         let caches = Session::allocate_caches(model)?;
         let capacity =
             (config.capacity_tokens.saturating_mul(2) as usize + 1).min(MAX_SESSION_PLAN_CACHE);
@@ -857,8 +870,17 @@ impl<'model> Session<'model> {
             bind_tensor(&plan, &mut slots, &names.past_value, cache.live_values()?)?;
         }
 
-        // The only execution path: the session's backend.
-        plan.execute(runtime.backend, &mut slots)?;
+        // The only execution path: the session's backend. `begin_step` /
+        // `end_step` give a batching backend one submission scope per step; its
+        // default bodies are no-ops, so the CPU path is unchanged. The scope is
+        // always closed, including on failure, so a failed step cannot leak a
+        // recording context into the next one.
+        let label = if past == 0 { "prefill" } else { "decode" };
+        runtime.backend.begin_step(label)?;
+        let executed = plan.execute(runtime.backend, &mut slots);
+        let closed = runtime.backend.end_step();
+        executed?;
+        closed?;
 
         // Extract the logits before touching the caches, so a malformed output
         // is still an untouched session.

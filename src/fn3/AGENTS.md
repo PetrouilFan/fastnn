@@ -13,6 +13,8 @@ authority is `docs/roadmap/fn3-architecture.md`.
 - `backend/mod.rs`: `Backend`, `Capabilities`, `Support`, `OpParams`.
 - `backend/cpu/`: the portable reference backend.
 - `backend/vulkan/`: the Vulkan platform and kernel families.
+  `resident.rs` owns device-resident tensors, the persistent-tensor table and
+  the residency counters (FN3-26 / #72).
 - `import/`: strict ONNX reader and graph construction.
 - `model/mod.rs`: `ExecutionPlan`, `ModelWeights`, `PreparedModel`.
 - `model/kv.rs`: `KvCacheConfig`, `KvCacheLayout`, `KvCacheState` — bounded
@@ -54,6 +56,15 @@ authority is `docs/roadmap/fn3-architecture.md`.
   with; a backend whose device differs from the model's is rejected before any
   work. KV buffers and value slots for a Vulkan device are host-staged
   (`host_staged = true`); that is not a CPU compute path.
+- A `Storage` is either host-backed or device-resident
+  (`Storage::from_resident`). A resident storage has **no host bytes**: every
+  host byte accessor returns `Fn3Error::NotImplemented` and
+  `Tensor::to_host`/`Storage::download` is the only materialisation path, so
+  stale bytes cannot be observed. CPU tensors are never resident.
+- Immutable model data is uploaded once (`Backend::prepare_persistent`) and
+  bound by handle afterwards. A prepared tensor that reaches a host upload is a
+  hard error (`VulkanBackend::check_staged_input`), never a silent re-upload.
+  The host tensors stay valid for the CPU/fallback path.
 - Unsafe code is confined to `storage.rs` and every block carries a `SAFETY:`
   comment covering alignment, bounds, aliasing and lifetime.
 

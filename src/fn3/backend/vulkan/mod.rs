@@ -69,6 +69,7 @@ pub mod ledger;
 pub mod memory;
 pub mod pipeline;
 pub mod residency;
+pub mod resident;
 pub mod staging;
 pub mod submission;
 
@@ -81,6 +82,9 @@ pub use ledger::HandleLedger;
 pub use memory::{MemoryClass, MemoryStats};
 pub use pipeline::Kernel;
 pub use residency::{ExecutionRecord, ResidencyLedger, ResidencySummary};
+pub use resident::{
+    padded_bytes, ResidencyCounters, ResidencyPhase, ResidencyStats, ResidentBuffer,
+};
 pub use staging::{StagingPool, StagingStats};
 pub use submission::{BindingSnapshot, DispatchInfo, Submission, SubmitReport, Submitter};
 
@@ -182,6 +186,10 @@ pub struct VulkanBackend {
     staging: StagingPool,
     submitters: Mutex<SubmitterPool>,
     residency: ResidencyLedger,
+    /// One device copy per immutable tensor, uploaded at prepare (FN3-26).
+    persistent: resident::PersistentTable,
+    /// Upload/readback/residency counters, attributed per phase.
+    residency_counters: resident::ResidencyCounters,
     /// Declared last so every resource above drops before the device.
     device: Arc<Device>,
 }
@@ -341,6 +349,8 @@ impl VulkanBackend {
             staging,
             submitters: Mutex::new(SubmitterPool::default()),
             residency: ResidencyLedger::new(),
+            persistent: resident::PersistentTable::new(),
+            residency_counters: resident::ResidencyCounters::new(),
             device,
         }))
     }
@@ -693,6 +703,39 @@ impl Backend for VulkanBackend {
                 ),
             })?;
         (kernel.launch)(self, inputs, outputs, params)
+    }
+
+    fn supports_resident_storage(&self) -> bool {
+        // Every registered kernel binds resident operands by handle; the
+        // argument order and arithmetic are unchanged, only the buffer source
+        // is (see `kernels::io`). The staged path stays available through
+        // `FN3_VK_STAGED=1`, which makes the session allocate host tensors.
+        true
+    }
+
+    fn allocate_resident(
+        &self,
+        shape: &crate::fn3::shape::Shape,
+        dtype: crate::fn3::dtype::DType,
+    ) -> Fn3Result<crate::fn3::tensor::Tensor> {
+        VulkanBackend::allocate_resident(self, shape, dtype)
+    }
+
+    fn prepare_persistent(&self, tensors: &[&crate::fn3::tensor::Tensor]) -> Fn3Result<()> {
+        self.prepare_persistent_tensors(tensors)
+    }
+
+    fn begin_step(&self, label: &'static str) -> Fn3Result<()> {
+        self.set_phase(match label {
+            "prefill" => resident::ResidencyPhase::Prefill,
+            "decode" => resident::ResidencyPhase::Decode,
+            _ => resident::ResidencyPhase::Prepare,
+        });
+        Ok(())
+    }
+
+    fn end_step(&self) -> Fn3Result<u32> {
+        Ok(0)
     }
 }
 

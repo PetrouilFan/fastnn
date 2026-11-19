@@ -13,10 +13,10 @@
 //! SHA-256 is the value the handoff quotes, so the gate verifies that exact
 //! value instead of trusting the quotation.
 
-// The Vulkan half of the gate is compiled only with the `vulkan` feature, so a
-// default build legitimately leaves its helpers unused. With the feature on,
-// dead code is a real warning.
-#![cfg_attr(not(feature = "vulkan"), allow(dead_code))]
+// This module is shared by the end-to-end gate and the #72 residency/perf
+// harnesses, each of which uses a different subset of it, so an unused helper
+// is expected rather than a warning.
+#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

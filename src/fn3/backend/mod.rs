@@ -357,6 +357,80 @@ pub trait Backend: Send + Sync + fmt::Debug {
     fn preflight(&self, op: OpId) -> Result<(), Fn3Error> {
         self.supports(op).require_supported(op, self.name())
     }
+
+    // -----------------------------------------------------------------------
+    // Device residency seam (FN3-26 / #72)
+    // -----------------------------------------------------------------------
+    //
+    // These four hooks are additive: every default body is the host-staged
+    // behaviour, so a backend that does not implement device memory is
+    // unchanged. They exist so the session layer can allocate device-resident
+    // tensors, keep immutable model data on the device, and bracket a step with
+    // one submission *without* naming Vulkan.
+
+    /// `true` when the backend can allocate and compute on device-resident
+    /// storage ([`crate::fn3::storage::Storage::from_resident`]).
+    ///
+    /// Reporting `true` is a promise that
+    /// [`Backend::allocate_resident`] succeeds for every dtype and shape this
+    /// backend claims in [`Capabilities`], and that its kernels bind such a
+    /// tensor without a host copy. A backend that answers `false` must be given
+    /// host tensors; the caller keeps the staged path.
+    fn supports_resident_storage(&self) -> bool {
+        false
+    }
+
+    /// Allocate a zero-initialised device-resident tensor on [`Backend::device`].
+    ///
+    /// The returned tensor has device storage: no host bytes, an explicit
+    /// download path ([`crate::fn3::tensor::Tensor::to_host`]), and metadata
+    /// identical to [`crate::fn3::tensor::Tensor::zeros`]. The default body
+    /// reports [`Fn3Error::NotImplemented`] naming this backend, so a caller
+    /// that checked [`Backend::supports_resident_storage`] never reaches it.
+    fn allocate_resident(
+        &self,
+        shape: &Shape,
+        dtype: DType,
+    ) -> Result<crate::fn3::tensor::Tensor, Fn3Error> {
+        let _ = (shape, dtype);
+        Err(Fn3Error::NotImplemented {
+            what: "device-resident allocation on this backend (it has no device allocator); \
+                   allocate host tensors and use the staged path",
+            owner: "FN3-26 (#72)",
+        })
+    }
+
+    /// Upload immutable tensors once and bind them by handle thereafter.
+    ///
+    /// The default body is a no-op: a host-staged backend re-reads the bytes on
+    /// every dispatch, which is exactly the behaviour it already had. A backend
+    /// that keeps persistent device copies must be idempotent here (the same
+    /// tensor may be presented by several sessions) and must not modify the
+    /// tensor: the host storage stays valid for the CPU/fallback path.
+    fn prepare_persistent(&self, tensors: &[&crate::fn3::tensor::Tensor]) -> Result<(), Fn3Error> {
+        let _ = tensors;
+        Ok(())
+    }
+
+    /// Open a submission scope for one plan execution.
+    ///
+    /// A backend that batches records every dispatch between `begin_step` and
+    /// [`Backend::end_step`] into one submission. The default bodies are
+    /// no-ops, so per-op backends (the CPU reference) are unaffected. Scopes do
+    /// not nest within one thread; `label` is a diagnostic ("prefill", "decode").
+    fn begin_step(&self, label: &'static str) -> Result<(), Fn3Error> {
+        let _ = label;
+        Ok(())
+    }
+
+    /// Close the scope opened by [`Backend::begin_step`] and submit it once.
+    ///
+    /// Returns the number of queue submissions this call made (0 for a backend
+    /// that submits per op). On failure the scope is still closed and every
+    /// resource it owns is released.
+    fn end_step(&self) -> Result<u32, Fn3Error> {
+        Ok(0)
+    }
 }
 
 /// Check an op's input and output count.

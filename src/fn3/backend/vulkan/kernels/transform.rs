@@ -44,11 +44,12 @@
 
 use crate::fn3::backend::check_arity;
 use crate::fn3::backend::vulkan::context::BindingRole;
+use crate::fn3::backend::vulkan::kernels::io;
 use crate::fn3::backend::vulkan::kernels::pointwise::{
-    broadcast_dims, element_count, normalize_axis, output_dims, output_window_bytes,
-    require_contiguous_output, require_contiguous_view, require_device, require_no_attributes,
-    require_only_axes, require_output_dtype, require_output_shape, require_shader_rank,
-    single_axis, view_window_bytes, workgroups, Job, Push, BACKEND, WORKGROUP,
+    broadcast_dims, element_count, normalize_axis, output_dims, require_contiguous_output,
+    require_contiguous_view, require_device, require_no_attributes, require_only_axes,
+    require_output_dtype, require_output_shape, require_shader_rank, single_axis,
+    view_window_bytes, workgroups, Job, Push, BACKEND, WORKGROUP,
 };
 use crate::fn3::backend::vulkan::kernels::{grid, BindingSpec, KernelSet, KernelSpec, OpKernel};
 use crate::fn3::backend::vulkan::VulkanBackend;
@@ -58,6 +59,9 @@ use crate::fn3::error::{Fn3Error, Fn3Result};
 use crate::fn3::ops::OpId;
 use crate::fn3::shape::Shape;
 use crate::fn3::tensor::{TensorMut, TensorView};
+
+/// Owning issue named in this family's rejection messages.
+const KERNEL_OWNER: &str = "FN3-13 (#59)";
 
 /// Axis permutation and identity layout copy.
 pub const PERMUTE: KernelSpec = KernelSpec {
@@ -488,10 +492,25 @@ fn launch_permute(
         .dims(output_dims(op, input.shape())?)
         .bytes();
     let workgroups = workgroups(&PERMUTE, elements, out.shape().dims())?;
-    let mut bytes = vec![0u8; out.meta().byte_len()?];
+    let input_operand = io::input(
+        KERNEL_OWNER,
+        backend,
+        op,
+        "fn3.transform.in",
+        input,
+        input.dtype(),
+    )?;
+    let out_operand = io::output(
+        KERNEL_OWNER,
+        backend,
+        op,
+        "fn3.transform.out",
+        out,
+        out.dtype(),
+    )?;
     let mut job = Job::new(backend, op, &PERMUTE)?;
-    let source = job.input(view_window_bytes(input)?, "fn3.transform.in")?;
-    let destination = job.output(out.meta().byte_len()? as u64, "fn3.transform.out")?;
+    let source = job.input_operand("fn3.transform.in", &input_operand)?;
+    let destination = job.output_operand("fn3.transform.out", out_operand)?;
     job.step(
         push,
         workgroups,
@@ -500,8 +519,7 @@ fn launch_permute(
             (1, destination, BindingRole::Output),
         ],
     );
-    job.run(&mut [&mut bytes])?;
-    output_window_bytes(out)?.copy_from_slice(&bytes);
+    job.run()?;
     Ok(())
 }
 
@@ -935,10 +953,18 @@ pub fn launch_slice(
         width,
     )?;
     let workgroups = workgroups(&BLOCK_COPY, elements, out.shape().dims())?;
-    let mut bytes = vec![0u8; out.meta().byte_len()?];
+    let input_operand = io::input(
+        KERNEL_OWNER,
+        backend,
+        op,
+        "fn3.slice.in",
+        input,
+        input.dtype(),
+    )?;
+    let out_operand = io::output(KERNEL_OWNER, backend, op, "fn3.slice.out", out, out.dtype())?;
     let mut job = Job::new(backend, op, &BLOCK_COPY)?;
-    let source = job.input(view_window_bytes(input)?, "fn3.slice.in")?;
-    let destination = job.output(out.meta().byte_len()? as u64, "fn3.slice.out")?;
+    let source = job.input_operand("fn3.slice.in", &input_operand)?;
+    let destination = job.output_operand("fn3.slice.out", out_operand)?;
     job.step(
         push,
         workgroups,
@@ -947,8 +973,7 @@ pub fn launch_slice(
             (1, destination, BindingRole::Output),
         ],
     );
-    job.run(&mut [&mut bytes])?;
-    output_window_bytes(out)?.copy_from_slice(&bytes);
+    job.run()?;
     Ok(())
 }
 
@@ -1104,24 +1129,20 @@ pub fn launch_split(
     if plans.iter().all(Option::is_none) {
         return Ok(());
     }
-    let mut bytes: Vec<Vec<u8>> = plans
-        .iter()
-        .map(|plan| vec![0u8; plan.as_ref().map(|(_, _, bytes)| *bytes).unwrap_or(0)])
-        .collect();
+    let input_operand = io::input(KERNEL_OWNER, backend, op, "fn3.split.in", input, dtype)?;
     let mut job = Job::new(backend, op, &BLOCK_COPY)?;
-    let source = job.input(view_window_bytes(input)?, "fn3.split.in")?;
-    let mut destinations = Vec::with_capacity(count);
-    for (position, plan) in plans.iter().enumerate() {
-        match plan {
-            Some((_, _, byte_len)) => {
-                let index = job.output(*byte_len as u64, "fn3.split.out")?;
-                destinations.push(Some((position, index)));
-            }
-            None => destinations.push(None),
+    let source = job.input_operand("fn3.split.in", &input_operand)?;
+    let mut destinations: Vec<Option<usize>> = Vec::with_capacity(count);
+    for (position, out) in outputs.iter_mut().enumerate() {
+        if plans[position].is_some() {
+            let operand = io::output(KERNEL_OWNER, backend, op, "fn3.split.out", out, dtype)?;
+            destinations.push(Some(job.output_operand("fn3.split.out", operand)?));
+        } else {
+            destinations.push(None);
         }
     }
     for (position, slot) in destinations.iter().enumerate() {
-        let Some((_, index)) = slot else { continue };
+        let Some(index) = slot else { continue };
         let Some((push, workgroups, _)) = plans[position].as_ref() else {
             continue;
         };
@@ -1134,18 +1155,7 @@ pub fn launch_split(
             ],
         );
     }
-    let mut active: Vec<&mut [u8]> = bytes
-        .iter_mut()
-        .enumerate()
-        .filter(|(position, _)| plans[*position].is_some())
-        .map(|(_, bytes)| bytes.as_mut_slice())
-        .collect();
-    job.run(&mut active)?;
-    for (out, bytes) in outputs.iter_mut().zip(bytes.iter()) {
-        if !bytes.is_empty() {
-            output_window_bytes(out)?.copy_from_slice(bytes);
-        }
-    }
+    job.run()?;
     Ok(())
 }
 
@@ -1253,9 +1263,9 @@ pub fn launch_concat(
         detail: "concatenated extent does not fit u32".to_string(),
     })?;
 
-    let mut bytes = vec![0u8; out.meta().byte_len()?];
+    let out_operand = io::output(KERNEL_OWNER, backend, op, "fn3.concat.out", out, dtype)?;
     let mut job = Job::new(backend, op, &BLOCK_COPY)?;
-    let destination = job.output(out.meta().byte_len()? as u64, "fn3.concat.out")?;
+    let destination = job.output_operand("fn3.concat.out", out_operand)?;
     let mut offset = 0u64;
     for view in inputs {
         let piece = view.shape().numel()?;
@@ -1264,7 +1274,8 @@ pub fn launch_concat(
             // no bytes and cannot be bound: skip it instead of allocating an
             // unaddressable buffer. The destination extent is unchanged, and a
             // concatenation of only empty inputs returned above.
-            let source = job.input(view_window_bytes(view)?, "fn3.concat.in")?;
+            let operand = io::input(KERNEL_OWNER, backend, op, "fn3.concat.in", view, dtype)?;
+            let source = job.input_operand("fn3.concat.in", &operand)?;
             let push = block_push(
                 op,
                 element_count(op, piece)?,
@@ -1292,8 +1303,7 @@ pub fn launch_concat(
         }
         offset += view.shape().dims()[axis];
     }
-    job.run(&mut [&mut bytes])?;
-    output_window_bytes(out)?.copy_from_slice(&bytes);
+    job.run()?;
     Ok(())
 }
 
@@ -1335,10 +1345,25 @@ pub fn launch_expand(
         .dims(broadcast_dims(op, input.shape(), rank)?)
         .bytes();
     let workgroups = workgroups(&EXPAND, elements, expected.dims())?;
-    let mut bytes = vec![0u8; out.meta().byte_len()?];
+    let input_operand = io::input(
+        KERNEL_OWNER,
+        backend,
+        op,
+        "fn3.expand.in",
+        input,
+        input.dtype(),
+    )?;
+    let out_operand = io::output(
+        KERNEL_OWNER,
+        backend,
+        op,
+        "fn3.expand.out",
+        out,
+        out.dtype(),
+    )?;
     let mut job = Job::new(backend, op, &EXPAND)?;
-    let source = job.input(view_window_bytes(input)?, "fn3.expand.in")?;
-    let destination = job.output(out.meta().byte_len()? as u64, "fn3.expand.out")?;
+    let source = job.input_operand("fn3.expand.in", &input_operand)?;
+    let destination = job.output_operand("fn3.expand.out", out_operand)?;
     job.step(
         push,
         workgroups,
@@ -1347,8 +1372,7 @@ pub fn launch_expand(
             (1, destination, BindingRole::Output),
         ],
     );
-    job.run(&mut [&mut bytes])?;
-    output_window_bytes(out)?.copy_from_slice(&bytes);
+    job.run()?;
     Ok(())
 }
 
@@ -1386,16 +1410,15 @@ pub fn launch_shape(
     }
     let push = Push::new().u32(rank as u32).dims(low).dims(high).bytes();
     let workgroups = workgroups(&SHAPE, rank as u64, expected.dims())?;
-    let mut bytes = vec![0u8; out.meta().byte_len()?];
+    let out_operand = io::output(KERNEL_OWNER, backend, op, "fn3.shape.out", out, out.dtype())?;
     let mut job = Job::new(backend, op, &SHAPE)?;
-    let destination = job.output(out.meta().byte_len()? as u64, "fn3.shape.out")?;
+    let destination = job.output_operand("fn3.shape.out", out_operand)?;
     job.step(
         push,
         workgroups,
         vec![(0, destination, BindingRole::Output)],
     );
-    job.run(&mut [&mut bytes])?;
-    output_window_bytes(out)?.copy_from_slice(&bytes);
+    job.run()?;
     Ok(())
 }
 
@@ -1468,16 +1491,15 @@ pub fn launch_constant_of_shape(
         elements
     };
     let workgroups = workgroups(&FILL, threads, expected.dims())?;
-    let mut bytes = vec![0u8; out.meta().byte_len()?];
+    let out_operand = io::output(KERNEL_OWNER, backend, op, "fn3.fill.out", out, out.dtype())?;
     let mut job = Job::new(backend, op, &FILL)?;
-    let destination = job.output(out.meta().byte_len()? as u64, "fn3.fill.out")?;
+    let destination = job.output_operand("fn3.fill.out", out_operand)?;
     job.step(
         push,
         workgroups,
         vec![(0, destination, BindingRole::Output)],
     );
-    job.run(&mut [&mut bytes])?;
-    output_window_bytes(out)?.copy_from_slice(&bytes);
+    job.run()?;
     Ok(())
 }
 
@@ -1612,16 +1634,15 @@ pub fn launch_range(
         return Ok(());
     }
     let workgroups = workgroups(spec, count, expected.dims())?;
-    let mut bytes = vec![0u8; out.meta().byte_len()?];
+    let out_operand = io::output(KERNEL_OWNER, backend, op, "fn3.range.out", out, out.dtype())?;
     let mut job = Job::new(backend, op, spec)?;
-    let destination = job.output(out.meta().byte_len()? as u64, "fn3.range.out")?;
+    let destination = job.output_operand("fn3.range.out", out_operand)?;
     job.step(
         push,
         workgroups,
         vec![(0, destination, BindingRole::Output)],
     );
-    job.run(&mut [&mut bytes])?;
-    output_window_bytes(out)?.copy_from_slice(&bytes);
+    job.run()?;
     Ok(())
 }
 

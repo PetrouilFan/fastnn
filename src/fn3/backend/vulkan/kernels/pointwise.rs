@@ -57,10 +57,10 @@ use std::sync::Arc;
 
 use ash::vk;
 
+use super::io::{self, Operand, OperandMut, ResolvedBuffer};
 use crate::fn3::backend::check_arity;
-use crate::fn3::backend::vulkan::context::{
-    BindingArg, BindingRole, Buffer, BufferDesc, KernelInvocation,
-};
+use crate::fn3::backend::vulkan::context::{BindingArg, BindingRole, BufferDesc, KernelInvocation};
+use crate::fn3::backend::vulkan::error::Error;
 use crate::fn3::backend::vulkan::kernels::{grid, BindingSpec, KernelSet, KernelSpec, OpKernel};
 use crate::fn3::backend::vulkan::pipeline::Kernel;
 use crate::fn3::backend::vulkan::residency::ExecutionRecord;
@@ -73,6 +73,9 @@ use crate::fn3::error::{Fn3Error, Fn3Result};
 use crate::fn3::ops::OpId;
 use crate::fn3::shape::Shape;
 use crate::fn3::tensor::{TensorMut, TensorView};
+
+/// Owning issue named in this family's rejection messages.
+const KERNEL_OWNER: &str = "FN3-13 (#59)";
 
 /// Backend name used in every rejection.
 pub(super) const BACKEND: &str = "vulkan";
@@ -280,6 +283,14 @@ struct Step {
     bindings: Vec<(u32, usize, BindingRole)>,
 }
 
+/// Where one output goes.
+enum OutputSlot<'a> {
+    /// A host window the result is copied into.
+    Host(&'a mut [u8]),
+    /// A device buffer the kernel writes in place; never read back here.
+    Resident,
+}
+
 /// A single-submission execution of one op.
 ///
 /// Buffers are allocated from the backend's suballocator, inputs travel through
@@ -287,14 +298,21 @@ struct Step {
 /// one [`ExecutionRecord`]. Dropping the `Job` frees every device buffer after
 /// the wait, so an op never leaks device memory (`memory_stats().live_bytes`
 /// returns to its previous value).
+///
+/// Since FN3-26 an operand can be device-resident: [`Job::input_operand`] and
+/// [`Job::output_operand`] bind the existing buffer and skip the upload or the
+/// readback, and the per-op record says `host_staged = false` when nothing
+/// moved. The staged path is the same code with host operands, so a host tensor
+/// still uploads, downloads and records exactly as it did at the alpha.
 pub(super) struct Job<'a> {
     backend: &'a VulkanBackend,
     op: OpId,
     spec: &'static KernelSpec,
     kernel: Arc<Kernel>,
-    buffers: Vec<Buffer>,
+    buffers: Vec<ResolvedBuffer>,
     uploads: Vec<(usize, Vec<u8>)>,
-    readbacks: Vec<(usize, usize)>,
+    readbacks: Vec<(usize, usize, usize)>,
+    outputs: Vec<OutputSlot<'a>>,
     steps: Vec<Step>,
 }
 
@@ -314,35 +332,72 @@ impl<'a> Job<'a> {
             buffers: Vec::new(),
             uploads: Vec::new(),
             readbacks: Vec::new(),
+            outputs: Vec::new(),
             steps: Vec::new(),
         })
     }
 
-    /// Allocate one device input buffer and stage `bytes` for upload.
-    pub(super) fn input(&mut self, bytes: &[u8], name: &'static str) -> Fn3Result<usize> {
+    /// Resolve one read-only operand: bind it, or stage it.
+    pub(super) fn input_operand(
+        &mut self,
+        name: &'static str,
+        operand: &Operand<'_>,
+    ) -> Fn3Result<usize> {
+        match operand {
+            Operand::Resident { buffer, .. } => {
+                let index = self.buffers.len();
+                self.buffers
+                    .push(ResolvedBuffer::Shared(Arc::clone(buffer)));
+                Ok(index)
+            }
+            Operand::Host { bytes } => self.stage_input(bytes, name),
+        }
+    }
+
+    /// Stage raw host bytes that are not a tensor operand (parameters, masks).
+    pub(super) fn stage_input(&mut self, bytes: &[u8], name: &'static str) -> Fn3Result<usize> {
         let size = padded_bytes(bytes.len() as u64);
         let buffer = self
             .backend
-            .alloc_buffer(&BufferDesc::device_storage(size, name))?;
+            .alloc_buffer(&BufferDesc::device_storage(size.max(4), name))?;
         let mut padded = Vec::with_capacity(size as usize);
         padded.extend_from_slice(bytes);
         padded.resize(size as usize, 0);
         let index = self.buffers.len();
-        self.buffers.push(buffer);
+        self.buffers.push(ResolvedBuffer::Owned(buffer));
         self.uploads.push((index, padded));
         Ok(index)
     }
 
-    /// Allocate one device output buffer of `bytes` bytes (rounded to 4).
-    pub(super) fn output(&mut self, bytes: u64, name: &'static str) -> Fn3Result<usize> {
-        let size = padded_bytes(bytes);
-        let buffer = self
-            .backend
-            .alloc_buffer(&BufferDesc::device_storage(size, name))?;
-        let index = self.buffers.len();
-        self.buffers.push(buffer);
-        self.readbacks.push((index, bytes as usize));
-        Ok(index)
+    /// Resolve one writable operand: bind it, or allocate and read it back.
+    pub(super) fn output_operand(
+        &mut self,
+        name: &'static str,
+        operand: OperandMut<'a>,
+    ) -> Fn3Result<usize> {
+        match operand {
+            OperandMut::Resident { buffer, .. } => {
+                let index = self.buffers.len();
+                self.buffers.push(ResolvedBuffer::Shared(buffer));
+                self.outputs.push(OutputSlot::Resident);
+                Ok(index)
+            }
+            OperandMut::Host { bytes } => {
+                let host_len = bytes.len() as u64;
+                let size = padded_bytes(host_len);
+                let buffer = self
+                    .backend
+                    .alloc_buffer(&BufferDesc::device_storage(size.max(4), name))?;
+                let index = self.buffers.len();
+                self.buffers.push(ResolvedBuffer::Owned(buffer));
+                let slot = self.outputs.len();
+                self.outputs.push(OutputSlot::Host(bytes));
+                // The record and the copy use the logical length; the buffer is
+                // padded because `vkCmdCopyBuffer` moves whole 4-byte words.
+                self.readbacks.push((index, host_len as usize, slot));
+                Ok(index)
+            }
+        }
     }
 
     /// Record one dispatch. Bindings are `(binding, buffer index, role)`.
@@ -359,24 +414,15 @@ impl<'a> Job<'a> {
         });
     }
 
-    /// Run every recorded step as one submission and copy the outputs back.
+    /// Run every recorded step as one submission and copy host outputs back.
     ///
-    /// `outputs` is indexed in the order [`Job::output`] was called.
-    pub(super) fn run(&self, outputs: &mut [&mut [u8]]) -> Fn3Result<()> {
+    /// Resident outputs were bound in place and are not copied; only a host
+    /// output has a readback, and only a host input has an upload.
+    pub(super) fn run(&mut self) -> Fn3Result<()> {
         if self.steps.is_empty() {
             return Ok(());
         }
-        if outputs.len() != self.readbacks.len() {
-            return Err(Fn3Error::InvalidShape {
-                context: "vulkan kernel output count",
-                detail: format!(
-                    "op {} has {} readback slot(s) but {} host destination(s)",
-                    self.op,
-                    self.readbacks.len(),
-                    outputs.len()
-                ),
-            });
-        }
+
         let staging = self.backend.staging();
         // A zero-element operand owns a logical zero-byte buffer (see
         // `context::Buffer`); there is nothing to transfer for it, and
@@ -397,7 +443,7 @@ impl<'a> Job<'a> {
         }
         let mut readback_leases: Vec<Option<StagingLease<'_>>> =
             Vec::with_capacity(self.readbacks.len());
-        for (index, _) in &self.readbacks {
+        for (index, _, _) in &self.readbacks {
             let bytes = self.buffers[*index].size();
             if bytes == 0 {
                 readback_leases.push(None);
@@ -415,7 +461,7 @@ impl<'a> Job<'a> {
                         let Some(lease) = lease else {
                             continue;
                         };
-                        let buffer = &self.buffers[*index];
+                        let buffer = self.buffers[*index].buffer();
                         recorder.copy_buffer(lease.buffer(), 0, buffer, 0, buffer.size())?;
                     }
                     for ((index, _), lease) in self.uploads.iter().zip(upload_leases.iter()) {
@@ -423,7 +469,7 @@ impl<'a> Job<'a> {
                             continue;
                         }
                         recorder.barrier(
-                            &self.buffers[*index],
+                            self.buffers[*index].buffer(),
                             vk::PipelineStageFlags::TRANSFER,
                             vk::PipelineStageFlags::COMPUTE_SHADER,
                             vk::AccessFlags::TRANSFER_WRITE,
@@ -435,7 +481,7 @@ impl<'a> Job<'a> {
                             .bindings
                             .iter()
                             .map(|(binding, index, role)| {
-                                let buffer = &self.buffers[*index];
+                                let buffer = self.buffers[*index].buffer();
                                 BindingArg::range(*binding, *role, buffer, 0, buffer.size())
                             })
                             .collect();
@@ -459,7 +505,7 @@ impl<'a> Job<'a> {
                                 if *role == BindingRole::Output {
                                     let _ = binding;
                                     recorder.barrier(
-                                        &self.buffers[*index],
+                                        self.buffers[*index].buffer(),
                                         vk::PipelineStageFlags::COMPUTE_SHADER,
                                         vk::PipelineStageFlags::COMPUTE_SHADER,
                                         vk::AccessFlags::SHADER_WRITE,
@@ -469,11 +515,12 @@ impl<'a> Job<'a> {
                             }
                         }
                     }
-                    for ((index, _), lease) in self.readbacks.iter().zip(readback_leases.iter()) {
+                    for ((index, _, _), lease) in self.readbacks.iter().zip(readback_leases.iter())
+                    {
                         let Some(lease) = lease else {
                             continue;
                         };
-                        let buffer = &self.buffers[*index];
+                        let buffer = self.buffers[*index].buffer();
                         recorder.barrier(
                             buffer,
                             vk::PipelineStageFlags::COMPUTE_SHADER,
@@ -491,12 +538,13 @@ impl<'a> Job<'a> {
         };
         drop(submitter);
 
-        for (((index, host_len), lease), destination) in self
-            .readbacks
-            .iter()
-            .zip(readback_leases.iter())
-            .zip(outputs.iter_mut())
-        {
+        for ((index, host_len, slot), lease) in self.readbacks.iter().zip(readback_leases.iter()) {
+            let OutputSlot::Host(destination) = &mut self.outputs[*slot] else {
+                return Err(Error::internal(
+                    "a resident output was recorded as a readback destination",
+                )
+                .to_fn3());
+            };
             if destination.len() != *host_len {
                 return Err(Fn3Error::CapacityExceeded {
                     what: "vulkan kernel readback destination",
@@ -513,6 +561,7 @@ impl<'a> Job<'a> {
             let mut bytes = vec![0u8; device_len];
             lease.read_into(&mut bytes).map_err(|e| e.to_fn3())?;
             destination.copy_from_slice(&bytes[..*host_len]);
+            self.backend.note_readback(*host_len as u64);
         }
 
         let dispatch = first.ok_or_else(|| Fn3Error::InvalidShape {
@@ -531,11 +580,13 @@ impl<'a> Job<'a> {
         record.readback_bytes = self
             .readbacks
             .iter()
-            .map(|(index, _)| self.buffers[*index].size())
+            .map(|(index, _, _)| self.buffers[*index].size())
             .sum();
         record.inputs_read_back = false;
-        record.host_staged = true;
-        record.device_local_bytes = self.buffers.iter().map(Buffer::size).sum();
+        // A resident op moves nothing: no upload, no readback. The staged path
+        // keeps the alpha's honest `true`.
+        record.host_staged = !self.uploads.is_empty() || !self.readbacks.is_empty();
+        record.device_local_bytes = self.buffers.iter().map(ResolvedBuffer::size).sum();
         record.host_ns = report.host_ns;
         record.gpu_ns = report.gpu_ns;
         record.gpu_ticks = report.timestamps;
@@ -574,26 +625,6 @@ pub(super) fn view_window_bytes<'a>(view: &TensorView<'a>) -> Fn3Result<&'a [u8]
         index: end as u64,
         len: bytes.len() as u64,
     })
-}
-
-/// The contiguous window of an output view, as mutable raw bytes.
-pub(super) fn output_window_bytes<'a>(out: &'a mut TensorMut<'_>) -> Fn3Result<&'a mut [u8]> {
-    let start = out.meta().byte_offset()?;
-    let len = out.meta().byte_len()?;
-    let end = start.checked_add(len).ok_or(Fn3Error::ShapeOverflow {
-        context: "vulkan kernel output window",
-        axis: None,
-        detail: format!("byte offset {start} plus length {len} exceeds usize::MAX"),
-    })?;
-    let bytes = out.storage_slice_mut::<u8>()?;
-    if end > bytes.len() {
-        return Err(Fn3Error::OutOfBounds {
-            what: "vulkan kernel output window",
-            index: end as u64,
-            len: bytes.len() as u64,
-        });
-    }
-    Ok(&mut bytes[start..end])
 }
 
 /// Reject any attribute: the op takes none.
@@ -831,30 +862,34 @@ pub(super) fn element_count(op: OpId, elements: u64) -> Fn3Result<u32> {
 }
 
 /// Dispatch one kernel over `inputs` (in binding order) into one output.
-pub(super) fn dispatch_unary_shape(
-    backend: &VulkanBackend,
+///
+/// Operands carry their own residency: a device-resident input or output binds
+/// in place, a host one stages. The kernel arithmetic and the recorded bindings
+/// are identical either way.
+pub(super) fn dispatch_unary_shape<'a>(
+    backend: &'a VulkanBackend,
     op: OpId,
     spec: &'static KernelSpec,
     push: Vec<u8>,
     workgroups: [u32; 3],
-    inputs: &[&[u8]],
-    output: &mut [u8],
+    inputs: &[Operand<'a>],
+    output: OperandMut<'a>,
     names: &[&'static str],
 ) -> Fn3Result<()> {
     let mut job = Job::new(backend, op, spec)?;
     let mut bindings = Vec::with_capacity(inputs.len() + 1);
-    for (position, bytes) in inputs.iter().enumerate() {
+    for (position, operand) in inputs.iter().enumerate() {
         let name = names
             .get(position)
             .copied()
             .unwrap_or("fn3.pointwise.input");
-        let index = job.input(bytes, name)?;
+        let index = job.input_operand(name, operand)?;
         bindings.push((position as u32, index, BindingRole::Input));
     }
-    let out_index = job.output(output.len() as u64, "fn3.pointwise.out")?;
+    let out_index = job.output_operand("fn3.pointwise.out", output)?;
     bindings.push((inputs.len() as u32, out_index, BindingRole::Output));
     job.step(push, workgroups, bindings);
-    job.run(&mut [output])
+    job.run()
 }
 
 // ---------------------------------------------------------------------------
@@ -901,19 +936,40 @@ fn launch_binary(
         .dims(broadcast_dims(op, rhs.shape(), rank)?)
         .bytes();
     let workgroups = workgroups(&BINARY, elements, shape.dims())?;
-    let mut bytes = vec![0u8; out.meta().byte_len()?];
+    let lhs_operand = io::input(
+        KERNEL_OWNER,
+        backend,
+        op,
+        "fn3.pointwise.lhs",
+        lhs,
+        DType::F32,
+    )?;
+    let rhs_operand = io::input(
+        KERNEL_OWNER,
+        backend,
+        op,
+        "fn3.pointwise.rhs",
+        rhs,
+        DType::F32,
+    )?;
+    let out_operand = io::output(
+        KERNEL_OWNER,
+        backend,
+        op,
+        "fn3.pointwise.out",
+        out,
+        DType::F32,
+    )?;
     dispatch_unary_shape(
         backend,
         op,
         &BINARY,
         push,
         workgroups,
-        &[view_window_bytes(lhs)?, view_window_bytes(rhs)?],
-        &mut bytes,
+        &[lhs_operand, rhs_operand],
+        out_operand,
         &["fn3.pointwise.lhs", "fn3.pointwise.rhs"],
-    )?;
-    output_window_bytes(out)?.copy_from_slice(&bytes);
-    Ok(())
+    )
 }
 
 /// `Add` with right-aligned broadcasting.
@@ -996,19 +1052,32 @@ fn launch_unary(
     let count = element_count(op, elements)?;
     let push = Push::new().u32(count).u32(opcode).bytes();
     let workgroups = workgroups(&UNARY, elements, input.shape().dims())?;
-    let mut bytes = vec![0u8; out.meta().byte_len()?];
+    let input_operand = io::input(
+        KERNEL_OWNER,
+        backend,
+        op,
+        "fn3.pointwise.in",
+        input,
+        DType::F32,
+    )?;
+    let out_operand = io::output(
+        KERNEL_OWNER,
+        backend,
+        op,
+        "fn3.pointwise.out",
+        out,
+        DType::F32,
+    )?;
     dispatch_unary_shape(
         backend,
         op,
         &UNARY,
         push,
         workgroups,
-        &[view_window_bytes(input)?],
-        &mut bytes,
+        &[input_operand],
+        out_operand,
         &["fn3.pointwise.in"],
-    )?;
-    output_window_bytes(out)?.copy_from_slice(&bytes);
-    Ok(())
+    )
 }
 
 /// `Neg`.
@@ -1159,23 +1228,27 @@ pub fn launch_where(
         .dims(broadcast_dims(op, cond.shape(), rank)?)
         .bytes();
     let workgroups = workgroups(&WHERE, elements, shape.dims())?;
-    let mut bytes = vec![0u8; out.meta().byte_len()?];
+    let cond_operand = io::input(
+        KERNEL_OWNER,
+        backend,
+        op,
+        "fn3.where.cond",
+        cond,
+        DType::Bool,
+    )?;
+    let x_operand = io::input(KERNEL_OWNER, backend, op, "fn3.where.x", x, x.dtype())?;
+    let y_operand = io::input(KERNEL_OWNER, backend, op, "fn3.where.y", y, y.dtype())?;
+    let out_operand = io::output(KERNEL_OWNER, backend, op, "fn3.where.out", out, out.dtype())?;
     dispatch_unary_shape(
         backend,
         op,
         &WHERE,
         push,
         workgroups,
-        &[
-            view_window_bytes(cond)?,
-            view_window_bytes(x)?,
-            view_window_bytes(y)?,
-        ],
-        &mut bytes,
+        &[cond_operand, x_operand, y_operand],
+        out_operand,
         &["fn3.where.cond", "fn3.where.x", "fn3.where.y"],
-    )?;
-    output_window_bytes(out)?.copy_from_slice(&bytes);
-    Ok(())
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1243,19 +1316,40 @@ fn launch_compare(
     // `ceil(n / 4)` threads, not `n`.
     let threads = elements.div_ceil(4);
     let workgroups = workgroups(&COMPARE, threads, shape.dims())?;
-    let mut bytes = vec![0u8; out.meta().byte_len()?];
+    let lhs_operand = io::input(
+        KERNEL_OWNER,
+        backend,
+        op,
+        "fn3.compare.lhs",
+        lhs,
+        lhs.dtype(),
+    )?;
+    let rhs_operand = io::input(
+        KERNEL_OWNER,
+        backend,
+        op,
+        "fn3.compare.rhs",
+        rhs,
+        rhs.dtype(),
+    )?;
+    let out_operand = io::output(
+        KERNEL_OWNER,
+        backend,
+        op,
+        "fn3.compare.out",
+        out,
+        DType::Bool,
+    )?;
     dispatch_unary_shape(
         backend,
         op,
         &COMPARE,
         push,
         workgroups,
-        &[view_window_bytes(lhs)?, view_window_bytes(rhs)?],
-        &mut bytes,
+        &[lhs_operand, rhs_operand],
+        out_operand,
         &["fn3.compare.lhs", "fn3.compare.rhs"],
-    )?;
-    output_window_bytes(out)?.copy_from_slice(&bytes);
-    Ok(())
+    )
 }
 
 /// `Equal`, producing `Bool`.
@@ -1339,19 +1433,25 @@ pub fn launch_cast(
     };
     let push = Push::new().u32(count).u32(src_kind).bytes();
     let workgroups = workgroups(spec, threads, input.shape().dims())?;
-    let mut bytes = vec![0u8; out.meta().byte_len()?];
+    let input_operand = io::input(
+        KERNEL_OWNER,
+        backend,
+        op,
+        "fn3.cast.in",
+        input,
+        input.dtype(),
+    )?;
+    let out_operand = io::output(KERNEL_OWNER, backend, op, "fn3.cast.out", out, target)?;
     dispatch_unary_shape(
         backend,
         op,
         spec,
         push,
         workgroups,
-        &[view_window_bytes(input)?],
-        &mut bytes,
+        &[input_operand],
+        out_operand,
         &["fn3.cast.in"],
-    )?;
-    output_window_bytes(out)?.copy_from_slice(&bytes);
-    Ok(())
+    )
 }
 
 // ---------------------------------------------------------------------------
