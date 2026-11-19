@@ -24,6 +24,13 @@ use crate::inference::ops::OpId;
 pub type Fn3Result<T> = Result<T, Fn3Error>;
 
 /// A contract violation or execution failure in the 3.0 inference core.
+///
+/// # Rust source compatibility
+///
+/// Out-of-memory errors with no known request size now use
+/// [`Fn3Error::AllocationSizeUnknown`] instead of `Allocation { bytes: 0, .. }`.
+/// Exhaustive matches must handle the new variant. The fields of
+/// [`Fn3Error::Allocation`] are unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fn3Error {
     /// A checked element-count, byte-length or stride computation overflowed.
@@ -209,7 +216,10 @@ pub enum Fn3Error {
     },
     /// An allocation request of a known size failed.
     Allocation {
-        /// Requested byte count.
+        /// Byte count requested by the failing operation, not bytes successfully
+        /// allocated. This can differ from the logical tensor size (for example,
+        /// a Vulkan chunk allocation requests the full chunk). Zero is a known
+        /// zero-byte request, never a sentinel for an unknown size.
         bytes: u64,
         /// Allocator detail.
         detail: String,

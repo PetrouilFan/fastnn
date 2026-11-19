@@ -20,6 +20,11 @@ use crate::inference::error::Fn3Error;
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// A failure in the Vulkan platform layer.
+///
+/// # Rust source compatibility
+///
+/// The `Vk` variant now carries `requested_bytes`. Patterns that listed every
+/// field must include it or use `..`.
 #[derive(Debug)]
 pub enum Error {
     /// The Vulkan loader itself could not be loaded, or the loader reports an
@@ -31,7 +36,11 @@ pub enum Error {
         call: &'static str,
         /// Raw result code.
         code: vk::Result,
-        /// Requested bytes for a sized buffer, allocation or mapping operation.
+        /// Byte count of the operation's request: the Vulkan buffer size, the
+        /// full allocation or mapping size, or the buffer memory requirement
+        /// for an injected allocation fault before chunk selection. `None`
+        /// means no request size is known. This is not a measure of memory
+        /// consumed by the driver.
         requested_bytes: Option<u64>,
         /// What was being attempted, with the values that matter.
         detail: String,

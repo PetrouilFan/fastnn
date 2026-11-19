@@ -797,8 +797,33 @@ fn plan_rejects_slot_aliasing_and_out_of_range_slots() {
 }
 
 // ---------------------------------------------------------------------------
-// 9. Storage: alignment, checked casts, exclusive writes.
+// 9. Storage: allocation diagnostics, alignment, checked casts, exclusive writes.
 // ---------------------------------------------------------------------------
+
+#[test]
+fn allocation_diagnostics_distinguish_known_and_unknown_request_sizes() {
+    let detail = "allocator refused the request";
+    for bytes in [4096, 0] {
+        let known = Fn3Error::Allocation {
+            bytes,
+            detail: detail.into(),
+        };
+        assert!(matches!(known, Fn3Error::Allocation { bytes: n, .. } if n == bytes));
+        assert_eq!(
+            known.to_string(),
+            format!("failed to allocate {bytes} bytes: {detail}")
+        );
+    }
+
+    let unknown = Fn3Error::AllocationSizeUnknown {
+        detail: detail.into(),
+    };
+    assert!(matches!(unknown, Fn3Error::AllocationSizeUnknown { .. }));
+    assert_eq!(
+        unknown.to_string(),
+        format!("allocation failed (request size unknown): {detail}")
+    );
+}
 
 #[test]
 fn storage_is_aligned_and_casts_are_checked() {
