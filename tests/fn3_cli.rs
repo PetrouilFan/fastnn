@@ -520,6 +520,53 @@ fn the_artifact_runs_alone_with_its_onnx_moved_away() {
         "{}",
         artifact_only.stdout
     );
+    assert!(!artifact_only.stdout.contains("weight-int8:"));
+
+    let packed = cli(&[
+        "run",
+        "--model",
+        path_text(&artifact),
+        "--tokens",
+        PROMPT_10,
+        "--decode",
+        "4874,2402",
+        "--device",
+        "cpu",
+        "--weight-int8",
+        "--steps",
+    ]);
+    assert_eq!(packed.code, EXIT_OK, "{}", packed.stderr);
+    assert_eq!(
+        packed
+            .stdout
+            .matches("packed-matmuls=8/13 fp32-matmuls=5")
+            .count(),
+        3,
+        "{}",
+        packed.stdout
+    );
+    assert!(
+        packed.stdout.contains(": computed-rhs"),
+        "{}",
+        packed.stdout
+    );
+    assert!(
+        packed.stdout.contains("fp32-retained="),
+        "on the CPU the dense figure is retained FP32 bytes, not an upload:\n{}",
+        packed.stdout
+    );
+    assert!(
+        packed.stdout.contains("packed-source="),
+        "the report states what the packed bytes replaced:\n{}",
+        packed.stdout
+    );
+    for token in [46737, 4874, 2402] {
+        assert!(
+            packed.stdout.contains(&format!("argmax: {token} (")),
+            "{}",
+            packed.stdout
+        );
+    }
 
     // Generation is artifact-only too, and reproduces the documented IDs.
     let generated = cli(&[

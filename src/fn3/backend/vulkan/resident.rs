@@ -112,6 +112,9 @@ pub struct ResidencyStats {
     pub persistent_bytes: u64,
     /// Bytes uploaded by `prepare_persistent` over the backend's lifetime.
     pub persistent_prepare_bytes: u64,
+    /// Bytes uploaded by packed-weight preparation (`PackedProjection::prepare`).
+    /// These are immutable weights moved once, not per-step host staging.
+    pub packed_prepare_bytes: u64,
     /// Binds served by the persistent table, per phase.
     pub persistent_hits: [u64; 3],
     /// A registered persistent tensor reached a host upload. Must stay zero.
@@ -147,6 +150,7 @@ pub struct ResidencyCounters {
     persistent_tensors: AtomicU64,
     persistent_bytes: AtomicU64,
     persistent_prepare_bytes: AtomicU64,
+    packed_prepare_bytes: AtomicU64,
     persistent_hits: [AtomicU64; 3],
     late_persistent_uploads: AtomicU64,
     late_persistent_bytes: AtomicU64,
@@ -189,6 +193,7 @@ impl ResidencyCounters {
             persistent_tensors: self.persistent_tensors.load(Ordering::Relaxed),
             persistent_bytes: self.persistent_bytes.load(Ordering::Relaxed),
             persistent_prepare_bytes: self.persistent_prepare_bytes.load(Ordering::Relaxed),
+            packed_prepare_bytes: self.packed_prepare_bytes.load(Ordering::Relaxed),
             late_persistent_uploads: self.late_persistent_uploads.load(Ordering::Relaxed),
             late_persistent_bytes: self.late_persistent_bytes.load(Ordering::Relaxed),
             readback_calls: self.readback_calls.load(Ordering::Relaxed),
@@ -216,6 +221,7 @@ impl ResidencyCounters {
         self.persistent_tensors.store(0, Ordering::Relaxed);
         self.persistent_bytes.store(0, Ordering::Relaxed);
         self.persistent_prepare_bytes.store(0, Ordering::Relaxed);
+        self.packed_prepare_bytes.store(0, Ordering::Relaxed);
         self.late_persistent_uploads.store(0, Ordering::Relaxed);
         self.late_persistent_bytes.store(0, Ordering::Relaxed);
         self.readback_calls.store(0, Ordering::Relaxed);
@@ -251,6 +257,12 @@ impl ResidencyCounters {
     fn note_late_persistent(&self, bytes: u64) {
         self.late_persistent_uploads.fetch_add(1, Ordering::Relaxed);
         self.late_persistent_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// One immutable packed-weight section moved to the device during prepare.
+    fn note_packed_prepare(&self, bytes: u64) {
+        self.packed_prepare_bytes
             .fetch_add(bytes, Ordering::Relaxed);
     }
 
@@ -705,6 +717,11 @@ impl super::VulkanBackend {
         }
         self.residency_counters.note_staged_upload(bytes);
         Ok(())
+    }
+
+    /// Record one immutable packed-weight transfer as prepare traffic.
+    pub fn note_packed_prepare(&self, bytes: u64) {
+        self.residency_counters.note_packed_prepare(bytes);
     }
 
     /// Record a device → host readback (the explicit download path).

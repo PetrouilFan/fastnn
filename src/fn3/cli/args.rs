@@ -82,6 +82,8 @@ pub struct InferArgs {
     pub top_k: usize,
     /// Per-step plan/cache diagnostics.
     pub steps: bool,
+    /// Opt in to session-local INT8 projection weights.
+    pub weight_int8: bool,
 }
 
 /// Arguments of `run`.
@@ -247,6 +249,7 @@ fn parse_run(args: &[String]) -> Result<Command, CliError> {
     let mut capacity = None;
     let mut top_k = None;
     let mut steps = false;
+    let mut weight_int8 = false;
 
     let mut cursor = Cursor::new(args);
     while let Some((flag, inline)) = cursor.next_flag() {
@@ -267,6 +270,10 @@ fn parse_run(args: &[String]) -> Result<Command, CliError> {
                 no_inline(inline, flag)?;
                 steps = true;
             }
+            "--weight-int8" => {
+                no_inline(inline, flag)?;
+                weight_int8 = true;
+            }
             other => return Err(unknown_flag("run", other)),
         }
     }
@@ -281,6 +288,7 @@ fn parse_run(args: &[String]) -> Result<Command, CliError> {
         capacity,
         top_k,
         steps,
+        weight_int8,
     )?;
     Ok(Command::Run(RunArgs { infer, decode }))
 }
@@ -294,6 +302,7 @@ fn parse_generate(args: &[String]) -> Result<Command, CliError> {
     let mut capacity = None;
     let mut top_k = None;
     let mut steps = false;
+    let mut weight_int8 = false;
     let mut max_new_tokens = None;
 
     let mut cursor = Cursor::new(args);
@@ -315,6 +324,10 @@ fn parse_generate(args: &[String]) -> Result<Command, CliError> {
                 no_inline(inline, flag)?;
                 steps = true;
             }
+            "--weight-int8" => {
+                no_inline(inline, flag)?;
+                weight_int8 = true;
+            }
             other => return Err(unknown_flag("generate", other)),
         }
     }
@@ -329,6 +342,7 @@ fn parse_generate(args: &[String]) -> Result<Command, CliError> {
         capacity,
         top_k,
         steps,
+        weight_int8,
     )?;
     let max_new_tokens =
         max_new_tokens.ok_or_else(|| CliError::usage("`generate` needs `--max-new-tokens <n>`"))?;
@@ -352,6 +366,7 @@ fn finish_infer(
     capacity: Option<u64>,
     top_k: Option<usize>,
     steps: bool,
+    weight_int8: bool,
 ) -> Result<InferArgs, CliError> {
     let top_k = top_k.unwrap_or(5);
     if top_k == 0 {
@@ -381,6 +396,7 @@ fn finish_infer(
         capacity,
         top_k,
         steps,
+        weight_int8,
     })
 }
 
@@ -603,6 +619,7 @@ OPTIONS:
   --capacity <n>    KV capacity; must hold prompt + decoded tokens
   --top-k <n>       logits shown (default 5)
   --steps           print token, cache length, plan id, plan hits/misses, time
+  --weight-int8     INT8 projection weights, FP32 activations (CPU/resident Vulkan)
 
 Output names the requested and resolved device, the backend that executed, the
 logits summary and the predicted next token. Decoding is greedy: the highest
@@ -626,6 +643,7 @@ OPTIONS:
   --capacity <n>        KV capacity; must hold prompt + generated tokens
   --top-k <n>           logits shown (default 5)
   --steps               per-step diagnostics
+  --weight-int8         INT8 projection weights, FP32 activations (CPU/resident Vulkan)
 
 Generation is greedy argmax on f32 logits: no temperature, top-k sampling or
 randomness of any kind. The same artifact, prompt, device and capacity produce

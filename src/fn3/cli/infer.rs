@@ -23,7 +23,9 @@ use crate::inference::import::{import_onnx_model, ModelImport};
 use crate::inference::model::format::{
     FormatError, FormatErrorKind, PreparedArtifact, PreparedHeader,
 };
-use crate::inference::model::{ModelWeights, Planner, PreparedModel, Session};
+use crate::inference::model::{
+    ModelWeights, Planner, PreparedModel, Session, SessionOptions, WEIGHT_INT8_BACKEND_REASON,
+};
 use crate::inference::{
     DType, DeviceId, Fn3Error, LiveDims, ShapeEnvelope, Symbol, Tensor, TensorMeta,
 };
@@ -67,7 +69,7 @@ pub fn execute_run(args: &RunArgs, out: &mut dyn Write) -> Result<(), CliError> 
     check_sequence(&setup, decode.len() as u64, "decode tokens")?;
     print_header(&setup, out);
 
-    let mut session = open_session(&setup)?;
+    let mut session = open_session(&setup, &args.infer)?;
     print_counters(&setup, &session, args.infer.steps, out);
 
     let mut logits = prefill(&setup, &mut session, &args.infer, out)?;
@@ -95,7 +97,7 @@ pub fn execute_generate(args: &GenerateArgs, out: &mut dyn Write) -> Result<(), 
     check_sequence(&setup, args.max_new_tokens, "generated tokens")?;
     print_header(&setup, out);
 
-    let mut session = open_session(&setup)?;
+    let mut session = open_session(&setup, &args.infer)?;
     print_counters(&setup, &session, args.infer.steps, out);
 
     let mut logits = prefill(&setup, &mut session, &args.infer, out)?;
@@ -247,9 +249,46 @@ fn build_setup(args: &InferArgs) -> Result<Setup, CliError> {
     })
 }
 
-fn open_session<'a>(setup: &'a Setup) -> Result<Session<'a>, CliError> {
-    Session::with_runtime(&setup.model, &setup.import, setup.backend.backend.as_ref())
-        .map_err(|error| failure("Session::with_runtime", error, setup.backend.device))
+fn open_session<'a>(setup: &'a Setup, args: &InferArgs) -> Result<Session<'a>, CliError> {
+    Session::with_runtime_options(
+        &setup.model,
+        &setup.import,
+        setup.backend.backend.as_ref(),
+        SessionOptions {
+            weight_int8: args.weight_int8,
+            ..SessionOptions::default()
+        },
+    )
+    .map_err(|error| {
+        let hint = weight_int8_hint(args.weight_int8, setup.backend.device, &error);
+        let cli = failure("Session::with_runtime", error, setup.backend.device);
+        match hint {
+            Some(hint) => cli.with_next(hint),
+            None => cli,
+        }
+    })
+}
+
+/// Advice for the one session-creation failure `--weight-int8` owns.
+///
+/// Only the typed backend rejection earns the flag-specific hint: any other
+/// session error keeps its own next step, so the message never blames the flag
+/// for an unrelated failure.
+fn weight_int8_hint(weight_int8: bool, device: DeviceId, error: &Fn3Error) -> Option<&'static str> {
+    if !weight_int8 || device.is_cpu() {
+        return None;
+    }
+    match error {
+        Fn3Error::UnsupportedOp { reason, .. }
+            if reason.starts_with(WEIGHT_INT8_BACKEND_REASON) =>
+        {
+            Some(
+                "`--weight-int8` needs a resident session: drop the flag, or unset \
+                 FN3_VK_STAGED; a staged Vulkan session is rejected rather than run on the CPU",
+            )
+        }
+        _ => None,
+    }
 }
 
 fn read_artifact(path: &Path) -> Result<(PreparedArtifact, String, u32, u64), CliError> {
@@ -597,6 +636,8 @@ fn prefill(
             session.phase().name()
         );
     }
+    print_quantization(session, args.steps, out);
+    print_weight_int8_traffic(session, out);
     Ok(logits)
 }
 
@@ -636,8 +677,72 @@ fn decode_one(
             session.cache_len()
         );
     }
+    print_quantization(session, args.steps, out);
+    print_weight_int8_traffic(session, out);
     Ok(logits)
 }
+
+fn print_quantization(session: &Session<'_>, details: bool, out: &mut dyn Write) {
+    if let Some(report) = session.weight_int8_report() {
+        let weights = session.model().weights();
+        let model_bytes: u64 = (0..weights.len())
+            .filter_map(|index| weights.get(index))
+            .map(|tensor| tensor.storage().len() as u64)
+            .sum();
+        let packed = report
+            .routes
+            .iter()
+            .filter(|route| route.fallback.is_none())
+            .count();
+        // On the CPU nothing is uploaded: the dense figure is FP32 weights the
+        // session kept, not bytes moved to a device.
+        let dense_label = if session.model().device().is_cpu() {
+            "fp32-retained"
+        } else {
+            "dense-weight"
+        };
+        let _ = writeln!(out, "    weight-int8: packed-matmuls={packed}/{} fp32-matmuls={} packed-payload={}B packed-source={}B {dense_label}={}B shared-weight={}B model-weight={model_bytes}B route/pack/upload={}",
+            report.routes.len(), report.routes.len() - packed, report.packed_payload_bytes,
+            report.packed_source_bytes, report.dense_weight_bytes, report.shared_weight_bytes,
+            milliseconds(report.prepare));
+        if details {
+            for route in &report.routes {
+                let _ = writeln!(
+                    out,
+                    "      matmul[{}] {}: {}",
+                    route.instruction,
+                    route.rhs,
+                    route
+                        .fallback
+                        .as_ref()
+                        .map_or("packed", |fallback| fallback.code())
+                );
+            }
+        }
+    }
+}
+
+/// The residency ledger's view of an INT8-weight step, on a real device.
+///
+/// Packed weights are immutable prepare traffic, not per-step host staging; the
+/// staged figure here is the non-weight traffic a resident step still moves.
+#[cfg(feature = "vulkan")]
+fn print_weight_int8_traffic(session: &Session<'_>, out: &mut dyn Write) {
+    let Some(vulkan) = session.backend().and_then(|backend| backend.as_vulkan()) else {
+        return;
+    };
+    let stats = vulkan.residency_stats();
+    let staged: u64 = stats.staged_upload_bytes.iter().sum();
+    let _ = writeln!(
+        out,
+        "    weight-int8-traffic: packed-prepare={}B staged-host-bytes={staged}B \
+         late-persistent={}B",
+        stats.packed_prepare_bytes, stats.late_persistent_bytes
+    );
+}
+
+#[cfg(not(feature = "vulkan"))]
+fn print_weight_int8_traffic(_session: &Session<'_>, _out: &mut dyn Write) {}
 
 fn plan_label(session: &Session<'_>) -> String {
     session
@@ -866,6 +971,40 @@ fn print_counters(setup: &Setup, session: &Session<'_>, steps: bool, out: &mut d
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The flag-specific hint belongs to the typed backend rejection only.
+    #[test]
+    fn the_int8_hint_is_reserved_for_the_typed_rejection() {
+        let gpu = DeviceId::Vulkan(crate::inference::device::PhysicalDeviceId::new(0));
+        let rejection = Fn3Error::UnsupportedOp {
+            op: crate::inference::OpId::MatMul,
+            backend: "vulkan",
+            reason: format!("{WEIGHT_INT8_BACKEND_REASON} (the session is host-staged)"),
+        };
+        assert!(weight_int8_hint(true, gpu, &rejection).is_some());
+        assert!(
+            weight_int8_hint(false, gpu, &rejection).is_none(),
+            "no flag, no flag-specific advice"
+        );
+        assert!(
+            weight_int8_hint(true, DeviceId::Cpu, &rejection).is_none(),
+            "the CPU never needs the staging hint"
+        );
+
+        // Some other session failure keeps its own next step.
+        let unrelated = Fn3Error::UnsupportedOp {
+            op: crate::inference::OpId::MatMul,
+            backend: "vulkan",
+            reason: "the device lost its queue".into(),
+        };
+        assert!(weight_int8_hint(true, gpu, &unrelated).is_none());
+        let other = Fn3Error::ShapeMismatch {
+            op: Some(crate::inference::OpId::MatMul),
+            expected: "[1, 64]".into(),
+            actual: "[1, 65]".into(),
+        };
+        assert!(weight_int8_hint(true, gpu, &other).is_none());
+    }
 
     #[test]
     fn tokens_accept_commas_whitespace_and_files() {

@@ -774,6 +774,10 @@ impl Backend for VulkanBackend {
         self.prepare_persistent_tensors(tensors)
     }
 
+    fn as_vulkan(&self) -> Option<&VulkanBackend> {
+        Some(self)
+    }
+
     fn write_resident(
         &self,
         dst: &crate::inference::storage::Storage,
