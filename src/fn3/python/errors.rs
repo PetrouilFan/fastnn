@@ -424,7 +424,8 @@ pub(crate) fn from_core(py: Python<'_>, error: CoreError) -> PyErr {
         CoreError::Allocation { .. }
         | CoreError::AllocationSizeUnknown { .. }
         | CoreError::InvalidFormat { .. }
-        | CoreError::ArityMismatch { .. } => {
+        | CoreError::ArityMismatch { .. }
+        | CoreError::StepDiscarded { .. } => {
             typed::<Fn3ExecutionError>(py, error.to_string(), |_| Ok(()))
         }
     }

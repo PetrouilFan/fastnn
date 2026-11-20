@@ -37,7 +37,7 @@
 //!
 //! # Host-staged tensors (alpha limitation, reported to #48/#52)
 //!
-//! The 3.0 alpha `Tensor` owns host `AlignedBuffer` storage on every device; a
+//! The 3.0 `Tensor` owns host `AlignedBuffer` storage on every device; a
 //! device-resident `Storage` variant is owned by #52/#48. Until it lands,
 //! `execute_op` uploads the input window, barrier, dispatches on the GPU,
 //! barriers and downloads the output. Every execution record sets
@@ -914,6 +914,13 @@ impl Backend for VulkanBackend {
         let report = submitter.end_batch().map_err(|error| error.to_fn3())?;
         drop(submitter);
         if report.submissions == 0 {
+            if report.discarded {
+                return Err(Fn3Error::StepDiscarded {
+                    detail: "a record in the step failed, so the backend reset the command \
+                             buffer and submitted nothing; the step did not run"
+                        .to_string(),
+                });
+            }
             return Ok(0);
         }
         self.residency.note_batch_submission();

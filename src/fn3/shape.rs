@@ -398,7 +398,7 @@ impl Strides {
             let stride = u64::try_from(stride).map_err(|_| Fn3Error::InvalidStride {
                 axis,
                 stride,
-                detail: "negative strides are not part of the 3.0 alpha view contract".to_string(),
+                detail: "negative strides are not part of the 3.0 view contract".to_string(),
             })?;
             let last_index = dim.saturating_sub(1);
             let span = last_index
@@ -477,8 +477,7 @@ impl Strides {
                 return Err(Fn3Error::InvalidStride {
                     axis,
                     stride,
-                    detail: "negative strides are not part of the 3.0 alpha view contract"
-                        .to_string(),
+                    detail: "negative strides are not part of the 3.0 view contract".to_string(),
                 });
             }
         }
@@ -507,8 +506,7 @@ impl Strides {
                 return Err(Fn3Error::InvalidStride {
                     axis,
                     stride,
-                    detail: "negative strides are not part of the 3.0 alpha view contract"
-                        .to_string(),
+                    detail: "negative strides are not part of the 3.0 view contract".to_string(),
                 });
             }
         }

@@ -246,6 +246,16 @@ pub enum Fn3Error {
         /// What the caller must do instead.
         detail: String,
     },
+    /// A step recording failed and the backend discarded it without
+    /// submitting a prefix of the plan.
+    ///
+    /// The operation that failed reports its own error; this variant reports
+    /// the discard when the step is closed separately, so `Ok(0)` cannot be
+    /// mistaken for a step that ran and submitted nothing.
+    StepDiscarded {
+        /// What was discarded and what the caller must do instead.
+        detail: String,
+    },
     /// A signature-level skeleton entry point reached an unimplemented stage.
     ///
     /// This is a hard error, never a panic and never a silent approximation. It
@@ -471,9 +481,12 @@ impl fmt::Display for Fn3Error {
                 f,
                 "session state error during {action} (phase {phase}): {detail}"
             ),
+            Fn3Error::StepDiscarded { detail } => {
+                write!(f, "step recording discarded: {detail}")
+            }
             Fn3Error::NotImplemented { what, owner } => write!(
                 f,
-                "{what} is not implemented in the 3.0 alpha contract skeleton (owner: {owner})"
+                "{what} is not implemented in FastNN 3.0 (owner: {owner})"
             ),
         }
     }

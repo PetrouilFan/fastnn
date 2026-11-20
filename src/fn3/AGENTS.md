@@ -65,7 +65,8 @@ authority is `docs/roadmap/fn3-architecture.md`.
   The staged path does not batch. `queue_submissions` is the authoritative
   `vkQueueSubmit` counter.
 - A failure while recording a step batch marks it partial; `end_step` discards
-  it without submitting a prefix of the plan. A failed step releases its value
+  it without submitting a prefix of the plan and reports
+  `Fn3Error::StepDiscarded`, never `Ok(0)`. A failed step releases its value
   slots and leaves the KV extent, `step`, `tokens_consumed`, phase and plan
   cache unchanged. The multi-layer KV commit rolls every layer back to its
   pre-step extent if a device copy fails partway; bytes past the live extent

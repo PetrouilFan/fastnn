@@ -491,7 +491,9 @@ pub trait Backend: Send + Sync + fmt::Debug {
     /// Returns the number of queue submissions this call made (0 for a backend
     /// that submits per op). On failure the scope is still closed and every
     /// resource it owns is released: a step whose recording failed is
-    /// discarded, never submitted as a partial plan.
+    /// discarded, never submitted as a partial plan, and a backend that
+    /// discarded a recording reports [`Fn3Error::StepDiscarded`] rather than
+    /// `Ok(0)`.
     fn end_step(&self) -> Result<u32, Fn3Error> {
         Ok(0)
     }

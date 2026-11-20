@@ -532,7 +532,7 @@ impl fmt::Display for ImportProblemKind {
             ImportProblemKind::SegmentedTensor { tensor } => write!(
                 f,
                 "tensor `{tensor}` is stored in segments (`TensorProto.segment`); segmented \
-                 tensors are not implemented for the 3.0 alpha"
+                 tensors are not implemented in FastNN 3.0"
             ),
             ImportProblemKind::AmbiguousTensorData { tensor, fields } => write!(
                 f,

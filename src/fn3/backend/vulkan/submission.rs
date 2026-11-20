@@ -115,6 +115,9 @@ pub struct SubmitReport {
 pub struct BatchReport {
     /// Queue submissions this batch made (1 when it recorded anything).
     pub submissions: u32,
+    /// The recording was discarded instead of submitted because a record in
+    /// the same batch failed.
+    pub discarded: bool,
     /// Host wall time between submit and fence signal, in nanoseconds.
     pub host_ns: u64,
     /// Device time for the whole batch, when timestamps are available.
@@ -493,7 +496,10 @@ impl Submitter {
                 return Err(error);
             }
             self.device.release_buffers(&batch.touched);
-            return Ok(BatchReport::default());
+            return Ok(BatchReport {
+                discarded: true,
+                ..BatchReport::default()
+            });
         }
         // SAFETY: recording was begun on this buffer and no other thread uses
         // it.
@@ -613,6 +619,7 @@ impl Submitter {
         drop(batch.retained);
         Ok(BatchReport {
             submissions: 1,
+            discarded: false,
             host_ns,
             gpu_ns,
             timings,
