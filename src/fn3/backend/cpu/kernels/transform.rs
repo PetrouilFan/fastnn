@@ -39,7 +39,7 @@ use crate::inference::backend::OpParams;
 use crate::inference::dtype::DType;
 use crate::inference::error::Fn3Error;
 use crate::inference::ops::OpId;
-use crate::inference::shape::Shape;
+use crate::inference::shape::{checked_usize, Shape};
 use crate::inference::tensor::{TensorMut, TensorView};
 
 use super::{
@@ -816,10 +816,69 @@ pub(crate) fn concat(
 
     let element_bytes = first.dtype().size_bytes();
     let rank = expected.rank();
+    // The output is `outer` blocks of `axis_total x inner`; an input block is
+    // the same shape with its own axis extent. Both are contiguous when the
+    // views are, so a contiguous input moves one memcpy per `outer` block
+    // instead of one `copy_element` per element.
+    let outer = checked_usize(
+        checked_product(&expected.dims()[..axis], "cpu concat outer")?,
+        "cpu concat outer",
+        "outer block count",
+    )?;
+    let inner = checked_usize(
+        checked_product(&expected.dims()[axis + 1..], "cpu concat inner")?,
+        "cpu concat inner",
+        "inner block extent",
+    )?;
+    let axis_total = checked_usize(expected.dims()[axis], "cpu concat axis", "axis extent")?;
     let mut out_coordinates = vec![0u64; rank];
     let mut input_coordinates = vec![0u64; rank];
     let mut axis_offset = 0u64;
     for view in inputs {
+        let input_axis = checked_usize(
+            view.shape().dims()[axis],
+            "cpu concat input",
+            "input axis extent",
+        )?;
+        if view.is_contiguous() && out.is_contiguous() {
+            let source = view_window_bytes(op, view)?;
+            let destination = out_window_bytes(op, out)?;
+            let block_bytes = input_axis
+                .checked_mul(inner)
+                .and_then(|elements| elements.checked_mul(element_bytes))
+                .ok_or_else(|| Fn3Error::ShapeOverflow {
+                    context: "cpu concat block",
+                    axis: Some(axis),
+                    detail: "one contiguous input block exceeds usize::MAX bytes".to_string(),
+                })?;
+            let destination_stride = axis_total
+                .checked_mul(inner)
+                .and_then(|elements| elements.checked_mul(element_bytes))
+                .ok_or_else(|| Fn3Error::ShapeOverflow {
+                    context: "cpu concat block",
+                    axis: Some(axis),
+                    detail: "one output block row exceeds usize::MAX bytes".to_string(),
+                })?;
+            let axis_start = checked_usize(axis_offset, "cpu concat input", "axis offset")?
+                .checked_mul(inner)
+                .and_then(|elements| elements.checked_mul(element_bytes))
+                .ok_or_else(|| Fn3Error::ShapeOverflow {
+                    context: "cpu concat block",
+                    axis: Some(axis),
+                    detail: "the input's axis offset exceeds usize::MAX bytes".to_string(),
+                })?;
+            debug_assert_eq!(source.len(), outer * block_bytes);
+            debug_assert_eq!(destination.len(), outer * destination_stride);
+            for block in 0..outer {
+                let from = block * block_bytes;
+                let to = block * destination_stride + axis_start;
+                destination[to..to + block_bytes]
+                    .copy_from_slice(&source[from..from + block_bytes]);
+            }
+            axis_offset += view.shape().dims()[axis];
+            continue;
+        }
+
         let elements = view.shape().numel()?;
         let source = view.storage_bytes();
         let out_locator = Locator::new(op, out.meta(), &expected)?;
@@ -1416,6 +1475,9 @@ pub(crate) fn range(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inference::device::DeviceId;
+    use crate::inference::shape::Strides;
+    use crate::inference::tensor::{Tensor, TensorMeta};
 
     #[test]
     fn reshape_infers_and_copies_dims() {
@@ -1479,5 +1541,71 @@ mod tests {
     fn transpose_rejects_a_non_permutation() {
         let shape = Shape::from_dims([2, 3]);
         assert!(Shape::validate_permutation(&[0, 0], shape.rank()).is_err());
+    }
+
+    #[test]
+    fn concat_moves_each_contiguous_block_once() {
+        // Axis 1: two outer rows per input, one element of `inner`.
+        let left =
+            Tensor::from_f32(Shape::from_dims([2, 3]), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let right = Tensor::from_f32(Shape::from_dims([2, 2]), &[7.0, 8.0, 9.0, 10.0]).unwrap();
+        let mut out = Tensor::from_f32(Shape::from_dims([2, 5]), &[0.0; 10]).unwrap();
+        concat(
+            OpId::Concat,
+            &[left.as_view().unwrap(), right.as_view().unwrap()],
+            &mut out.as_mut_view().unwrap(),
+            &OpParams::new().with_axes([1]),
+        )
+        .unwrap();
+        assert_eq!(
+            out.as_f32_slice().unwrap(),
+            &[1.0, 2.0, 3.0, 7.0, 8.0, 4.0, 5.0, 6.0, 9.0, 10.0]
+        );
+
+        // Axis 0: `inner` is the whole row, so the block is wider than one
+        // element and the destination stride spans a whole output row.
+        let top = Tensor::from_f32(Shape::from_dims([1, 3]), &[1.0, 2.0, 3.0]).unwrap();
+        let bottom =
+            Tensor::from_f32(Shape::from_dims([2, 3]), &[4.0, 5.0, 6.0, 7.0, 8.0, 9.0]).unwrap();
+        let mut out = Tensor::from_f32(Shape::from_dims([3, 3]), &[0.0; 9]).unwrap();
+        concat(
+            OpId::Concat,
+            &[top.as_view().unwrap(), bottom.as_view().unwrap()],
+            &mut out.as_mut_view().unwrap(),
+            &OpParams::new().with_axes([0]),
+        )
+        .unwrap();
+        assert_eq!(
+            out.as_f32_slice().unwrap(),
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+        );
+    }
+
+    #[test]
+    fn concat_falls_back_to_elements_for_a_strided_input() {
+        let source =
+            Tensor::from_f32(Shape::from_dims([2, 3]), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let meta = TensorMeta::strided(
+            Shape::from_dims([3, 2]),
+            Strides::from_elements(vec![1, 3]),
+            0,
+            DType::F32,
+            DeviceId::Cpu,
+        )
+        .unwrap();
+        let transposed = TensorView::new(source.storage(), meta).unwrap();
+        let tail = Tensor::from_f32(Shape::from_dims([1, 2]), &[7.0, 8.0]).unwrap();
+        let mut out = Tensor::from_f32(Shape::from_dims([4, 2]), &[0.0; 8]).unwrap();
+        concat(
+            OpId::Concat,
+            &[transposed, tail.as_view().unwrap()],
+            &mut out.as_mut_view().unwrap(),
+            &OpParams::new().with_axes([0]),
+        )
+        .unwrap();
+        assert_eq!(
+            out.as_f32_slice().unwrap(),
+            &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0, 7.0, 8.0]
+        );
     }
 }
