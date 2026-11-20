@@ -50,12 +50,13 @@ const KERNEL_OWNER: &str = "FN3-15 (#61)";
 /// The largest tensor rank the alpha contract accepts (matches the core).
 const MAX_RANK: usize = 8;
 
-/// Byte size of the `reduce.sum_mean.f32` parameter block: five scalars
-/// (`rank`, `out_numel`, `reduced_count`, `mean`, `divisor`) followed by three
-/// `uint[8]` arrays. The arrays are **fixed at 8 entries**, so a rank-3 request
-/// still uploads all 8 slots; the shader indexes only `0..rank`. Shortening the
-/// block would make every array member after it read the wrong bytes.
-pub const REDUCE_PARAMS_BYTES: usize = 5 * 4 + 3 * MAX_RANK * 4;
+/// Byte size of the `reduce.sum_mean.f32` parameter block: six scalars
+/// (`rank`, `out_numel`, `reduced_count`, `mean`, `divisor`, `trailing`) followed
+/// by three `uint[8]` arrays. The arrays are **fixed at 8 entries**, so a rank-3
+/// request still uploads all 8 slots; the shader indexes only `0..rank`.
+/// Shortening the block would make every array member after it read the wrong
+/// bytes.
+pub const REDUCE_PARAMS_BYTES: usize = 6 * 4 + 3 * MAX_RANK * 4;
 
 /// Byte size of the `reduce.argmax.f32_i32` parameter block: four scalars
 /// followed by two `uint[8]` arrays.
@@ -208,6 +209,20 @@ fn reduced_shape(input: &Shape, axes: &[usize], keep_dims: bool) -> Shape {
     Shape::from_dims(dims)
 }
 
+/// `true` when `axes` is exactly the trailing run `rank - axes.len() .. rank`.
+///
+/// `axes` is sorted and de-duplicated by [`resolve_axes`]. A contiguous input
+/// then stores each output's reduced elements in one ascending block, which is
+/// the condition the shader's trailing-loop fast path relies on.
+fn trailing_axes(axes: &[usize], rank: usize) -> bool {
+    let Some(first) = rank.checked_sub(axes.len()) else {
+        return false;
+    };
+    axes.iter()
+        .enumerate()
+        .all(|(offset, &axis)| axis == first + offset)
+}
+
 /// Contiguous row-major strides, as `u32`, rejecting element counts above 2^32.
 fn strides_u32(op: OpId, dims: &[u64], context: &'static str) -> Fn3Result<Vec<u32>> {
     let mut strides = vec![0u32; dims.len()];
@@ -345,6 +360,7 @@ fn launch_reduce_impl(
     } else {
         1.0
     };
+    let trailing = trailing_axes(&axes, rank) && input.is_contiguous();
 
     let mut block = ParamWriter::new();
     block
@@ -353,6 +369,7 @@ fn launch_reduce_impl(
         .u32(reduced_count_u32)
         .u32(u32::from(mean))
         .f32(divisor)
+        .u32(u32::from(trailing))
         .u32_slice(&padded(&in_dims))
         .u32_slice(&padded(&reduced))
         .u32_slice(&padded(&strides));
@@ -562,9 +579,9 @@ mod tests {
     #[test]
     fn parameter_blocks_are_the_declared_shader_size() {
         // These sizes are the std430 member offsets of the committed SPIR-V:
-        // 0/4/8/12/16 for five scalars, arrays at 20/52/84 (reduce) and
+        // 0/4/8/12/16/20 for six scalars, arrays at 24/56/88 (reduce) and
         // 0/4/8/12 plus arrays at 16/48 (argmax).
-        assert_eq!(REDUCE_PARAMS_BYTES, 116);
+        assert_eq!(REDUCE_PARAMS_BYTES, 120);
         assert_eq!(ARGMAX_PARAMS_BYTES, 80);
 
         let mut block = ParamWriter::new();
@@ -574,16 +591,29 @@ mod tests {
             .u32(5)
             .u32(1)
             .f32(5.0)
+            .u32(1)
             .u32_slice(&padded(&[2, 3, 5]))
             .u32_slice(&padded(&[0, 0, 1]))
             .u32_slice(&padded(&[15, 5, 1]));
         let bytes = block.finish();
         assert_eq!(bytes.len(), REDUCE_PARAMS_BYTES);
-        // The first strides element must land at byte 84, not at 44: the
+        // The first strides element must land at byte 88, not at 48: the
         // arrays are fixed-width, so a short rank cannot shift them.
-        assert_eq!(&bytes[84..88], &15u32.to_le_bytes());
+        assert_eq!(&bytes[88..92], &15u32.to_le_bytes());
         // Padding entries are zero.
-        assert_eq!(&bytes[32..36], &0u32.to_le_bytes());
-        assert_eq!(&bytes[96..100], &0u32.to_le_bytes());
+        assert_eq!(&bytes[36..40], &0u32.to_le_bytes());
+        assert_eq!(&bytes[100..104], &0u32.to_le_bytes());
+    }
+
+    #[test]
+    fn trailing_axes_recognises_only_the_final_run() {
+        assert!(trailing_axes(&[], 0));
+        assert!(trailing_axes(&[0, 1, 2], 3));
+        assert!(trailing_axes(&[2], 3));
+        assert!(trailing_axes(&[1, 2], 3));
+        assert!(!trailing_axes(&[0], 3));
+        assert!(!trailing_axes(&[0, 2], 3));
+        assert!(!trailing_axes(&[1], 3));
+        assert!(!trailing_axes(&[0, 1, 2], 2));
     }
 }

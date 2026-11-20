@@ -35,6 +35,11 @@ layout(set = 0, binding = 2, std430) readonly buffer Params {
     uint reduced_count;
     uint mean; // 1 selects ReduceMean
     float divisor;
+    // 1 when the reduced axes are the trailing run of a contiguous input.
+    // Every Vulkan input operand is required to be contiguous, so in that case
+    // output slot `o` owns exactly `inputv[o*reduced_count .. (o+1)*reduced_count]`
+    // and the row-major order the generic path walks is the linear order below.
+    uint trailing;
     uint in_dims[8];
     uint reduced[8]; // 1 when the axis is reduced
     uint in_stride[8];
@@ -43,6 +48,20 @@ layout(set = 0, binding = 2, std430) readonly buffer Params {
 void main() {
     uint slot = gl_GlobalInvocationID.x;
     if (slot >= pc.out_numel) {
+        return;
+    }
+
+    // Trailing contiguous run: the block each invocation owns is already in the
+    // ascending order the generic path reconstructs, so this loop performs the
+    // identical additions and yields the same bits. It exists because the
+    // generic decomposition costs a `%` and `/` per input element.
+    if (pc.trailing == 1u) {
+        uint base = slot * pc.reduced_count;
+        float accumulator = 0.0;
+        for (uint position = 0u; position < pc.reduced_count; ++position) {
+            accumulator += inputv[base + position];
+        }
+        outv[slot] = (pc.mean == 1u) ? (accumulator / pc.divisor) : accumulator;
         return;
     }
 
