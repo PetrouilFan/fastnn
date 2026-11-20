@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Changed
+- Cleanup and performance pass on the 3.0 inference tree: removed never-built
+  benchmark binaries and stale baseline tooling, merged the two SHA-256
+  implementations, dropped the superseded Vulkan smoke registry and other
+  unreachable items, and replaced 32 redundant lint allows with the crate-level
+  one.
+- Decode at 1,023 cached tokens is faster on both backends: Vulkan 516.16 →
+  64.52 ms and CPU 1.08 s → 453.76 ms, from coalescing adjacent KV copy rows,
+  a trailing-axis reduction fast path, and block copies in CPU `Concat`.
+  Evicting stale slot-pool generations cut trained CPU peak RSS by 62%
+  (4,018,040 → 1,523,824 KB) at unchanged outputs.
+- `Session::end_step` now reports `Fn3Error::StepDiscarded` when a recording
+  failed and the backend submitted nothing, instead of returning `Ok(0)`, and
+  concurrent `prepare` is serialised against staged-input checks on one
+  backend.
+
 ## [3.0.0] - 2026-11-19
 
 The stable 3.0 release. Inference only: FP32 and quantized-weight execution on
