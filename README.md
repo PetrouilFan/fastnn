@@ -28,11 +28,13 @@ The repository's [installation guide](docs/guides/getting-started.md) covers sou
 
 ## Run a model
 
-From the repository root, fetch the pinned tiny GPT-2 model and build the CLI. The fetcher checks the model against the committed lock file. You can substitute a local, supported ONNX decoder.
+From the repository root, download the pinned tiny GPT-2 ONNX file and build the CLI. The commands below use Bash and `sha256sum`. If you already have a supported ONNX decoder, set `MODEL` to its path and skip the download and checksum steps.
 
 ```bash
-python3 tools/parity/fetch_models.py --suite tiny-gpt2
-MODEL=tools/parity/.cache/models/tiny-gpt2/onnx/model.onnx
+MODEL=tiny-gpt2.onnx
+curl --fail --location --output "$MODEL" \
+  https://huggingface.co/onnx-community/tiny-random-gpt2-ONNX/resolve/90f61e71d6fa8e571d0ab0f95a637a5d7d8ed52f/onnx/model.onnx
+printf '%s  %s\n' e18370ba6247c564a4aef7b6a83aa86d5d036f47a73c0935e51bbcfe178141a1 "$MODEL" | sha256sum -c -
 
 cargo build --release --no-default-features --features cli --bin fastnn-infer
 CLI=./target/release/fastnn-infer
