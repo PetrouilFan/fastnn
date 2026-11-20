@@ -4,35 +4,29 @@ Release workflow, checklist, and version management for fastnn.
 
 ## Current Release Status
 
-The published release is **v2.6.0**. The 3.0 alpha candidate is
-**`3.0.0-alpha.1`**, verified at
-`672cec9faf089ef0840179f6edfdf33779b576a1` on `rewrite/fastnn-3`. The
-follow-up branch `fn3/alpha-followup` carries the matched release-build timing
-baseline and the strict release wheel smoke. It is prepared and verified
-locally, not merged, tagged or published. Release tags are created only from a
-reviewed, green `main`.
+The current release is **v3.0.0**, tagged at `4db656e`; the crate and the wheel
+both carry version `3.0.0`. `main` is the release branch; release tags are
+created only from a reviewed, green `main`, and `validate-tag` rejects a tag
+whose commit is not the tip of `origin/main`.
 
-### Prereleases
+### Version stores
 
-Rust and Python spell the same prerelease differently:
-
-| Ecosystem | File | Value |
-|---|---|---|
-| Cargo / SemVer | `Cargo.toml`, both `Cargo.lock` files | `3.0.0-alpha.1` |
-| Python / PEP 440 | `pyproject.toml`, `uv.lock`, `fastnn/__init__.py` | `3.0.0a1` |
-
-`scripts/ci/check-versions.py` is the only version rule. It normalises both
-spellings, checks every location (including both lockfiles and the changelog)
-and accepts `--tag v3.0.0-alpha.1` for the release workflow. Do not compare the
-three "main" files with string equality: a prerelease is guaranteed to differ.
+Rust/SemVer and Python/PEP 440 spell a prerelease differently, so do not compare
+the main files with string equality. `scripts/ci/check-versions.py` is the only
+version rule: it normalises both spellings, checks every store (`Cargo.toml`,
+both Cargo lockfiles, `pyproject.toml`, `uv.lock`, `fastnn/__init__.py` and the
+changelog) and accepts `--tag` so the release workflow can validate the pushed
+tag against the same rule.
 
 ### Recent Release History
 
 | Tag | Status | Notes |
 |-----|--------|-------|
-| v2.5.0 | Good | Current GitHub release with Linux, Windows, and macOS wheels |
+| v3.0.0 | Good | Current GitHub release with Linux, Windows, and macOS wheels |
+| v2.6.0 | Superseded | Previous GitHub release with Linux, Windows, and macOS wheels |
+| v2.5.0 | Superseded | Superseded by v2.6.0 |
 | v2.4.0 | Superseded | Full compiler pipeline release |
-| v2.2.4 | Good | Previous stable; macOS lib tests skipped |
+| v2.2.4 | Good | Stable patch; macOS lib tests skipped |
 | v2.2.3 | Failed | Artifact publishing broken in workflow |
 | v2.2.2 | Failed | macOS tests failed due to runner runtime paths |
 | v2.2.1 | Good | First post-v2.2 with portable CI fixes |
@@ -46,18 +40,23 @@ Both were resolved by v2.2.4 which skips macOS lib tests and fixes artifact path
 Releases are triggered by pushing a `v*` tag. The workflow in
 `.github/workflows/release.yml`:
 
-1. **Validate tag and package versions** -- require an exact `vX.Y.Z` tag from
-   `main` and matching Cargo/Python versions.
-2. **Quality job** -- formatting, AGENTS freshness, Clippy, serial Rust tests,
-   integration tests, and release-mode malformed-input coverage on Ubuntu.
-3. **Portable build job** -- release builds on Ubuntu, Windows, and macOS.
+1. **Validate tag** -- require a `vMAJOR.MINOR.PATCH` tag (a SemVer prerelease
+   suffix is allowed) whose commit is exactly the tip of `origin/main`, then
+   run `scripts/ci/check-versions.py --tag` against the tag.
+2. **Quality job** -- `tools/ci/cpu-lane.sh`: formatting, version agreement,
+   Clippy with warnings denied, a `--no-default-features` build, and the Rust
+   unit, fn3 contract and fn3 CI smoke suites.
+3. **Portable build job** -- `cargo build --release --no-default-features` on
+   Ubuntu, Windows, and macOS.
 4. **Build wheels job** -- Python wheels via maturin on Ubuntu, Windows, and
    macOS, followed by the pinned-model fetch, a strict clean-directory
-   install/import/inference smoke test, and the wheel artifacts.
-5. **Create release job** -- publish all wheel artifacts to a GitHub Release.
+   install/import/inference smoke test, and the wheel and evidence artifacts.
+5. **Create release job** -- attach `dist/*.whl` to a GitHub Release with
+   generated notes; a tag containing `-` is marked as a prerelease.
 
 The workflow publishes wheels to GitHub Releases only. It does not publish to
-PyPI or crates.io.
+PyPI or crates.io, and `fastnn-infer` is a source build
+(`required-features = ["cli"]`), so no CLI binary is attached.
 
 ### Pinned-model inference in the release wheel
 
@@ -110,13 +109,15 @@ bash scripts/ci/preflight-release.sh
 ```
 
 Checks: clean worktree, branch sanity (`main`/`dev`), version consistency
-across `Cargo.toml`, `pyproject.toml`, `fastnn/__init__.py`, workflow existence,
-matching changelog entry, stale build artifacts, and lockfile presence. Add
-`--run-tests` to run the release preflight test suite.
+through `scripts/ci/check-versions.py`, release-workflow existence and tag
+trigger, stale build artifacts, and lockfile presence. `--run-tests`
+additionally runs formatting, Clippy with warnings denied, and the Rust test
+suites.
 
 ### Update Version Numbers
 
-All three sources must be updated atomically:
+The three primary sources must be updated atomically (the lockfiles and
+changelog follow; `scripts/ci/check-versions.py` enforces all of them):
 
 | File | Field |
 |------|-------|
@@ -125,7 +126,8 @@ All three sources must be updated atomically:
 | `fastnn/__init__.py` | `__version__ = "X.Y.Z"` |
 
 Do not move a published tag. If a release fails after publication, fix it under
-the next patch version. The current workflow accepts stable `vX.Y.Z` tags only.
+the next patch version. The workflow accepts `vX.Y.Z` tags, including a SemVer
+prerelease suffix, provided the tagged commit is the tip of `origin/main`.
 
 ### Update CHANGELOG.md
 

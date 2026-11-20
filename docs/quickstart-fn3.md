@@ -1,12 +1,12 @@
 # FastNN 3.0 inference quickstart
 
-**Alpha.** One path: prepare a `.fnn3` artifact from ONNX once, then run token
+**Stable.** One path: prepare a `.fnn3` artifact from ONNX once, then run token
 IDs from that artifact alone on an explicit device. The artifact carries the
 graph, the weights, the geometry and the declared window, so a deployment never
 needs the ONNX it was prepared from. No network is used after the model file is
 on disk.
 
-The CLI takes **token IDs**, not text. This alpha does not ship a tokenizer and
+The CLI takes **token IDs**, not text. This release does not ship a tokenizer and
 does not approximate one; see [Token IDs](#token-ids) at the end.
 
 Run the commands below from the repository root on the pinned tiny-GPT-2
@@ -319,7 +319,7 @@ cargo build --release --no-default-features --features cli,vulkan
 ```
 
 ```text
-fastnn-infer 3.0.0-alpha.1 — build/device/backend diagnosis
+fastnn-infer 3.0.0 — build/device/backend diagnosis
   vulkan feature: enabled
 
 device matrix:
@@ -449,7 +449,7 @@ falling back to CPU. In Python,
 
 ## Token IDs
 
-This alpha is exact about IDs and refuses to guess text. Different BPE tokens
+This release is exact about IDs and refuses to guess text. Different BPE tokens
 produce different logits while looking plausible, so an approximate tokenizer
 would be worse than none.
 

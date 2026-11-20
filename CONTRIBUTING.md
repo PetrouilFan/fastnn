@@ -14,11 +14,17 @@
 # Python package (editable install)
 uv pip install -e .
 
-# Rust library only
-cargo build
+# Rust library with the default features
+cargo build --lib
 
-# Rust with all features
-cargo build --all-features
+# Portable library with no features
+cargo build --no-default-features
+
+# Vulkan backend (opt-in; a build opens no device)
+cargo build --lib --features vulkan
+
+# Inference CLI (the `fastnn-infer` target requires the `cli` feature)
+cargo build --release --no-default-features --features cli,vulkan --bin fastnn-infer
 ```
 
 ### Running Tests
@@ -27,21 +33,31 @@ cargo build --all-features
 # Rust unit tests
 cargo test --lib
 
-# Quantized pipeline tests
-cargo test --test quantized_pipeline
+# fn3 contract and CI smoke suites
+cargo test --test fn3_contracts
+cargo test --test fn3_ci_smoke
 
-# Optimizer tests
-cargo test --test optim_test
+# Vulkan fault-injection matrix (test-only feature)
+cargo test --features vulkan,vulkan-fault-injection \
+  --test fn3_vulkan_faults -- --test-threads=1
 
-# Python tests
-uv run pytest tests/ -v
+# Rust half of CI: fmt, version agreement, clippy with warnings denied,
+# --no-default-features build and the default-feature Rust suites
+tools/ci/cpu-lane.sh
 
-# Full local PR gate (matches CI)
-./scripts/ci/check-rustfmt-baseline.sh
-python3 ./scripts/ci/check-clippy-baseline.py
-cargo test --lib
-cargo test --test quantized_pipeline
-cargo test --test optim_test
+# Python half of CI: maturin develop and pytest -m "not slow"
+tools/ci/python-lane.sh
+```
+
+Physical-GPU runs are serialised under the measurement lock and must demand a
+physical adapter; `FN3_VK_VALIDATION=1` turns the validation layer on for ad-hoc
+runs. `tools/ci/run-gpu-lane.sh` is the only accepted physical-evidence path.
+
+```bash
+flock /tmp/opencode/fn3-measure.lock env \
+  FN3_VK_REQUIRE_PHYSICAL=1 FN3_VK_VALIDATION=1 \
+  FASTNN_FN3_ONNX_MODEL=/path/to/model.onnx \
+  cargo test --features vulkan --test fn3_e2e -- --test-threads=1
 ```
 
 ## Pull Request Process
@@ -84,18 +100,26 @@ CI uses a diagnostic baseline at `ci/clippy-baseline.txt`. CI fails on new warni
 
 ## Feature Flags
 
-fastnn uses Cargo feature flags extensively. Enable relevant features when building:
+fastnn uses Cargo feature flags. The default set is the inference path, and CI
+builds explicit feature sets rather than `--all-features` (see
+`.github/workflows/ci.yml`).
 
 | Feature | Description |
 |---------|-------------|
 | `default` | simd + parallel + fusion-forward + python + prepared-plan |
-| `python` | PyO3 Python bindings |
-| `gpu` | Experimental WGPU backend |
-| `openblas` | OpenBLAS-backed GEMM |
+| `python` | PyO3 bindings for `fastnn.inference` (default) |
+| `prepared-plan` | Prepared-plan construction and the persistent executor path (default) |
+| `vulkan` | Vulkan compute backend; opt-in because an enabled feature advertises a device |
+| `vulkan-fault-injection` | Test-only deterministic fault injection; implies `vulkan` |
+| `cli` | Enables the `fastnn-infer` binary target |
+| `fn3` | Links the prepared-model adapter into `fn3-bench` |
 | `simd` | SIMD microkernels (default) |
 | `parallel` | Rayon-based parallelism (default) |
+| `openblas` | OpenBLAS-backed GEMM |
 
-Add `--features <feature>` or `--all-features` to cargo commands to test with your changes.
+The default `python` feature builds PyO3 as an extension module, so standalone
+binaries (`fastnn-infer`, `fn3-bench`) are built with `--no-default-features`
+plus the features they need.
 
 ## Getting Help
 
