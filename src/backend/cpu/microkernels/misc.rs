@@ -19,10 +19,6 @@ use std::arch::x86_64::*;
 
 pub const MIN_BLAS_SIZE: usize = 64;
 
-pub fn matmul_blas_into(a: &[f32], b: &[f32], out: &mut [f32], m: usize, k: usize, n: usize) {
-    matmul_blas_with_transpose_into(a, b, out, m, k, n, false, false)
-}
-
 pub fn matmul_blas_with_transpose_into(
     a: &[f32],
     b: &[f32],
@@ -457,56 +453,8 @@ pub unsafe fn upsample_nearest2d_f32_avx2(
 }
 
 // ============================================================
-// Concat — scalar and AVX2
+// Transpose 2D — AVX2 tiled 8×8
 // ============================================================
-
-/// Scalar concat: copies `input` into `output` at `output_offset`.
-/// Returns the new output offset after copy.
-#[inline]
-pub fn concat_f32_scalar(input: &[f32], output: &mut [f32], output_offset: usize) -> usize {
-    let end = (output_offset + input.len()).min(output.len());
-    let len = end - output_offset;
-    output[output_offset..end].copy_from_slice(&input[..len]);
-    output_offset + len
-}
-
-/// AVX2 concat: copies `input` into `output` at `output_offset` using
-/// 8-wide vector stores for the bulk of the copy, falling back to scalar
-/// for the remainder.
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-#[target_feature(enable = "avx2")]
-// SAFETY: Caller must ensure `input` and `output` are valid, non-overlapping,
-// and `output_offset + input.len() <= output.len()`.
-pub unsafe fn concat_f32_avx2(input: &[f32], output: &mut [f32], output_offset: usize) -> usize {
-    let out_start = output_offset;
-    let copy_len = input.len().min(output.len().saturating_sub(out_start));
-    let mut i = 0usize;
-    // 8-wide vector copy
-    while i + 8 <= copy_len {
-        let v = _mm256_loadu_ps(input.as_ptr().add(i));
-        _mm256_storeu_ps(output.as_mut_ptr().add(out_start + i), v);
-        i += 8;
-    }
-    // Scalar remainder
-    for j in i..copy_len {
-        *output.as_mut_ptr().add(out_start + j) = *input.as_ptr().add(j);
-    }
-    out_start + copy_len
-}
-
-// ============================================================
-// Transpose 2D — scalar and AVX2 tiled 8×8
-// ============================================================
-
-/// Scalar 2D transpose: out[j * m + i] = in[i * n + j]
-#[inline]
-pub fn transpose_f32_scalar(input: &[f32], output: &mut [f32], m: usize, n: usize) {
-    for i in 0..m {
-        for j in 0..n {
-            output[j * m + i] = input[i * n + j];
-        }
-    }
-}
 
 /// AVX2 tiled 8×8 2D transpose. Processes 8×8 tiles using unpack
 /// and permute instructions, falling back to scalar for edge tiles.

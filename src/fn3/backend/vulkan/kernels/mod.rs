@@ -342,13 +342,12 @@ impl KernelSet {
         }
     }
 
-    /// The registrations available in the alpha build.
+    /// The shipped registrations.
     ///
     /// Kernel owners append their module here in one place; a later
     /// registration for an op replaces the earlier one.
     pub fn alpha() -> KernelSet {
         let mut set = KernelSet::new();
-        smoke::register(&mut set);
         // Order matters only for readability: register() replaces by op id, so
         // a later registration supersedes an earlier kernel for the same op.
         pointwise::register(&mut set);
@@ -524,6 +523,17 @@ mod tests {
         }
     }
 
+    /// A launch that never runs: the replacement registration below only needs
+    /// a distinct function pointer, and `KernelSet::register` does not call it.
+    fn unused_launch(
+        _backend: &crate::inference::backend::vulkan::VulkanBackend,
+        _inputs: &[TensorView<'_>],
+        _outputs: &mut [TensorMut<'_>],
+        _params: &OpParams,
+    ) -> Fn3Result<()> {
+        unreachable!("the replacement kernel is never launched in this test")
+    }
+
     #[test]
     fn later_registration_replaces_earlier_one() {
         let mut set = KernelSet::alpha();
@@ -537,7 +547,7 @@ mod tests {
             dtypes: &[DType::F32],
             admits: None,
             kernel: &smoke::SMOKE_ADD,
-            launch: smoke::launch_add,
+            launch: unused_launch,
         };
         set.register(replacement);
         assert!(set.supports(OpId::Add).is_full());
