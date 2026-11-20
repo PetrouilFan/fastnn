@@ -354,6 +354,11 @@ impl StepRuntime<'_> {
             };
             slots.push(tensor);
         }
+        // Every key still in the pool belongs to an earlier generation: this
+        // plan's outputs were either taken above or allocated, and a later plan
+        // keys its outputs by its own shapes. Holding them would retain one
+        // dead buffer set per past length.
+        self.pool.clear();
         Ok(slots)
     }
 
