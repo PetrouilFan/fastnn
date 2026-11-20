@@ -748,9 +748,14 @@ jobs, and `44599276105` on `f013afb` failed `packaging / windows-latest` because
 two assertions compared a resolved path against the runner's 8.3 short `%TEMP%`
 spelling; those two string comparisons are the only fix.
 
-The candidate is the tip of this branch. Merging to `main`, tagging, the GitHub
-release and any package publication remain owner actions; `main` is still at
-`a2c0759` and no tag or release exists.
+The candidate was released: `main` fast-forwarded from `a2c0759` to `4db656e`
+(no merge commit, so `main`'s tip is exactly the commit hosted CI built), the
+annotated tag `v3.0.0` points at the same commit, release workflow run
+`44692913491` was green on every job, and the GitHub release carries the
+manylinux x86_64, macOS arm64 and Windows amd64 wheels. CI on `main` at that
+commit, run `44692892883`, was green as well. Nothing was published to PyPI or
+crates.io, and the wheel remains CPU-only; Vulkan ships through the crate and
+the `fastnn-infer` source build.
 
 Deferred and recorded in the release report, not passed: concurrent prepare
 races with an executing step, and `end_step` reports `Ok(0)` for a discarded
