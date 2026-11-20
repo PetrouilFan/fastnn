@@ -17,8 +17,7 @@ authority is `docs/roadmap/fn3-architecture.md`.
 - `model/mod.rs`: `ExecutionPlan`, `ModelWeights`, `PreparedModel`.
 - `model/kv.rs`: bounded per-layer KV buffers, the live extent, two-phase
   append.
-- `model/session.rs`: `Session`, `SessionPhase` — prefill/decode, the plan
-  cache, the slot pool and the step commit ordering.
+- `model/session.rs`: `Session`, `SessionPhase`, plan cache, slots, step commit.
 - `model/plan.rs`: bounded `Plan`, slot table, folds, `PlanId` and cache.
 - `model/specialize.rs`: shape resolution, constant folding, typed `OpParams`
   and the `Planner`.
