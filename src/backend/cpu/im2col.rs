@@ -221,8 +221,11 @@ pub unsafe fn im2col_kernel_rect_avx2_stride2(
     w: usize,
     col: &mut [f32],
 ) {
-    let h_out = h / 2;
-    let w_out = w / 2;
+    // 3x3, stride 2, pad 1: out = (in + 2*pad - kernel) / stride + 1
+    // = (in - 1) / 2 + 1 = (in + 1) / 2. `h / 2` truncated one row/column
+    // for odd inputs and left the caller's expected tail rows stale.
+    let h_out = h.div_ceil(2);
+    let w_out = w.div_ceil(2);
     let col_w = c * 9;
 
     for oh in 0..h_out {
@@ -282,13 +285,13 @@ pub unsafe fn im2col_kernel_rect_avx2_stride2(
                         let lo = _mm256_castps256_ps128(v);
                         let hi = _mm256_extractf128_ps(v, 1);
                         _mm_store_ss(ptr, lo);
-                        _mm_store_ss(ptr.add(col_w), _mm_unpackhi_ps(lo, lo));
-                        _mm_store_ss(ptr.add(2 * col_w), _mm_permute_ps(lo, 0b10_10_00_10));
-                        _mm_store_ss(ptr.add(3 * col_w), _mm_permute_ps(lo, 0b10_10_10_00));
+                        _mm_store_ss(ptr.add(col_w), _mm_shuffle_ps(lo, lo, 0b00_00_00_01));
+                        _mm_store_ss(ptr.add(2 * col_w), _mm_shuffle_ps(lo, lo, 0b00_00_00_10));
+                        _mm_store_ss(ptr.add(3 * col_w), _mm_shuffle_ps(lo, lo, 0b00_00_00_11));
                         _mm_store_ss(ptr.add(4 * col_w), hi);
-                        _mm_store_ss(ptr.add(5 * col_w), _mm_unpackhi_ps(hi, hi));
-                        _mm_store_ss(ptr.add(6 * col_w), _mm_permute_ps(hi, 0b10_10_00_10));
-                        _mm_store_ss(ptr.add(7 * col_w), _mm_permute_ps(hi, 0b10_10_10_00));
+                        _mm_store_ss(ptr.add(5 * col_w), _mm_shuffle_ps(hi, hi, 0b00_00_00_01));
+                        _mm_store_ss(ptr.add(6 * col_w), _mm_shuffle_ps(hi, hi, 0b00_00_00_10));
+                        _mm_store_ss(ptr.add(7 * col_w), _mm_shuffle_ps(hi, hi, 0b00_00_00_11));
 
                         ow += 8;
                     }
@@ -587,6 +590,52 @@ mod tests {
                 w,
                 max_diff
             );
+        }
+    }
+
+    #[test]
+    fn test_simd_im2col_stride2_matches_scalar_for_odd_and_even_sizes() {
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        {
+            if !crate::backend::cpu::microkernels::has_avx2() {
+                return;
+            }
+            let shapes: [(usize, usize, usize); 6] = [
+                (1, 8, 8),
+                (3, 9, 9),
+                (2, 16, 17),
+                (3, 17, 16),
+                (1, 41, 41),
+                (4, 64, 63),
+            ];
+            for &(c, h, w) in &shapes {
+                let col_w = c * 9;
+                let h_out = h.div_ceil(2);
+                let w_out = w.div_ceil(2);
+                let input: Vec<f32> = (0..c * h * w)
+                    .map(|index| (index as f32 * 0.1).sin())
+                    .collect();
+
+                let mut reference = vec![-1.0f32; h_out * w_out * col_w];
+                unsafe {
+                    im2col_kernel_rect(&input, c, h, w, 3, 3, 2, 1, 1, &mut reference);
+                }
+
+                let mut actual_col = vec![-1.0f32; h_out * w_out * col_w];
+                unsafe {
+                    im2col_kernel_rect_avx2_stride2(&input, c, h, w, &mut actual_col);
+                }
+
+                for (index, (expected, actual)) in
+                    reference.iter().zip(actual_col.iter()).enumerate()
+                {
+                    assert_eq!(
+                        expected.to_bits(),
+                        actual.to_bits(),
+                        "c={c},h={h},w={w},index={index}"
+                    );
+                }
+            }
         }
     }
 }

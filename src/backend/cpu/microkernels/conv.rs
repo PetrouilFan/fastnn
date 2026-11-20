@@ -245,6 +245,10 @@ pub fn conv2d_f32_tiled(
     dilation: usize,
     groups: usize,
 ) {
+    assert!(
+        bias.is_empty() || bias.len() == f,
+        "conv2d bias must have one entry per output channel"
+    );
     let c_per_group = c / groups.max(1);
     let f_per_group = f / groups.max(1);
     let h_out =
@@ -330,8 +334,7 @@ pub fn conv2d_f32_tiled(
                                 for oc in 0..oc_tile {
                                     let mut val = acc[pos][oc];
                                     if !bias.is_empty() {
-                                        let b = (ff_abs + oc) % bias.len();
-                                        val += bias[b];
+                                        val += bias[ff_abs + oc];
                                     }
                                     output[out_base + (ff_abs + oc) * (h_out * w_out)] = val;
                                 }
@@ -358,7 +361,10 @@ pub enum ConvActivation {
 pub(crate) fn apply_conv_activation(x: f32, activation: ConvActivation) -> f32 {
     match activation {
         ConvActivation::Relu => x.max(0.0),
-        ConvActivation::Gelu => 0.5 * x * (1.0 + (x * 0.797_884_6_f32).tanh()),
+        ConvActivation::Gelu => {
+            let x3 = x * x * x;
+            0.5 * x * (1.0 + (0.797_884_6_f32 * (x + 0.044_715_f32 * x3)).tanh())
+        }
         ConvActivation::Silu => x / (1.0 + (-x).exp()),
     }
 }
@@ -523,10 +529,22 @@ pub fn conv2d_f32_im2col_gemm(
 ) {
     let c_per_group = c / groups.max(1);
     let f_per_group = f / groups.max(1);
-    let h_out =
-        (h + 2 * padding).saturating_sub(dilation * (kh.saturating_sub(1)) + 1) / stride + 1;
-    let w_out =
-        (w + 2 * padding).saturating_sub(dilation * (kw.saturating_sub(1)) + 1) / stride + 1;
+    // ONNX defines an empty output when the dilated kernel does not fit in the
+    // padded input. `saturating_sub` used to turn that case into one output
+    // row, so im2col wrote nothing and the GEMM consumed stale bytes from the
+    // thread-local column buffer. Compute zero and stop before either happens.
+    let effective_kh = dilation * (kh.saturating_sub(1)) + 1;
+    let effective_kw = dilation * (kw.saturating_sub(1)) + 1;
+    let h_out = (h + 2 * padding)
+        .checked_sub(effective_kh)
+        .map_or(0, |span| span / stride + 1);
+    let w_out = (w + 2 * padding)
+        .checked_sub(effective_kw)
+        .map_or(0, |span| span / stride + 1);
+    if h_out == 0 || w_out == 0 {
+        output.fill(0.0);
+        return;
+    }
     let spatial_size = h_out * w_out;
 
     // Small tensor fallback to avoid im2col overhead
@@ -652,6 +670,105 @@ pub fn conv2d_f32_im2col_gemm(
                         1isize,
                     );
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gelu_uses_the_tanh_approximation_the_avx2_paths_use() {
+        for x in [-3.0f32, -1.0, -0.25, 0.0, 0.5, 1.0, 2.5] {
+            let expected = 0.5 * x * (1.0 + (0.797_884_6 * (x + 0.044_715 * x * x * x)).tanh());
+            assert_eq!(apply_conv_activation(x, ConvActivation::Gelu), expected);
+        }
+    }
+
+    #[test]
+    fn a_kernel_larger_than_the_padded_input_clears_the_output() {
+        // 2x2 input, 3x3 kernel, no padding: the output is empty by ONNX
+        // geometry. The caller's one-element buffer must not keep an earlier
+        // convolution's bytes, which is what the saturating formula caused.
+        let input = [1.0f32; 4];
+        let weight = [1.0f32; 9];
+        let mut output = [7.0f32];
+        conv2d_f32_im2col_gemm(
+            &input,
+            &weight,
+            &[],
+            &mut output,
+            1,
+            1,
+            2,
+            2,
+            1,
+            3,
+            3,
+            1,
+            0,
+            1,
+            1,
+            None,
+        );
+        assert_eq!(output, [0.0]);
+    }
+
+    #[test]
+    fn stride_two_odd_input_matches_a_naive_convolution() {
+        // 17x17 with 3x3, stride 2, pad 1: output 9x9 (81 elements), above the
+        // small-tensor fallback, so this runs the stride-2 im2col path that
+        // used to store the wrong lanes.
+        const H: usize = 17;
+        const W: usize = 17;
+        const K: usize = 3;
+        const OUT: usize = 9;
+        let input: Vec<f32> = (0..H * W).map(|i| ((i as f32) * 0.37).sin()).collect();
+        let weight: Vec<f32> = (0..K * K).map(|i| 0.1 + i as f32 * 0.01).collect();
+        let bias = [0.25f32];
+        let mut output = vec![0.0f32; OUT * OUT];
+        conv2d_f32_im2col_gemm(
+            &input,
+            &weight,
+            &bias,
+            &mut output,
+            1,
+            1,
+            H,
+            W,
+            1,
+            K,
+            K,
+            2,
+            1,
+            1,
+            1,
+            None,
+        );
+
+        for oy in 0..OUT {
+            for ox in 0..OUT {
+                let mut expected = bias[0];
+                for ky in 0..K {
+                    let iy = oy as isize * 2 + ky as isize - 1;
+                    if !(0..H as isize).contains(&iy) {
+                        continue;
+                    }
+                    for kx in 0..K {
+                        let ix = ox as isize * 2 + kx as isize - 1;
+                        if !(0..W as isize).contains(&ix) {
+                            continue;
+                        }
+                        expected += input[iy as usize * W + ix as usize] * weight[ky * K + kx];
+                    }
+                }
+                let actual = output[oy * OUT + ox];
+                assert!(
+                    (actual - expected).abs() <= 1e-5,
+                    "at ({oy},{ox}): expected {expected}, got {actual}"
+                );
             }
         }
     }
