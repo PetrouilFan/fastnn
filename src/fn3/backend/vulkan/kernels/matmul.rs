@@ -577,6 +577,9 @@ fn operand_source<'a>(
     view: &TensorView<'a>,
     window_elements: u64,
 ) -> Fn3Result<io::Operand<'a>> {
+    // Same lookup-and-check pair as `io::input`; hold the gate across both so
+    // a concurrent prepare cannot make a staged operand look late.
+    let _gate = backend.prepare_gate_read();
     if view.is_contiguous() && view.meta().offset() == 0 {
         if let Some(buffer) = backend.resident_input(view)? {
             return Ok(io::Operand::Resident { buffer });

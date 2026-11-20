@@ -48,7 +48,7 @@
 //! already available for #59/#60/#61 and #62 to avoid per-op round trips.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::thread::ThreadId;
 
 use ash::vk;
@@ -199,6 +199,13 @@ pub struct VulkanBackend {
     residency: ResidencyLedger,
     /// One device copy per immutable tensor, uploaded at prepare (FN3-26).
     persistent: resident::PersistentTable,
+    /// Serialises residency publication against staged-input checks. A session
+    /// that plans before another thread prepares could otherwise look up an
+    /// operand (not yet persistent) and then reject it for being staged after
+    /// the concurrent prepare inserted it. The table itself is a mutex; this
+    /// gate makes the lookup-and-check pair atomic, so the only outcomes are
+    /// "prepare happened first" or "the check happened first".
+    prepare_gate: RwLock<()>,
     /// Upload/readback/residency counters, attributed per phase.
     residency_counters: resident::ResidencyCounters,
     /// Declared last so every resource above drops before the device.
@@ -378,6 +385,7 @@ impl VulkanBackend {
             submitters: Mutex::new(SubmitterPool::default()),
             residency: ResidencyLedger::new(),
             persistent: resident::PersistentTable::new(),
+            prepare_gate: RwLock::new(()),
             residency_counters: resident::ResidencyCounters::new(),
             device,
         }))
@@ -390,6 +398,20 @@ impl VulkanBackend {
     /// `Backend::device(&*backend)` is the identifier.
     pub fn vulkan_device(&self) -> &Arc<Device> {
         &self.device
+    }
+
+    /// Hold residency publication still while a staged-input check runs.
+    pub(crate) fn prepare_gate_read(&self) -> RwLockReadGuard<'_, ()> {
+        self.prepare_gate
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Publish persistent residency with every staged-input check quiescent.
+    pub(crate) fn prepare_gate_write(&self) -> RwLockWriteGuard<'_, ()> {
+        self.prepare_gate
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// The adapter this backend runs on.

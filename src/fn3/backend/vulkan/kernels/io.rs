@@ -140,6 +140,9 @@ pub(super) fn input<'a>(
 ) -> Fn3Result<Operand<'a>> {
     view.meta().require_dtype(Some(op), dtype)?;
     require_contiguous(op, view, name, owner)?;
+    // Hold the gate across lookup and check so a concurrent prepare cannot
+    // publish this operand between the two and turn it into a late upload.
+    let _gate = backend.prepare_gate_read();
     if let Some(buffer) = backend.resident_input(view)? {
         let bytes = view.meta().byte_len()? as u64;
         if bytes == 0 {

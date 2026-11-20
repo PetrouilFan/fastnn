@@ -688,6 +688,7 @@ impl super::VulkanBackend {
     /// which is what makes several sessions over one model cheap. The host
     /// storage is never touched, so a CPU run of the same model keeps working.
     pub fn prepare_persistent_tensors(&self, tensors: &[&Tensor]) -> Fn3Result<()> {
+        let _gate = self.prepare_gate_write();
         for tensor in tensors {
             let Some(key) = PersistentKey::of_tensor(tensor) else {
                 // Zero-byte or strided immutable tensors are not bindable as one
