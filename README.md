@@ -1,136 +1,75 @@
-# fastnn
+# FastNN
 
-[![CI](https://github.com/PetrouilFan/fastnn/actions/workflows/ci.yml/badge.svg)](https://github.com/PetrouilFan/fastnn/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/PetrouilFan/fastnn/branch/main/graph/badge.svg)](https://codecov.io/gh/PetrouilFan/fastnn)
-[![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://python.org)
-[![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://rustup.rs)
-[![Downloads](https://img.shields.io/github/downloads/PetrouilFan/fastnn/total)](https://github.com/PetrouilFan/fastnn)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![CI](https://github.com/PetrouilFan/fastnn/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/PetrouilFan/fastnn/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/PetrouilFan/fastnn)](https://github.com/PetrouilFan/fastnn/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Inference-only neural networks in Rust, with a Python binding and a Vulkan
-compute backend.**
+FastNN is a Rust inference runtime for supported ONNX decoder models, with Python bindings and a command-line interface. Prepare a model once as a `.fnn3` artifact, then run prefill and cached decoding from that artifact on CPU or Vulkan. The artifact contains the graph and weights, so it can run offline without the original ONNX file.
 
-fastnn 3.0 imports an ONNX decoder, compiles it into a versioned prepared-model
-artifact, plans it for a bounded shape envelope, and runs prefill plus cached
-decode on a CPU reference backend or on a physical Vulkan device. It is a
-deletion-first rewrite: there is no autograd, no optimizer, no training loop and
-no wgpu backend in this tree.
-
-> ⚠️ Alpha. APIs, the prepared-model format and performance may change before
-> the stable release.
-
----
-
-## Highlights
-
-- **One 3.0 inference engine** — `PreparedModel` is immutable and shareable; each
-  `Session` owns its KV cache, step counter and plan cache. CPU and Vulkan run
-  the same plan through the same backend trait.
-- **No silent fallback** — an explicit device request either resolves to that
-  device or fails naming the request and the available devices. A backend that
-  cannot run an op returns `UnsupportedOp`; it never returns an approximation.
-- **Strict ONNX import** — a bounds-checked protobuf reader maps the pinned
-  GPT-2 decoder to a bounded graph, folds integer shape arithmetic at plan
-  time, and rejects unsupported ops by name.
-- **Versioned artifact** — the `.fnn3` payload carries a format version,
-  dtype codes, the value/node tables and weight bytes with CRC and SHA-256
-  verification.
-- **CPU + Vulkan** — a portable FP32 reference backend, plus Vulkan transform,
-  embedding, pointwise, matmul, norm, reduce and fused-attention kernels with
-  validation-layer-clean dispatch.
-- **Rust, CLI and Python share one engine** — `fastnn-infer` and `fastnn.inference`
-  call the same `Session::prefill` / `Session::decode`.
+- **CPU inference** uses an adaptive thread budget by default. Rust callers can set a fixed budget.
+- **Vulkan inference** keeps weights, intermediate tensors, and the KV cache on the device across steps. Explicit device requests fail with an error if the device or operation is unavailable.
+- **Weight-only INT8** is opt-in. Eligible static projections use INT8 weights and FP32 activations. The runtime reports coverage, and other operations run in FP32 on the selected backend.
 
 ## Installation
 
-**From source** (currently recommended):
+| Interface | Requirements | Backends |
+| --- | --- | --- |
+| Python wheel | Python 3.11+ | CPU |
+| `fastnn-infer` CLI | Rust 1.89+ and a source build | CPU, optional Vulkan |
+| Rust library (`fastnn::inference`) | Rust 1.89+ and a source dependency | CPU, optional Vulkan |
+
+Download the wheel for your platform from [GitHub Releases](https://github.com/PetrouilFan/fastnn/releases/latest). Release 3.0.0 provides wheels for Linux x86-64, macOS arm64, and Windows x86-64. Install the downloaded file in a virtual environment:
 
 ```bash
-git clone https://github.com/PetrouilFan/fastnn.git
-cd fastnn
-uv pip install -e .
+python -m pip install ./path/to/downloaded.whl
 ```
 
-**Prerequisites:** Rust stable, Python ≥ 3.11, [uv](https://github.com/astral-sh/uv).
+The repository's [installation guide](docs/guides/getting-started.md) covers source builds. For reproducible release builds, check out the corresponding Git tag.
 
-The Python package is built with `maturin` and exposes the Rust extension as
-`fastnn._core`.
+## Run a model
 
-## Quick Start
+From the repository root, fetch the pinned tiny GPT-2 model and build the CLI. The fetcher checks the model against the committed lock file. You can substitute a local, supported ONNX decoder.
 
-### Python: prepare once, then decode
+```bash
+python3 tools/parity/fetch_models.py --suite tiny-gpt2
+MODEL=tools/parity/.cache/models/tiny-gpt2/onnx/model.onnx
+
+cargo build --release --no-default-features --features cli --bin fastnn-infer
+CLI=./target/release/fastnn-infer
+
+"$CLI" prepare --onnx "$MODEL" --out tiny-gpt2.fnn3
+"$CLI" generate --model tiny-gpt2.fnn3 --device cpu \
+  --tokens 464,2068,7586,21831 --max-new-tokens 4
+```
+
+The API and CLI accept token IDs. Use the model's tokenizer in your application to encode prompts and decode generated IDs. For a GPU source build, use `--features cli,vulkan`, run `fastnn-infer diagnose` with a compatible Vulkan driver installed, then select `--device vulkan`. Add `--weight-int8` to `run` or `generate` to enable packed INT8 projections.
+
+### Python
+
+Load the artifact from the CLI example, or prepare one in Python with `inference.prepare("model.onnx", "tiny-gpt2.fnn3")`.
 
 ```python
-import fastnn.inference as fn3
+from fastnn import inference
 
-report = fn3.prepare("model.onnx", "model.fnn3")
-print(report.status, report.geometry)
-
-model = fn3.load("model.fnn3", source="model.onnx", device="cpu")
+model = inference.load("tiny-gpt2.fnn3", device="cpu")
 session = model.session()
 
 logits = session.prefill([464, 2068, 7586, 21831])
-print(int(logits.argmax()), session.cache_len)
-
-for token in [640, 11, 612]:
-    logits = session.decode([token])
-    print(int(logits.argmax()), session.cache_len)
+next_token = int(logits.argmax())
+next_logits = session.decode([next_token])
 ```
 
-Pass `device="vulkan"` on a build with `--features vulkan` to run the same
-session on a physical GPU. A request the build or the machine cannot satisfy
-raises `Fn3DeviceError`; it never falls back to CPU.
+Each session owns its KV cache. Set `weight_int8=True` on `inference.load` to enable INT8 weights.
 
-### CLI
+## Verification and performance
 
-```bash
-cargo build --release --no-default-features --features cli --bin fastnn-infer
-./target/release/fastnn-infer prepare --onnx model.onnx --out model.fnn3
-./target/release/fastnn-infer inspect model.fnn3
-./target/release/fastnn-infer run --model model.fnn3 --onnx model.onnx --tokens 464,2068,7586
-./target/release/fastnn-infer generate --model model.fnn3 --onnx model.onnx --tokens 464,2068 --steps 4
-```
+The 3.0.0 evidence covers tiny and trained GPT-2 on Linux x86-64, with physical Vulkan runs on a GeForce GTX 1080 Ti. Wheel availability is broader than the verified inference matrix. The importer accepts a defined subset of ONNX graphs and returns errors for unsupported operators or shapes. See the [support matrix](docs/reports/fn3-74-support-matrix.md) for tested platforms, drivers, model variants, and context lengths.
 
-### Rust
-
-```rust
-use fastnn::inference::model::PreparedModel;
-use fastnn::inference::DeviceRequest;
-
-let request = DeviceRequest::parse("cpu")?;
-let model = PreparedModel::load("model.fnn3", None, request)?;
-let mut session = model.session()?;
-let logits = session.prefill(&[464, 2068, 7586, 21831])?;
-```
-
-See `src/fn3/AGENTS.md` and `docs/roadmap/fn3-architecture.md` for the contract.
-
-## Project Components
-
-| Component | Description |
-|-----------|-------------|
-| 3.0 inference core | `src/fn3/`: contracts, storage, CPU reference, Vulkan platform and kernels, ONNX import, prepared artifact, planner, session/KV |
-| CLI | `src/bin/fastnn-infer.rs`: prepare, inspect, run, generate, diagnose |
-| Python | `fastnn/inference/` over `fastnn._core.inference`; CPU and honest Vulkan refusal |
-| Secondary 2.x AOT tree | `src/ir/`, `src/compiler/`, `src/backend/`, eager `src/tensor/`/`src/nn/` forward API, ONNX conversion, `.fnn` I/O. Inference only; kept for the legacy compiled path and its quantized CPU pipeline |
+Quantization reduces the size of eligible projection weights. End-to-end latency and memory use depend on the model, backend, and context. The [3.0.0 validation report](docs/reports/fn3-3.0.0-release.md) links the benchmark commands and raw results.
 
 ## Documentation
 
-- [Getting Started](docs/guides/getting-started.md) — build, prepare a model, run a session
-- [Inference Architecture](docs/roadmap/fn3-architecture.md) — 3.0 runtime and contracts
-- [Python API](docs/reference/python-api.md) — `fastnn.inference`
-- [Migration from 2.x](docs/guides/migrate-from-2x.md) — replacement for the standalone `fastnn-runtime` and retained APIs
-- [Documentation Index](docs/index.md) — 3.0 guides, retained 2.x reference, and historical evidence
-- [CHANGELOG](CHANGELOG.md) — release history
-
-## Testing
-
-```bash
-cargo test --lib
-cargo test --test fn3_contracts
-uv run pytest tests/ -m "not slow"       # Python binding and tooling
-cargo test --features vulkan --test fn3_vulkan_smoke   # physical GPU
-```
-
-The pinned model and parity fixtures live under `fixtures/` and
-`tools/parity/`; they are never committed as weights.
+- [CLI quickstart](docs/quickstart-fn3.md) and [Python API](docs/reference/python-api.md)
+- [INT8 execution](docs/quantization/artifact-int8.md) and [runtime architecture](docs/roadmap/fn3-architecture.md)
+- [Migration from 2.x](docs/guides/migrate-from-2x.md) and [changelog](CHANGELOG.md)
+- [Contributing](CONTRIBUTING.md) and [documentation index](docs/index.md)
