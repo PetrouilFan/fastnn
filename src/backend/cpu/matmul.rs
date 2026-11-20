@@ -1,5 +1,3 @@
-#![allow(clippy::too_many_arguments)]
-
 use crate::backend::cpu::blas::matmul_blas_into;
 use crate::backend::{BackendError, BufferSlice};
 use crate::dtypes::{I4x8, I8x4, PackedWord};

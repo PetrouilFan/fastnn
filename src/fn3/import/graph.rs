@@ -493,16 +493,6 @@ impl DecoderGeometry {
             layout: KvCacheLayout::BatchHeadsCapacityHeadDim,
         }
     }
-
-    /// Bytes of one layer's key plus value cache at `capacity_tokens`.
-    pub fn kv_layer_bytes(
-        &self,
-        capacity_tokens: u64,
-        batch: u64,
-    ) -> Result<u64, crate::inference::error::Fn3Error> {
-        let config = self.kv_cache_config(capacity_tokens, batch);
-        Ok(config.buffer_bytes()?.saturating_mul(2))
-    }
 }
 
 /// A declared shape that contradicts a fully static inferred shape.

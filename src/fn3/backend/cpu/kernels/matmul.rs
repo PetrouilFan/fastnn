@@ -331,7 +331,6 @@ pub(crate) fn matmul(
 /// element strides between consecutive `k`. Both bounds are checked once as a
 /// slice range, and the `step_by` iterators cannot then run past the end, so
 /// this function contains no unchecked indexing.
-#[allow(clippy::too_many_arguments)]
 fn dot_rows(
     op: OpId,
     lhs: &[f32],

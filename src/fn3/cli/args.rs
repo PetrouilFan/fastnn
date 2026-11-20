@@ -355,7 +355,6 @@ fn parse_generate(args: &[String]) -> Result<Command, CliError> {
     }))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn finish_infer(
     command: &str,
     model: Option<PathBuf>,

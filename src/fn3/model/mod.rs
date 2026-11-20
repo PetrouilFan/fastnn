@@ -74,7 +74,7 @@ use crate::inference::backend::Backend;
 use crate::inference::device::DeviceId;
 use crate::inference::error::Fn3Error;
 use crate::inference::ops::OpId;
-use crate::inference::shape::{LiveDims, ShapeEnvelope};
+use crate::inference::shape::ShapeEnvelope;
 use crate::inference::tensor::{Tensor, TensorMut, TensorView};
 
 /// One op invocation inside an [`ExecutionPlan`].
@@ -99,12 +99,6 @@ impl Instruction {
             outputs,
             params: crate::inference::backend::OpParams::default(),
         }
-    }
-
-    /// Builder: replace the attributes.
-    pub fn with_params(mut self, params: crate::inference::backend::OpParams) -> Instruction {
-        self.params = params;
-        self
     }
 }
 
@@ -508,11 +502,6 @@ impl PreparedModel {
             });
         }
         self.plan.execute(backend, slots)
-    }
-
-    /// Check a concrete dynamic shape against the envelope.
-    pub fn check_dims(&self, dims: &LiveDims) -> Result<(), Fn3Error> {
-        self.envelope.check(dims)
     }
 }
 

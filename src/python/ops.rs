@@ -169,7 +169,6 @@ fn fused_linear_gelu(
     Ok(PyTensor::from_tensor(output))
 }
 
-#[allow(clippy::too_many_arguments)]
 #[pyfunction]
 fn fused_conv_bn_silu(
     x: &PyTensor,

@@ -79,7 +79,6 @@ pub(crate) mod avx2 {
     /// so no store aliases another task's store or either input. No reference
     /// into `out` is created while a load is outstanding, and nothing here
     /// retains a pointer after returning.
-    #[allow(clippy::too_many_arguments)]
     #[target_feature(enable = "avx2")]
     pub(crate) unsafe fn kernel(
         lhs: &[f32],
@@ -145,7 +144,6 @@ pub(crate) mod avx2 {
     ///
     /// `row + 4 <= rows`, `column + 8 <= columns`, and the window invariants of
     /// [`kernel`].
-    #[allow(clippy::too_many_arguments)]
     #[target_feature(enable = "avx2")]
     unsafe fn block_4x8(
         lhs: &[f32],
@@ -188,7 +186,6 @@ pub(crate) mod avx2 {
     ///
     /// `row < rows`, `column + 8 <= columns`, and the window invariants of
     /// [`kernel`].
-    #[allow(clippy::too_many_arguments)]
     #[target_feature(enable = "avx2")]
     unsafe fn block_1x8(
         lhs: &[f32],
@@ -222,7 +219,6 @@ pub(crate) mod avx2 {
     /// # Safety
     ///
     /// `row + 4 <= rows`, `column < columns`, and the window invariants.
-    #[allow(clippy::too_many_arguments)]
     #[target_feature(enable = "avx2")]
     unsafe fn rows_4_columns_tail(
         lhs: &[f32],
@@ -252,7 +248,6 @@ pub(crate) mod avx2 {
     /// # Safety
     ///
     /// `row < rows`, `column < columns`, and the window invariants.
-    #[allow(clippy::too_many_arguments)]
     #[target_feature(enable = "avx2")]
     unsafe fn rows_1_columns_tail(
         lhs: &[f32],

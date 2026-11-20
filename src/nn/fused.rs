@@ -66,7 +66,6 @@ pub struct FusedConvBn<A: Activation = NoAct> {
 }
 
 impl<A: Activation> FusedConvBn<A> {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         in_channels: i64,
         out_channels: i64,

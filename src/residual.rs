@@ -13,7 +13,6 @@ pub struct ResidualBlock {
 }
 
 impl ResidualBlock {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         conv1_in: i64,
         conv1_out: i64,

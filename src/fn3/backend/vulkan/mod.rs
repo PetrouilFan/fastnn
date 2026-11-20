@@ -708,11 +708,6 @@ impl VulkanBackend {
         self.device.reclaim_quarantine()
     }
 
-    /// Handle ledger report (every Vulkan object created by this backend).
-    pub fn handle_report(&self) -> String {
-        self.device.ledger().report()
-    }
-
     /// Kinds with a non-zero created-minus-destroyed count.
     pub fn outstanding_handles(&self) -> Vec<String> {
         self.device.ledger().outstanding()

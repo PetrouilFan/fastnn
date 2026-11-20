@@ -134,7 +134,6 @@ pub fn execute(args: &PrepareArgs, out: &mut dyn Write) -> Result<(), CliError> 
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn print_summary(
     args: &PrepareArgs,
     import: &ModelImport,

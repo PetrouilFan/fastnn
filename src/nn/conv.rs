@@ -42,7 +42,6 @@ macro_rules! impl_conv_type {
         }
 
         impl $name {
-            #[allow(clippy::too_many_arguments)]
             pub fn new(
                 in_channels: i64,
                 out_channels: i64,

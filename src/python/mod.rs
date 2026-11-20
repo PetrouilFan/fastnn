@@ -1,4 +1,3 @@
-#![allow(clippy::too_many_arguments)]
 use crate::nn::{self as core_nn, Module};
 use crate::storage::allocator_stats as storage_allocator_stats;
 use crate::storage::{DType, Device};

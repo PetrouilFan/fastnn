@@ -1,4 +1,3 @@
-#![allow(clippy::too_many_arguments)]
 use crate::nn::{Module, TrainingState};
 use crate::tensor::Tensor;
 

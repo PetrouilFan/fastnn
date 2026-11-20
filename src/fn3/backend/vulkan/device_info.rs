@@ -306,11 +306,6 @@ impl AdapterInfo {
         })
     }
 
-    /// `true` if the adapter exposes `name`.
-    pub fn has_extension(&self, name: &str) -> bool {
-        self.extensions.iter().any(|extension| extension == name)
-    }
-
     /// Canonical UUID string.
     pub fn uuid_string(&self) -> String {
         uuid_to_string(&self.device_uuid)
@@ -355,18 +350,6 @@ impl AdapterInfo {
             ),
             _ => format!("0x{:08x}", self.driver_version_raw),
         }
-    }
-
-    /// One-line label used in device lists.
-    pub fn summary_line(&self) -> String {
-        format!(
-            "[{}] {:<40} type={:?} api={} uuid={}",
-            self.index,
-            self.name,
-            self.device_type,
-            format_version(self.api_version),
-            self.uuid_string()
-        )
     }
 
     /// Capabilities the FN3 kernels require before a device is opened.

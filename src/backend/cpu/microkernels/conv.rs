@@ -47,7 +47,6 @@ thread_local! {
     };
 }
 
-#[allow(clippy::too_many_arguments)]
 // SAFETY: Caller must ensure all pointer arguments are valid, non-overlapping,
 // and point to allocations of sufficient size for the convolution parameters.
 pub unsafe fn conv2d_im2col(
@@ -229,7 +228,6 @@ pub unsafe fn conv2d_im2col(
 /// to keep filter weights and partial sums in registers. The inner
 /// (cc, kh, kw) loop broadcasts the input value and does 4 FMAs,
 /// which the compiler auto-vectorizes.
-#[allow(clippy::too_many_arguments)]
 pub fn conv2d_f32_tiled(
     input: &[f32],
     weight: &[f32],
@@ -505,7 +503,6 @@ pub(crate) unsafe fn conv_sgemm(
 
 /// Optimized conv2d using im2col transformation + sgemm.
 /// Fast path for 1x1 convolutions (no im2col needed).
-#[allow(clippy::too_many_arguments)]
 pub fn conv2d_f32_im2col_gemm(
     input: &[f32],
     weight: &[f32],

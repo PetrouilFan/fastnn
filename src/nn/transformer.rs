@@ -234,7 +234,6 @@ impl Clone for TransformerEncoder {
 }
 
 impl TransformerEncoder {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         vocab_size: i64,
         max_seq_len: i64,

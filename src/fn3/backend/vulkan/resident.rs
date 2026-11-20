@@ -648,19 +648,6 @@ pub fn require_whole_buffer(view: &TensorView<'_>, what: &'static str) -> Fn3Res
     require_whole_meta(view.meta(), what)
 }
 
-/// Describe the residency of one view for diagnostics.
-pub fn describe_view(view: &TensorView<'_>) -> String {
-    match view.storage().residency() {
-        Some(residency) => format!(
-            "{} resident ({}), {} bytes",
-            residency.backend(),
-            residency.describe(),
-            view.storage().len()
-        ),
-        None => format!("host storage, {} bytes", view.storage().len()),
-    }
-}
-
 impl super::VulkanBackend {
     /// Attribute subsequent counter events to `phase`.
     pub fn set_phase(&self, phase: ResidencyPhase) {

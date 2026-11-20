@@ -92,11 +92,6 @@ impl Shape {
         self.dims.len()
     }
 
-    /// `true` for rank 0.
-    pub fn is_scalar(&self) -> bool {
-        self.dims.is_empty()
-    }
-
     /// `true` if any extent is zero, i.e. the tensor has no elements.
     pub fn has_zero_extent(&self) -> bool {
         self.dims.contains(&0)
@@ -381,11 +376,6 @@ impl Strides {
     /// Stride of one axis.
     pub fn get(&self, axis: usize) -> Option<i64> {
         self.strides.get(axis).copied()
-    }
-
-    /// `true` if these strides are contiguous for `shape`.
-    pub fn is_contiguous_for(&self, shape: &Shape) -> bool {
-        shape.is_contiguous(self)
     }
 
     /// Number of elements the view spans: `1 + sum((extent - 1) * stride)`.

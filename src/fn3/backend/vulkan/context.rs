@@ -318,11 +318,6 @@ impl Buffer {
         }
     }
 
-    /// `true` if the buffer has a host mapping.
-    pub fn is_host_visible(&self) -> bool {
-        self.class == MemoryClass::HostVisible
-    }
-
     /// Check that `offset..offset+len` lies inside the buffer.
     pub fn check_range(&self, offset: u64, len: u64, what: &str) -> Result<()> {
         check_range(&format!("{} ({what})", self.name), offset, len, self.size)

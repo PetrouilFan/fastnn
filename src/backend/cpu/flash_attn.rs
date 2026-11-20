@@ -74,7 +74,6 @@ pub fn flash_attention(
     output
 }
 
-#[allow(clippy::too_many_arguments)]
 fn flash_attention_single(
     q: &[f32],
     k: &[f32],

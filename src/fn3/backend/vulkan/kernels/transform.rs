@@ -786,7 +786,6 @@ pub fn launch_unsqueeze(
 // ---------------------------------------------------------------------------
 
 /// Push constants for one block move.
-#[allow(clippy::too_many_arguments)]
 fn block_push(
     op: OpId,
     elements: u32,

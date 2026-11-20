@@ -33,7 +33,7 @@ use std::time::Instant;
 
 use ash::vk;
 
-use super::context::{BindingArg, BindingRole, BufferTicket, KernelInvocation};
+use super::context::{BindingRole, BufferTicket, KernelInvocation};
 use super::device::Device;
 use super::error::{check, Error, Result};
 use super::quarantine::{PendingEntry, RetainedSubmitter};
@@ -925,11 +925,6 @@ impl Submitter {
         self.serial
     }
 
-    /// `true` while a submission is in flight.
-    pub fn is_in_flight(&self) -> bool {
-        self.in_flight
-    }
-
     /// `true` when this submitter's handles moved to the device quarantine.
     pub fn is_quarantined(&self) -> bool {
         self.quarantined
@@ -1529,24 +1524,4 @@ impl Recorder {
                 .collect(),
         })
     }
-
-    /// `true` while the recorder is active (always, for a live recorder).
-    pub fn is_recording(&self) -> bool {
-        true
-    }
-}
-
-/// Copy a `BindingArg` list into the snapshot form used by residency records.
-pub fn snapshot_bindings(bindings: &[BindingArg<'_>]) -> Vec<BindingSnapshot> {
-    bindings
-        .iter()
-        .map(|binding| BindingSnapshot {
-            binding: binding.binding,
-            role: binding.role,
-            buffer_id: binding.buffer.id(),
-            offset: binding.offset,
-            range: binding.range,
-            device_local: binding.buffer.class() == super::memory::MemoryClass::DeviceLocal,
-        })
-        .collect()
 }

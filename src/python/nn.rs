@@ -223,7 +223,6 @@ struct Conv2d {
 impl_nn_module!(Conv2d {
     #[new]
     #[pyo3(signature = (in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=true))]
-    #[allow(clippy::too_many_arguments)]
     fn new(
         in_channels: i64,
         out_channels: i64,
@@ -257,7 +256,6 @@ impl_nn_module!(Conv2d {
     }
 
     #[classmethod]
-    #[allow(clippy::too_many_arguments)]
     fn from_weights(
         _cls: &Bound<'_, PyType>,
         weight: PyTensor,
@@ -471,7 +469,6 @@ impl_nn_module!(ResidualBlock {
         bn2_features,
         downsample = None
     ))]
-    #[allow(clippy::too_many_arguments)]
     fn new(
         conv1_in: i64,
         conv1_out: i64,
@@ -599,7 +596,6 @@ impl_nn_module!(BatchNorm1d {
     }
 
     #[classmethod]
-    #[allow(clippy::too_many_arguments)]
     fn from_weights(
         _cls: &Bound<'_, PyType>,
         weight: PyTensor,
@@ -1138,7 +1134,6 @@ struct PyTransformerEncoder {
 
 impl_nn_module!(PyTransformerEncoder {
     #[new]
-    #[allow(clippy::too_many_arguments)]
     fn new(
         vocab_size: i64,
         max_seq_len: i64,

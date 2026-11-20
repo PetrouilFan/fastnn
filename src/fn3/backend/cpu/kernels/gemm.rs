@@ -82,7 +82,6 @@ const BLOCK: usize = 4;
 /// each buffer. The three windows are bounds-checked here, once; the kernels
 /// below then work on exact-length slices. `threads` is the runtime budget for
 /// this instruction: at most that many output tiles are submitted.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn row_major_slab(
     op: OpId,
     lhs: &[f32],
@@ -239,7 +238,6 @@ fn span_overflow(op: OpId, what: &'static str, left: usize, right: usize) -> Fn3
 /// the task owns `columns` columns of it. `out` starts at the task's first
 /// column, so its row `r` begins at `r * out_stride`. `lhs` always has `inner`
 /// elements per row, including a row-tiled sub-slab, which starts at that row.
-#[allow(clippy::too_many_arguments)]
 fn slab(
     lhs: &[f32],
     rhs: &[f32],

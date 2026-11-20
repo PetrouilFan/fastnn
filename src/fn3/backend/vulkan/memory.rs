@@ -404,15 +404,6 @@ impl MemoryAllocator {
             .map(|chunk| chunk.memory)
     }
 
-    /// `true` when the allocation lives in a mapped chunk.
-    pub fn is_mapped(&self, allocation: &MemoryAllocation) -> bool {
-        self.chunks
-            .iter()
-            .find(|chunk| chunk.id == allocation.chunk)
-            .map(|chunk| chunk.mapped.is_some())
-            .unwrap_or(false)
-    }
-
     /// Flush a host-written range to the device.
     ///
     /// A no-op for coherent memory. The range is expanded to

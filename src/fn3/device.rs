@@ -351,7 +351,7 @@ impl std::error::Error for DeviceResolveError {}
 /// backend, in that backend's stable discovery order; the index carried by
 /// [`PhysicalDeviceId`] is the index in this list's Vulkan subset.
 pub fn available_devices() -> Vec<DeviceInfo> {
-    #[allow(unused_mut)]
+    #[cfg_attr(not(feature = "vulkan"), allow(unused_mut))]
     let mut devices = vec![DeviceInfo::new(DeviceId::Cpu, "cpu")];
     #[cfg(feature = "vulkan")]
     devices.extend(crate::inference::backend::vulkan::available_devices());

@@ -23,7 +23,6 @@ pub fn matmul_blas_into(a: &[f32], b: &[f32], out: &mut [f32], m: usize, k: usiz
     matmul_blas_with_transpose_into(a, b, out, m, k, n, false, false)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn matmul_blas_with_transpose_into(
     a: &[f32],
     b: &[f32],
@@ -62,7 +61,6 @@ pub fn matmul_blas_with_transpose_into(
 }
 
 #[inline]
-#[allow(clippy::too_many_arguments)]
 // SAFETY: Caller must ensure `a_ptr`, `b_ptr`, and `out_ptr` are valid,
 // non-overlapping, and point to allocations of sufficient size for the
 // matrix dimensions (m, k, n) and strides.

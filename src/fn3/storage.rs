@@ -325,11 +325,6 @@ impl AlignedBuffer {
         })
     }
 
-    /// Fill the buffer with zero bytes.
-    pub fn zero_fill(&mut self) {
-        self.as_bytes_mut().fill(0);
-    }
-
     /// Copy `source` into the buffer. Lengths must match exactly.
     pub fn copy_from_slice(&mut self, source: &[u8]) -> Result<(), Fn3Error> {
         if source.len() != self.len() {
