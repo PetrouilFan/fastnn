@@ -44,7 +44,6 @@ mod device;
 mod errors;
 mod model;
 mod session;
-mod sha256;
 
 use pyo3::prelude::*;
 use pyo3::types::PyModule;

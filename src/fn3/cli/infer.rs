@@ -19,6 +19,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use crate::inference::digest::sha256_hex;
 use crate::inference::import::{import_onnx_model, ModelImport};
 use crate::inference::model::format::{
     FormatError, FormatErrorKind, PreparedArtifact, PreparedHeader,
@@ -32,7 +33,6 @@ use crate::inference::{
 
 use super::args::{GenerateArgs, InferArgs, RunArgs};
 use super::devices::OpenedBackend;
-use super::digest::sha256_hex;
 use super::{thousands, CliError};
 
 /// Where the graph a plan is built from came from.

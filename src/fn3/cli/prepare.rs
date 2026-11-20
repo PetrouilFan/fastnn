@@ -8,13 +8,13 @@
 use std::io::Write;
 use std::path::Path;
 
+use crate::inference::digest::sha256_hex;
 use crate::inference::import::{import_onnx_model, ModelImport, PositionEmbedding};
 use crate::inference::model::format::PreparedArtifact;
 use crate::inference::model::Planner;
 use crate::inference::{CpuBackend, Symbol};
 
 use super::args::PrepareArgs;
-use super::digest::sha256_hex;
 use super::{thousands, CliError};
 
 /// Run `prepare`.

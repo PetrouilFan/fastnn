@@ -55,6 +55,7 @@
 pub mod backend;
 pub mod cli;
 pub mod device;
+pub(crate) mod digest;
 pub mod dtype;
 pub mod error;
 pub mod import;

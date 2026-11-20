@@ -1,18 +1,16 @@
-//! SHA-256, for reporting the identity of a model file to Python.
+//! SHA-256, for reporting the identity of a model file.
 //!
-//! # Why this file exists
-//!
-//! A Python caller has to be able to answer "is this the artifact I built?"
-//! with a number they can compare against `sha256sum`, a download page or a
-//! lock file. The prepared-model format already carries a CRC-32, but that is a
+//! Both the CLI (`prepare`, `inspect`, `run`) and the Python binding report a
+//! digest a caller can compare against `sha256sum`, a download page or a lock
+//! file. The prepared-model format already carries a CRC-32, but that is a
 //! *payload* checksum with a different coverage and a different purpose (it
 //! tells the reader that the bytes it decoded are the bytes that were written).
 //!
-//! The crate has no hashing dependency and this issue may not add one, so the
-//! hash lives here: it is the standard FIPS 180-4 construction, streamable so a
+//! The crate has no hashing dependency and this module adds none, so the hash
+//! lives here: it is the standard FIPS 180-4 construction, streamable so a
 //! 28 MB (or 500 MB) file is never read twice, and it is pinned by the
 //! published check values in the unit tests below. It is a fingerprint, not a
-//! security control: nothing in the binding authenticates a model.
+//! security control: nothing in FastNN authenticates a model.
 //!
 //! This module is deliberately dependency-free and pure so it can be read and
 //! checked in one sitting; it is not a second implementation of any FastNN
@@ -225,16 +223,16 @@ impl Default for Sha256 {
     }
 }
 
-/// Digest of a whole byte slice.
-pub fn digest(bytes: &[u8]) -> [u8; 32] {
+/// Raw SHA-256 digest of `bytes`.
+pub fn sha256(bytes: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hasher.finish()
 }
 
-/// Lowercase hexadecimal digest of a whole byte slice.
-pub fn hex(bytes: &[u8]) -> String {
-    render(&digest(bytes))
+/// Digest of a whole byte slice.
+pub fn digest(bytes: &[u8]) -> [u8; 32] {
+    sha256(bytes)
 }
 
 /// Lowercase hexadecimal rendering of a digest.
@@ -244,6 +242,16 @@ pub fn render(digest: &[u8; 32]) -> String {
         text.push_str(&format!("{byte:02x}"));
     }
     text
+}
+
+/// Lowercase hexadecimal digest of a whole byte slice.
+pub fn hex(bytes: &[u8]) -> String {
+    render(&digest(bytes))
+}
+
+/// Lowercase hexadecimal SHA-256 of `bytes`.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex(bytes)
 }
 
 #[cfg(test)]
@@ -264,6 +272,15 @@ mod tests {
         assert_eq!(
             hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
             "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+    }
+
+    /// The CLI's one-shot entry point agrees with the published `abc` value.
+    #[test]
+    fn one_shot_hex_matches_the_abc_check_value() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
 
@@ -289,6 +306,19 @@ mod tests {
         assert_eq!(
             render(&hasher.finish()),
             "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+        );
+    }
+
+    #[test]
+    fn block_boundaries_are_handled() {
+        for length in [55usize, 56, 63, 64, 65, 119, 120, 128] {
+            let bytes = vec![0x61; length];
+            assert_eq!(sha256_hex(&bytes).len(), 64);
+        }
+        // A 64-byte message exercises a full block plus the padding block.
+        assert_eq!(
+            sha256_hex(&[0u8; 64]),
+            "f5a5fd42d16a20302798ef6ed309979b43003d2320d9f0e8ea9831a92759fb4b"
         );
     }
 }

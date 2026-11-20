@@ -30,7 +30,6 @@
 
 pub mod args;
 mod devices;
-mod digest;
 mod infer;
 mod inspect;
 mod prepare;

@@ -6,6 +6,7 @@
 
 use std::io::Write;
 
+use crate::inference::digest::sha256_hex;
 use crate::inference::import::PositionEmbedding;
 use crate::inference::model::format::{
     FormatErrorKind, PreparedArtifact, PreparedHeader, HEADER_BYTES,
@@ -13,7 +14,6 @@ use crate::inference::model::format::{
 use crate::inference::Symbol;
 
 use super::args::InspectArgs;
-use super::digest::sha256_hex;
 use super::{thousands, CliError};
 
 /// Run `inspect`.

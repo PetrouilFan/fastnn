@@ -47,6 +47,7 @@ use crate::inference::backend::Backend;
 use crate::inference::device::DeviceId;
 #[cfg(feature = "vulkan")]
 use crate::inference::device::DeviceRequest;
+use crate::inference::digest::hex;
 use crate::inference::error::Fn3Error as CoreError;
 use crate::inference::import::{import_onnx_file, DecoderGeometry, ModelImport, PositionEmbedding};
 use crate::inference::model::format::{ArtifactMetadata, PreparedArtifact, PreparedHeader};
@@ -58,7 +59,6 @@ use crate::inference::tensor::TensorMeta;
 use super::device::{describe as describe_device, resolve as resolve_device, PyDevice};
 use super::errors;
 use super::session::PySession;
-use super::sha256;
 
 /// Process-local identity, so two loaded models are distinguishable in a repr.
 static MODEL_IDENTITY: AtomicU64 = AtomicU64::new(1);
@@ -822,7 +822,7 @@ pub fn prepare(
     let bytes = py
         .detach(|| built.to_bytes())
         .map_err(|error| errors::from_format(py, error))?;
-    let digest = py.detach(|| sha256::hex(&bytes));
+    let digest = py.detach(|| hex(&bytes));
 
     let destination = artifact.to_string();
     let existing_path = destination.clone();
@@ -841,7 +841,7 @@ pub fn prepare(
     let mut status = "created";
     let mut differences = Vec::new();
     if let Some(existing) = &existing {
-        let existing_digest = sha256::hex(existing);
+        let existing_digest = hex(existing);
         if existing_digest == digest {
             status = "already_valid";
         } else {
@@ -885,7 +885,7 @@ pub fn prepare(
         // Read back what is actually on disk. A short or torn write must not be
         // reported as success.
         let on_disk = read_file_py(py, artifact)?;
-        let on_disk_digest = py.detach(|| sha256::hex(&on_disk));
+        let on_disk_digest = py.detach(|| hex(&on_disk));
         if on_disk_digest != digest {
             return Err(errors::model_error(
                 py,
@@ -1001,7 +1001,7 @@ pub fn inspect(py: Python<'_>, artifact: &str) -> PyResult<Py<PyArtifactInfo>> {
     let info = PyArtifactInfo {
         path,
         size_bytes: bytes.len() as u64,
-        sha256: py.detach(|| sha256::hex(&bytes)),
+        sha256: py.detach(|| hex(&bytes)),
         format_version: header.version,
         payload_bytes: header.payload_bytes,
         payload_crc32: header.payload_crc32,
@@ -1240,7 +1240,7 @@ pub fn load(
 
     // 2. The artifact bytes: one read, one hash, one parse.
     let bytes = read_file_py(py, artifact)?;
-    let digest = py.detach(|| sha256::hex(&bytes));
+    let digest = py.detach(|| hex(&bytes));
     let size_bytes = bytes.len() as u64;
     let parsed = py
         .detach(|| {
