@@ -699,14 +699,32 @@ impl KvCacheState {
     }
 }
 
-/// Turn validated `(source_row, destination_row)` element pairs into byte regions.
+/// Turn validated `(source_row, destination_row)` element pairs into byte
+/// regions, merging rows that are adjacent in both buffers.
+///
+/// `live_rows` and `append_rows` emit rows in `batch -> head -> token` order.
+/// Within one head the source and the destination both advance by exactly
+/// `head_dim` elements per token, so consecutive rows describe one contiguous
+/// run in each buffer; only the first token of the next head jumps. Emitting
+/// one region per row would turn a 1023-token refresh into 294,912
+/// `vkCmdCopyBuffer` records; emitting one per run keeps the same bytes in a
+/// few hundred records. The merge is purely arithmetic over offsets that were
+/// already bounds-checked, so it cannot change which bytes are copied.
 fn row_regions(rows: &[(usize, usize)], head_dim: usize) -> Vec<(u64, u64, u64)> {
-    let bytes = (head_dim * 4) as u64;
-    rows.iter()
-        .map(|&(source_row, destination_row)| {
-            (destination_row as u64 * 4, source_row as u64 * 4, bytes)
-        })
-        .collect()
+    let row_bytes = (head_dim * 4) as u64;
+    let mut regions: Vec<(u64, u64, u64)> = Vec::with_capacity(rows.len());
+    for &(source_row, destination_row) in rows {
+        let source = source_row as u64 * 4;
+        let destination = destination_row as u64 * 4;
+        if let Some(last) = regions.last_mut() {
+            if source == last.1 + last.2 && destination == last.0 + last.2 {
+                last.2 += row_bytes;
+                continue;
+            }
+        }
+        regions.push((destination, source, row_bytes));
+    }
+    regions
 }
 
 /// Copy validated rows into `buffer`.
@@ -762,6 +780,50 @@ mod tests {
 
     fn slice(rows: &[f32], tokens: u64) -> Tensor {
         Tensor::from_f32(config(8).shape_for(tokens), rows).unwrap()
+    }
+
+    #[test]
+    fn row_regions_merge_only_adjacent_rows() {
+        assert!(row_regions(&[], 4).is_empty());
+        assert_eq!(row_regions(&[(0, 0)], 4), vec![(0, 0, 16)]);
+
+        // Three tokens of one head are adjacent in both buffers.
+        assert_eq!(row_regions(&[(0, 0), (4, 4), (8, 8)], 4), vec![(0, 0, 48)]);
+
+        // A source gap (the capacity stride between heads) ends the run even
+        // when the destination is adjacent.
+        assert_eq!(
+            row_regions(&[(0, 0), (4, 4), (32, 12), (36, 16)], 4),
+            vec![(0, 0, 32), (48, 128, 32)]
+        );
+
+        // A destination gap ends it too.
+        assert_eq!(
+            row_regions(&[(0, 0), (4, 8)], 4),
+            vec![(0, 0, 16), (32, 16, 16)]
+        );
+
+        // The shape a 2-head, 13-token refresh produces: one run per head.
+        let mut rows = Vec::new();
+        for head in 0..2 {
+            for token in 0..13 {
+                rows.push((head * 64 + token * 4, head * 52 + token * 4));
+            }
+        }
+        assert_eq!(row_regions(&rows, 4), vec![(0, 0, 208), (208, 256, 208)]);
+    }
+
+    #[test]
+    fn a_full_live_refresh_is_one_region_per_head() {
+        let mut cache = KvCacheState::new(config(1024), DeviceId::Cpu).unwrap();
+        cache.live_len = 1023;
+        let rows = cache.live_rows(&cache.keys).unwrap();
+        assert_eq!(rows.len(), 2 * 1023, "one row pair per head and token");
+        let regions = row_regions(&rows, 4);
+        assert_eq!(
+            regions,
+            vec![(0, 0, 1023 * 16), (1023 * 16, 1024 * 16, 1023 * 16),]
+        );
     }
 
     #[test]
