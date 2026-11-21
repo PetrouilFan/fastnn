@@ -10,6 +10,7 @@ use fastnn::dtypes::{F32x1, I4x8, I8x4, PackedWord};
 use fastnn::ir::builder::{GraphBuilder, GraphTensor};
 use fastnn::ir::{ComputeGraph, DimExpr, IrDType, TensorType};
 use fastnn::packed_tensor::PackedTensor;
+use fastnn::types::{CompileTarget, QuantTarget};
 
 #[derive(Clone, Copy)]
 struct GemvCase {
@@ -1128,6 +1129,126 @@ fn bench_cpu_arena_telemetry(c: &mut Criterion) {
     group.finish();
 }
 
+/// Quantized convolution paths on one axis.
+///
+/// `conv2d_u8` and `conv2d_u4` dequantize a cached F32 copy of the weights once
+/// and then run the F32 GEMM; `conv2d_i8` and `conv2d_i4` ran an integer SWAR
+/// kernel that re-quantized the activations on every call. The four spell the
+/// same operator with different storage, so a difference this large between
+/// them is a routing defect rather than a modelling choice (#85).
+fn bench_conv_quantized(c: &mut Criterion) {
+    struct Case {
+        name: &'static str,
+        channels: usize,
+        kernel: usize,
+        groups: usize,
+        height: usize,
+        width: usize,
+    }
+
+    let cases = [
+        Case {
+            name: "1x1_192_22x28",
+            channels: 192,
+            kernel: 1,
+            groups: 1,
+            height: 22,
+            width: 28,
+        },
+        Case {
+            name: "3x3_192_14x14",
+            channels: 192,
+            kernel: 3,
+            groups: 1,
+            height: 14,
+            width: 14,
+        },
+        Case {
+            name: "3x3_dw192_22x28",
+            channels: 192,
+            kernel: 3,
+            groups: 192,
+            height: 22,
+            width: 28,
+        },
+    ];
+
+    let targets = [
+        ("f32", CompileTarget::Native),
+        ("u8", CompileTarget::WeightOnly(QuantTarget::U8)),
+        ("i8", CompileTarget::WeightOnly(QuantTarget::I8)),
+        ("u4", CompileTarget::WeightOnly(QuantTarget::U4)),
+        ("i4", CompileTarget::WeightOnly(QuantTarget::I4)),
+    ];
+
+    let mut group = c.benchmark_group("conv_quantized");
+    group.sample_size(10);
+
+    for case in cases {
+        let channels = case.channels;
+        let kernel = case.kernel;
+        let groups = case.groups;
+        let per_group = channels / groups;
+        let padding = kernel / 2;
+        let macs = channels * per_group * kernel * kernel * case.height * case.width;
+
+        let input = vector_data(channels * case.height * case.width, 41);
+        let input_bytes = bytemuck::cast_slice(&input).to_vec();
+        let weights = weight_data(1, channels * per_group * kernel * kernel);
+
+        for (label, target) in &targets {
+            let builder = GraphBuilder::new();
+            let input_node = builder.input_with_dims(
+                &[
+                    DimExpr::Known(1),
+                    DimExpr::Known(channels as u64),
+                    DimExpr::Known(case.height as u64),
+                    DimExpr::Known(case.width as u64),
+                ],
+                IrDType::F32,
+            );
+            let weight_type = TensorType::new(
+                vec![
+                    DimExpr::Known(channels as u64),
+                    DimExpr::Known(per_group as u64),
+                    DimExpr::Known(kernel as u64),
+                    DimExpr::Known(kernel as u64),
+                ],
+                IrDType::F32,
+            );
+            let weight_node = builder.constant(bytemuck::cast_slice(&weights), weight_type);
+            let out = builder.conv2d_with_params(&input_node, &weight_node, 1, padding, 1, groups);
+            let graph = graph_from(&builder, &out);
+
+            let mut executor = GraphExecutor::new(CpuBackend);
+            let (mut plan, memory_plan, compiled_graph) = executor
+                .compile_with_target(graph, target.clone(), None)
+                .expect("quantized conv graph should compile");
+
+            group.throughput(Throughput::Elements(macs as u64));
+            group.bench_with_input(
+                BenchmarkId::new(*label, case.name),
+                &input_bytes,
+                |bench, bytes| {
+                    bench.iter(|| {
+                        let outputs = executor
+                            .execute(
+                                &compiled_graph,
+                                &mut plan,
+                                &memory_plan,
+                                &[black_box(bytes)],
+                            )
+                            .expect("quantized conv graph should execute");
+                        black_box(outputs);
+                    });
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     cpu_benchmarks,
     bench_gemv,
@@ -1136,6 +1257,7 @@ criterion_group!(
     bench_elementwise,
     bench_reductions,
     bench_fusions,
-    bench_cpu_arena_telemetry
+    bench_cpu_arena_telemetry,
+    bench_conv_quantized
 );
 criterion_main!(cpu_benchmarks);

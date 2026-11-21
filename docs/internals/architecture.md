@@ -169,6 +169,32 @@ Symbolic and concrete dimension expressions: `Known(u64)` for fully resolved dim
 | 2D MatMul | `[K, N]` | Transposed to `[N, K]` to match GEMM convention |
 | 4D Conv2d | `[OC, IC, KH, KW]` | Flattened to `[OC, IC*KH*KW]` for im2col+GEMM |
 
+### Execution Path for Quantized Weights
+
+A packed weight is a **storage** format, not a compute format, unless the
+compiler pass also quantized the activations. Which of the two happens is
+visible in the kernel name the CPU backend compiles in:
+
+| Kernel name | Weight | Activations | Arithmetic |
+|---|---|---|---|
+| `conv2d_u8`, `conv2d_u4`, `conv2d_i8`, `conv2d_i4`, `conv2d_f8`, … | packed | F32 | Dequantized once into a cached F32 copy, then the F32 im2col+GEMM kernel. Quantization shrinks the artifact and the bytes read per dispatch; the FLOPs are unchanged. |
+| `conv2d_i8_i8`, `conv2d_i4_i8` | packed | packed I8/U8 | Integer `gemm_cpu_flat_i8_i4x8`, with the activation scales and zero points travelling in an affine payload header. |
+| `matmul_u8`, `matmul_i8`, `matmul_u4`, `matmul_i4`, `matmul_f8`, … | packed | F32 | Same split: `quantized_matmul_dispatch` dequantizes and runs the F32 GEMM. |
+| `matmul_i8_i8`, `matmul_i4_i8` | packed | packed I8 | Integer `gemm_cpu_flat_i8_i8x4`. |
+
+The dequantized copy is memoized per weight, so a repeated forward pass pays it
+once; it costs one F32 copy of every packed weight (roughly 19 MB for
+EfficientViT-Depth-5M). The activation-quantized variants avoid that copy but
+need calibration, which is why they are opt-in through `QuantTarget` rather
+than the default for a packed weight.
+
+Before this was made uniform, `conv2d_i8`/`conv2d_i4` ran a separate SWAR kernel
+that re-quantized the activations on every dispatch and then converted back:
+5x slower than the F32 kernel on a 192-channel 1x1, 153x on a depthwise 3x3.
+`bench_conv_quantized` in `benches/cpu_baselines.rs` measures all five
+quantization targets on the same three conv shapes, so a regression in this
+routing shows up as a timing change rather than as a silent accuracy change.
+
 ### SIMD_MARGIN
 
 `packed_byte_size` includes a `SIMD_MARGIN` of 16 extra `u32` words per `PackedTensor`. This padding prevents out-of-bounds reads in vectorized kernels.

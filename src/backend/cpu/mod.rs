@@ -342,11 +342,38 @@ fn get_or_cache_f32_weights<T: PackedWord + 'static>(
 
 #[cfg(test)]
 mod packed_weight_cache_tests {
-    use super::{clear_f32_weight_cache, get_or_cache_packed, CpuBuffer, PACKED_WEIGHT_CACHE};
+    use super::{
+        clear_f32_weight_cache, get_or_cache_packed, CpuBackend, CpuBuffer, F32_WEIGHT_CACHE,
+        PACKED_WEIGHT_CACHE,
+    };
+    use crate::backend::executor::GraphExecutor;
     use crate::dtypes::{PackedWord, U4x8};
+    use crate::ir::builder::GraphBuilder;
+    use crate::ir::{DimExpr, IrDType, TensorType};
+    use crate::types::{CompileTarget, QuantTarget};
+
+    /// The caches below are process-global and pointer-keyed, so a test that
+    /// clears one while another is mid-assertion makes both non-deterministic.
+    /// Every test in this module holds this for its whole body.
+    static CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn cache_entries() -> usize {
+        F32_WEIGHT_CACHE
+            .get()
+            .map(|cache| {
+                cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .len()
+            })
+            .unwrap_or(0)
+    }
 
     #[test]
     fn clearing_weight_caches_prevents_reused_arena_pointer_aliases() {
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut raw = vec![0u8; 4];
         let first = get_or_cache_packed::<U4x8>(0, raw.len(), &raw);
         assert_eq!(first[0].to_bits(), 0);
@@ -359,6 +386,9 @@ mod packed_weight_cache_tests {
 
     #[test]
     fn dropping_arena_removes_pointer_keyed_weight_entries() {
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let arena = CpuBuffer::new(vec![0x11; 64]);
         // SAFETY: the test arena owns exactly 64 initialized bytes and no mutable view exists.
         let raw = unsafe { arena.view_u8(0, 64) };
@@ -373,6 +403,104 @@ mod packed_weight_cache_tests {
             .unwrap()
             .keys()
             .any(|(cached_pointer, _, _, _)| *cached_pointer == pointer));
+    }
+
+    /// Run one small Conv2d through `target`.
+    ///
+    /// Returns the output and the cache size measured while the plan is still
+    /// alive: the cache is keyed by arena pointer and `Drop for CpuBuffer`
+    /// prunes it, so a count taken after the plan is dropped is always the
+    /// pre-dispatch count.
+    fn run_conv(weights: &[f32], input: &[f32], target: CompileTarget) -> (Vec<f32>, usize) {
+        let builder = GraphBuilder::new();
+        let input_node = builder.input_with_dims(
+            &[
+                DimExpr::Known(1),
+                DimExpr::Known(4),
+                DimExpr::Known(6),
+                DimExpr::Known(6),
+            ],
+            IrDType::F32,
+        );
+        let weight_type = TensorType::new(
+            vec![
+                DimExpr::Known(4),
+                DimExpr::Known(4),
+                DimExpr::Known(3),
+                DimExpr::Known(3),
+            ],
+            IrDType::F32,
+        );
+        let weight_node = builder.constant(bytemuck::cast_slice(weights), weight_type);
+        let output = builder.conv2d_with_params(&input_node, &weight_node, 1, 1, 1, 1);
+        let mut graph = builder.to_graph();
+        graph.inputs = builder.recorded_input_ids();
+        graph.outputs = vec![output.node_id()];
+
+        let mut executor = GraphExecutor::new(CpuBackend);
+        let (mut plan, memory_plan, compiled) = executor
+            .compile_with_target(graph, target, None)
+            .expect("the quantized conv graph should compile");
+        let bytes = bytemuck::cast_slice(input);
+        let outputs = executor
+            .execute(&compiled, &mut plan, &memory_plan, &[bytes])
+            .expect("the quantized conv graph should execute");
+        let result = bytemuck::cast_slice(&outputs[0]).to_vec();
+        let cached_while_alive = cache_entries();
+        (result, cached_while_alive)
+    }
+
+    #[test]
+    fn an_i8_conv_takes_the_cached_f32_route() {
+        // `conv2d_i8` used to call an integer SWAR kernel that re-quantized the
+        // activations on every dispatch: 5.4x the F32 kernel on a 1x1 and 1.6x
+        // on a 3x3, for the same arithmetic. The two routes are only
+        // distinguishable from outside by the F32 weight cache, which the
+        // cached path fills and the SWAR path never touched.
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_f32_weight_cache();
+        let before = cache_entries();
+        let weights: Vec<f32> = (0..4 * 4 * 3 * 3)
+            .map(|index| ((index % 23) as f32 - 11.0) * 0.25)
+            .collect();
+        let input: Vec<f32> = (0..4 * 6 * 6)
+            .map(|index| ((index % 17) as f32 - 8.0) * 0.5)
+            .collect();
+
+        let (quantized, cached) =
+            run_conv(&weights, &input, CompileTarget::WeightOnly(QuantTarget::I8));
+        assert_eq!(quantized.len(), 4 * 6 * 6);
+        assert!(quantized.iter().all(|value| value.is_finite()));
+        assert!(
+            cached > before,
+            "an I8 conv must reach the cached-F32 path; the SWAR route leaves the cache empty"
+        );
+    }
+
+    #[test]
+    fn an_i4_conv_takes_the_cached_f32_route() {
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_f32_weight_cache();
+        let before = cache_entries();
+        let weights: Vec<f32> = (0..4 * 4 * 3 * 3)
+            .map(|index| ((index % 19) as f32 - 9.0) * 0.125)
+            .collect();
+        let input: Vec<f32> = (0..4 * 6 * 6)
+            .map(|index| ((index % 13) as f32 - 6.0) * 0.25)
+            .collect();
+
+        let (quantized, cached) =
+            run_conv(&weights, &input, CompileTarget::WeightOnly(QuantTarget::I4));
+        assert_eq!(quantized.len(), 4 * 6 * 6);
+        assert!(quantized.iter().all(|value| value.is_finite()));
+        assert!(
+            cached > before,
+            "an I4 conv must reach the cached-F32 path; the SWAR route leaves the cache empty"
+        );
     }
 }
 
@@ -6525,41 +6653,21 @@ impl Backend for CpuBackend {
                                 } else {
                                     PreparedActivation::None
                                 };
-                                macro_rules! dispatch_packed_conv {
-                                    ($PackedType:ty, $fn:path) => {{
-                                        let packed_data = get_or_cache_packed::<$PackedType>(
-                                            w_slice.offset,
-                                            w_slice.size,
-                                            &raw,
-                                        );
-                                        let mut pt = PackedTensor::from_raw_arc(
-                                            packed_data,
-                                            vec![oc, inner],
-                                            meta.scales.clone(),
-                                            meta.dequant_offsets.clone(),
-                                        );
-                                        pt.quant_block_size = meta.quant_block_size;
-                                        unsafe {
-                                            $fn(
-                                                &input_data,
-                                                n,
-                                                input_c,
-                                                input_h,
-                                                input_w,
-                                                &pt,
-                                                bias_opt,
-                                                stride,
-                                                padding,
-                                                dilation,
-                                                groups,
-                                                kernel_h,
-                                                kernel_w,
-                                                fused_act,
-                                                out_f32,
-                                            );
-                                        }
-                                    }};
-                                }
+                                // Every path below runs the same F32 kernel on
+                                // a dequantized copy of the weights, because a
+                                // conv whose activations are still F32 has no
+                                // integer kernel to run: quantization here is a
+                                // storage format that shrinks the artifact and
+                                // the bytes read per dispatch, not the
+                                // arithmetic. (The `conv2d_i4_i8/u8_i8` branch
+                                // above is the one exception, and it is only
+                                // reached when the compiler pass explicitly
+                                // quantized the activations too.)
+                                //
+                                // I8 and I4 used to call SWAR kernels here that
+                                // re-quantized the activations on every
+                                // dispatch and cost 5x to 10x the F32 kernel
+                                // they fed: 153x on a depthwise 3x3.
                                 macro_rules! dispatch_packed_conv_cached {
                                     ($PackedType:ty) => {{
                                         let pt = get_or_cache_f32_weights::<$PackedType>(
@@ -6616,12 +6724,14 @@ impl Backend for CpuBackend {
                                     dispatch_packed_conv_cached!(F8x4R);
                                 } else if kernel_name.starts_with("conv2d_f8") {
                                     dispatch_packed_conv_cached!(F8x4);
-                                } else if meta.bit_width == 4 && !meta.codebooks.is_empty() {
-                                    dispatch_packed_conv_cached!(I4x8);
                                 } else if meta.bit_width == 4 {
-                                    dispatch_packed_conv!(I4x8, packed_conv::conv2d_packed_i4x8);
+                                    // I4 with and without a codebook now take
+                                    // the same route: the codebook is applied
+                                    // while dequantizing, so there is nothing
+                                    // left for a separate kernel to do.
+                                    dispatch_packed_conv_cached!(I4x8);
                                 } else {
-                                    dispatch_packed_conv!(I8x4, packed_conv::conv2d_packed_i8x4);
+                                    dispatch_packed_conv_cached!(I8x4);
                                 }
                             }
                         }
