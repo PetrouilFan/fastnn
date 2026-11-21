@@ -3,6 +3,42 @@
 ## [Unreleased]
 
 ### Changed
+- `Round` and `Sign` now follow the ONNX definitions in every implementation.
+  Two of the three disagreed with it: the scalar fallback used `f32::round`,
+  which sends halves away from zero, so `Round(2.5)` was 3 where ONNX requires
+  2, and it used `f32::signum`, which reads the sign bit, so `Sign(0.0)` was 1
+  where ONNX requires 0. The AVX2 paths were already correct, which means the
+  fallback disagreed with the vector path, and constant folding
+  (`compiler/passes/constant_folding.rs`) had the same two defects, so a folded
+  expression could differ from the same expression computed at run time. Both
+  definitions now live once in `ir::semantics` and the folder and the CPU
+  kernels call it; the compiler still does not depend on the backend. The AVX2
+  `Sign` also propagates NaN instead of reporting 0 for it.
+
+- The CPU lane runs every integration test target instead of three hand-picked
+  ones. It used to execute `fn3_contracts`, `fn3_ci_smoke` and two `fn3_cli`
+  cases out of 551 tests, leaving the IR shape and memory-planning suites, the
+  compiler edge cases, the 2.x reference oracle, the quantized pipeline, the
+  Python error paths, fn3's import/format/planner/session suites and the
+  arena-liveness regression compiled in nobody's CI. The suite was green, so
+  this was a missing step rather than a latent failure.
+
+- Every pointwise AVX2 kernel is checked against its scalar reference by a
+  table, not by hand. Twenty rows cover the 26 entry points with inputs that
+  hit the vector body and every remainder length (1, 3, 7, 8, 9, 15, 16, 17,
+  33, 64, 129) plus a domain holding NaN, both infinities and both signed
+  zeros. Rows that are algebraically exact demand bit equality; polynomial rows
+  allow 1e-5, still three orders below either numerical defect this cycle. It
+  found both `Round` and `Sign` on its first run. Previously three of the 26
+  kernels had a cross-check, and the two defects that motivated the table (the
+  stride-2 `im2col` lane gather and the AVX2 `log` polynomial) were found by
+  scratch tests that no longer exist.
+
+- The API reference no longer documents `RNN`, `LSTM` or `GRU` as Python layer
+  classes; none of the three is exported. The ONNX importer does import LSTM and
+  GRU nodes, and the page now says so instead. `tests/test_documented_api.py`
+  resolves every `` `fnn.X` `` symbol named in the markdown, because the existing
+  documentation gate only validates links and anchors.
 - A convolution model can now be imported and executed end to end as one
   AOT graph. `If`/`Mod` shape plumbing is resolved at import by
   `fastnn.io.shape_specialize`, which folds the computed integer tensors into
