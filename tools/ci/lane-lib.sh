@@ -31,13 +31,21 @@ ci::record() {
     local detail="$2"
     shift 2
     local elapsed=$(( SECONDS - CI_LANE_START ))
-    python3 "$CI_ROOT/tools/ci/lane_status.py" record \
+    if ! python3 "$CI_ROOT/tools/ci/lane_status.py" record \
         --lane "$CI_LANE" \
         --job "$CI_JOB" \
         --status "$status" \
         --detail "$detail" \
         --duration-seconds "$elapsed" \
-        "$@"
+        "$@"; then
+        # A lane that cannot write its record is not evidence of anything: the
+        # summary job reads these files, so a lost record used to look like a
+        # green job whose artifact simply never arrived. Say it loudly and
+        # fail, because the alternative is a lane that proves nothing while
+        # everyone believes it passed.
+        echo "::error title=$CI_LANE status record failed::lane_status.py record exited non-zero; the lane summary will see $CI_JOB as having produced no record"
+        return 1
+    fi
 }
 
 ci::passed() {
@@ -46,7 +54,11 @@ ci::passed() {
     for check in "${CI_CHECKS[@]}"; do
         args+=(--check "$check")
     done
-    ci::record passed "$1" "${args[@]}"
+    if ! ci::record passed "$1" "${args[@]}"; then
+        echo
+        echo "LANE $CI_LANE / $CI_JOB: FAILED — the status record could not be written"
+        exit 1
+    fi
     echo
     echo "LANE $CI_LANE / $CI_JOB: PASSED — $1"
 }

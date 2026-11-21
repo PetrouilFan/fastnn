@@ -49,7 +49,7 @@ ci::check "clippy (warning budget 0)"
 # longer exist, which is a wrong promise in the public docs.
 ci::run "Rustdoc (warnings are denied)" \
     'RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --lib' \
-    "rustdoc, warnings denied"
+    '{"name": "rustdoc warning-free", "status": "passed"}'
 
 ci::run "Build with --no-default-features (pyo3 extension-module cannot link standalone targets)" \
     "cargo build --no-default-features"
