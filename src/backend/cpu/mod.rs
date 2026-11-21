@@ -7254,12 +7254,33 @@ impl Backend for CpuBackend {
                                 output_slice,
                                 "pad_f32 input",
                                 |input, output| {
-                                    for (output_index, value) in output.iter_mut().enumerate() {
-                                        let mut remaining = output_index;
-                                        let mut source_index = 0usize;
-                                        let mut source_stride = 1usize;
+                                    // The innermost axis is copied as one contiguous
+                                    // span per row, so the coordinate decomposition
+                                    // runs once per row instead of once per element.
+                                    // That is what makes a 1x3x336x448 edge pad a
+                                    // memory copy rather than 473k divisions.
+                                    if rank == 0 {
+                                        output.fill(input.first().copied().unwrap_or(0.0));
+                                        return;
+                                    }
+                                    let inner = input_shape[rank - 1];
+                                    let inner_low = pads[(rank - 1) * 2];
+                                    let inner_high = pads[(rank - 1) * 2 + 1];
+                                    let inner_out = inner + inner_low + inner_high;
+                                    if inner_out == 0 {
+                                        return;
+                                    }
+                                    if inner == 0 {
+                                        output.fill(0.0);
+                                        return;
+                                    }
+                                    let rows = output.len() / inner_out;
+                                    for row in 0..rows {
+                                        let mut remaining = row;
+                                        let mut source_base = 0usize;
+                                        let mut source_stride = inner;
                                         let mut inside = true;
-                                        for dimension in (0..rank).rev() {
+                                        for dimension in (0..rank - 1).rev() {
                                             let output_dimension = input_shape[dimension]
                                                 + pads[dimension * 2]
                                                 + pads[dimension * 2 + 1];
@@ -7270,24 +7291,40 @@ impl Backend for CpuBackend {
                                                 || coordinate >= low_pad + input_shape[dimension]
                                             {
                                                 if edge_mode {
-                                                    // Replicate the nearest element, as
-                                                    // ONNX Pad(mode="edge") defines.
-                                                    let clamped =
-                                                        coordinate.saturating_sub(low_pad).min(
-                                                            input_shape[dimension]
-                                                                .saturating_sub(1),
-                                                        );
-                                                    source_index += clamped * source_stride;
+                                                    // Replicate the nearest element,
+                                                    // as ONNX Pad(mode="edge") defines.
+                                                    let clamped = coordinate
+                                                        .saturating_sub(low_pad)
+                                                        .min(input_shape[dimension] - 1);
+                                                    source_base += clamped * source_stride;
                                                 } else {
                                                     inside = false;
                                                 }
                                             } else {
-                                                source_index +=
+                                                source_base +=
                                                     (coordinate - low_pad) * source_stride;
                                             }
                                             source_stride *= input_shape[dimension];
                                         }
-                                        *value = if inside { input[source_index] } else { 0.0 };
+                                        let start = row * inner_out;
+                                        let destination = &mut output[start..start + inner_out];
+                                        if !inside {
+                                            destination.fill(0.0);
+                                            continue;
+                                        }
+                                        let source = &input[source_base..source_base + inner];
+                                        if inner_low == 0 && inner_high == 0 {
+                                            destination.copy_from_slice(source);
+                                            continue;
+                                        }
+                                        if inner_low > 0 {
+                                            let value = if edge_mode { source[0] } else { 0.0 };
+                                            destination[..inner_low].fill(value);
+                                        }
+                                        destination[inner_low..inner_low + inner]
+                                            .copy_from_slice(source);
+                                        let value = if edge_mode { source[inner - 1] } else { 0.0 };
+                                        destination[inner_low + inner..].fill(value);
                                     }
                                 },
                             )?;
@@ -9301,26 +9338,43 @@ impl Backend for CpuBackend {
                                 input_slice,
                                 output_slice,
                                 |input, out_f32| {
+                                    // The horizontal sampling table is the same for
+                                    // every row and channel, so it is built once
+                                    // instead of re-deriving two coordinates per
+                                    // output element.  Interpolating with two lerps
+                                    // in f32 instead of four f64 products turns the
+                                    // 88x112 -> 336x448 step into a memory-bound
+                                    // pass.
+                                    let mut w_low = vec![0usize; w_out];
+                                    let mut w_high = vec![0usize; w_out];
+                                    let mut w_mix = vec![0.0f32; w_out];
+                                    for (wi, low) in w_low.iter_mut().enumerate() {
+                                        let src_w = map_coord(wi, w_in, w_out, scale_w);
+                                        let floor = (src_w.floor() as usize).min(w_in - 1);
+                                        *low = floor;
+                                        w_high[wi] = (floor + 1).min(w_in - 1);
+                                        w_mix[wi] = (src_w - floor as f64) as f32;
+                                    }
                                     for nci in 0..nc {
+                                        let plane = nci * hw;
                                         for hi in 0..h_out {
                                             let src_h = map_coord(hi, h_in, h_out, scale_h);
-                                            for wi in 0..w_out {
-                                                let src_w = map_coord(wi, w_in, w_out, scale_w);
-                                                let h0 = src_h.floor() as usize;
-                                                let w0 = src_w.floor() as usize;
-                                                let h1 = (h0 + 1).min(h_in - 1);
-                                                let w1 = (w0 + 1).min(w_in - 1);
-                                                let dh = src_h - h0 as f64;
-                                                let dw = src_w - w0 as f64;
-                                                let v00 = input[nci * hw + h0 * w_in + w0];
-                                                let v01 = input[nci * hw + h0 * w_in + w1];
-                                                let v10 = input[nci * hw + h1 * w_in + w0];
-                                                let v11 = input[nci * hw + h1 * w_in + w1];
-                                                let v0 = v00 * (1.0 - dw as f32) + v01 * dw as f32;
-                                                let v1 = v10 * (1.0 - dw as f32) + v11 * dw as f32;
-                                                let val = v0 * (1.0 - dh as f32) + v1 * dh as f32;
-                                                let out_idx = nci * h_out * w_out + hi * w_out + wi;
-                                                out_f32[out_idx] = val;
+                                            let y0 = (src_h.floor() as usize).min(h_in - 1);
+                                            let y1 = (y0 + 1).min(h_in - 1);
+                                            let dy = (src_h - y0 as f64) as f32;
+                                            let top =
+                                                &input[plane + y0 * w_in..plane + y0 * w_in + w_in];
+                                            let bottom =
+                                                &input[plane + y1 * w_in..plane + y1 * w_in + w_in];
+                                            let start = nci * h_out * w_out + hi * w_out;
+                                            let row = &mut out_f32[start..start + w_out];
+                                            for (wi, value) in row.iter_mut().enumerate() {
+                                                let (x0, x1) = (w_low[wi], w_high[wi]);
+                                                let dx = w_mix[wi];
+                                                let upper = top[x0] + (top[x1] - top[x0]) * dx;
+                                                let lower =
+                                                    bottom[x0] + (bottom[x1] - bottom[x0]) * dx;
+                                                *value = upper + (lower - upper) * dy;
                                             }
                                         }
                                     }

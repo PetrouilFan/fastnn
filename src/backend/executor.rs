@@ -3732,6 +3732,73 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn pad_edge_mode_replicates_along_a_padded_row_axis() {
+        // 2x3 input padded by one row on each side with mode="edge": the
+        // added rows repeat the first and last source rows.  The inner axis
+        // needs no padding, so each row is one contiguous copy.
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "pad_f32".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 24)],
+                output_slice: crate::backend::BufferSlice::new(0, 48),
+                secondary_output_slice: None,
+                params: vec![2, 2, 3, 1, 1, 0, 0, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 48,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(48).unwrap();
+        backend
+            .try_write_arena(
+                &arena,
+                0,
+                bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            )
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let bytes = backend.try_read_arena(&arena, 0, 48).unwrap();
+        assert_eq!(
+            bytemuck::cast_slice::<_, f32>(&bytes),
+            &[1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 4.0, 5.0, 6.0]
+        );
+    }
+
+    #[test]
+    fn pad_edge_mode_replicates_along_the_inner_axis() {
+        // 2x2 padded by one column on each side with mode="edge": the added
+        // columns repeat the first and last column of every row.
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "pad_f32".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 16)],
+                output_slice: crate::backend::BufferSlice::new(0, 32),
+                secondary_output_slice: None,
+                params: vec![2, 2, 2, 0, 0, 1, 1, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 32,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(32).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let bytes = backend.try_read_arena(&arena, 0, 32).unwrap();
+        assert_eq!(
+            bytemuck::cast_slice::<_, f32>(&bytes),
+            &[1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0]
+        );
+    }
+
+    #[test]
     fn typed_cast_dispatch_rejects_legacy_width_metadata() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {
