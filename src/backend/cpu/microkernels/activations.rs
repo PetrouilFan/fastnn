@@ -426,9 +426,15 @@ pub(crate) unsafe fn tanh_avx2_vec(x: __m256) -> __m256 {
     _mm256_sub_ps(_mm256_mul_ps(vtwo, sig_2x), vone)
 }
 
-/// Vector ln(x) for a single `__m256`. Uses frexp decomposition to extract
-/// exponent and mantissa in [1, 2), then degree-4 minimax polynomial for ln(m).
-/// Relative error < 1e-3 over normal f32 range, acceptable for NN activations.
+/// Vector ln(x) for a single `__m256`.
+///
+/// The mantissa is shifted into `[1/√2, √2)` so that `ln(m)` can be written as
+/// `2·atanh(s)` with `s = (m-1)/(m+1)` and `|s| ≤ 0.1716`; the odd series then
+/// converges to full f32 precision in five terms (`|s|^11/11 < 6e-10`).
+///
+/// An earlier degree-4 polynomial over `[1, 2)` was wrong rather than merely
+/// inexact: its coefficients gave `ln(2) ≈ 0.69804` against the true
+/// `0.69315`, a 4.9e-3 error, and every log-based activation inherited it.
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 #[inline]
@@ -444,24 +450,30 @@ pub(crate) unsafe fn log_avx2_vec(x: __m256) -> __m256 {
     let mant_raw = _mm256_and_si256(raw, _mm256_set1_epi32(0x007FFFFF));
     let mant_f = _mm256_castsi256_ps(_mm256_or_si256(mant_raw, _mm256_set1_epi32(0x3F800000)));
 
-    // Degree-4 minimax polynomial for ln(m) on m ∈ [1, 2]
-    // Coefficients from Sollya: max error ~3e-4
-    // ln(m) ≈ c0 + c1*m + c2*m² + c3*m³ + c4*m⁴
-    let c0 = _mm256_set1_ps(-1.7417939f32);
-    let c1 = _mm256_set1_ps(2.8212026f32);
-    let c2 = _mm256_set1_ps(-1.4699568f32);
-    let c3 = _mm256_set1_ps(0.4477982f32);
-    let c4 = _mm256_set1_ps(-0.05657085f32);
+    // Move the mantissa into [1/√2, √2) by halving it above √2; the exponent
+    // absorbs the extra factor of two.
+    let above_sqrt2 = _mm256_cmp_ps(mant_f, _mm256_set1_ps(std::f32::consts::SQRT_2), _CMP_GT_OQ);
+    let mant_scaled = _mm256_blendv_ps(
+        mant_f,
+        _mm256_mul_ps(mant_f, _mm256_set1_ps(0.5f32)),
+        above_sqrt2,
+    );
+    let exp_f = _mm256_add_ps(exp_f, _mm256_and_ps(above_sqrt2, _mm256_set1_ps(1.0f32)));
 
-    let m2 = _mm256_mul_ps(mant_f, mant_f);
-    let m3 = _mm256_mul_ps(m2, mant_f);
-    let _m4 = _mm256_mul_ps(m3, mant_f);
-
-    // Horner: (((c4*m + c3)*m + c2)*m + c1)*m + c0
-    let mut log_m = _mm256_fmadd_ps(c4, mant_f, c3);
-    log_m = _mm256_fmadd_ps(log_m, mant_f, c2);
-    log_m = _mm256_fmadd_ps(log_m, mant_f, c1);
-    log_m = _mm256_fmadd_ps(log_m, mant_f, c0);
+    // ln(m) = 2·atanh(s) with s = (m-1)/(m+1), |s| ≤ 0.1716 on this interval.
+    let one = _mm256_set1_ps(1.0f32);
+    let s = _mm256_div_ps(
+        _mm256_sub_ps(mant_scaled, one),
+        _mm256_add_ps(mant_scaled, one),
+    );
+    let s2 = _mm256_mul_ps(s, s);
+    // 2s·(1 + s²/3 + s⁴/5 + s⁶/7 + s⁸/9); the first dropped term is < 1e-9.
+    let mut series = _mm256_set1_ps(1.0f32 / 9.0f32);
+    series = _mm256_fmadd_ps(series, s2, _mm256_set1_ps(1.0f32 / 7.0f32));
+    series = _mm256_fmadd_ps(series, s2, _mm256_set1_ps(1.0f32 / 5.0f32));
+    series = _mm256_fmadd_ps(series, s2, _mm256_set1_ps(1.0f32 / 3.0f32));
+    series = _mm256_fmadd_ps(series, s2, one);
+    let log_m = _mm256_mul_ps(_mm256_mul_ps(_mm256_set1_ps(2.0f32), s), series);
 
     // ln(x) = ln(m * 2^e) = ln(m) + e * ln(2)
     _mm256_fmadd_ps(exp_f, _mm256_set1_ps(std::f32::consts::LN_2), log_m)
@@ -1531,4 +1543,94 @@ unsafe fn add_gelu_avx2_core(
         _mm256_mul_ps(half, _mm256_mul_ps(x, _mm256_add_ps(one, t))),
     );
     *i += 8;
+}
+
+#[cfg(all(test, feature = "simd", target_arch = "x86_64"))]
+mod simd_accuracy_tests {
+    use super::*;
+
+    fn log_spaced(count: usize, lo: f32, hi: f32) -> Vec<f32> {
+        (0..count)
+            .map(|index| {
+                let t = index as f32 / (count - 1) as f32;
+                lo * (hi / lo).powf(t)
+            })
+            .collect()
+    }
+
+    fn line_spaced(count: usize, lo: f32, hi: f32) -> Vec<f32> {
+        (0..count)
+            .map(|index| lo + (hi - lo) * index as f32 / (count - 1) as f32)
+            .collect()
+    }
+
+    /// Worst `|got - want| / max(|want|, floor)`. The floor keeps the ratio
+    /// meaningful where the exact result is zero, e.g. `ln(1)`.
+    fn worst_error(
+        input: &[f32],
+        output: &[f32],
+        floor: f32,
+        want: impl Fn(f32) -> f64,
+    ) -> (f32, f32) {
+        input
+            .iter()
+            .zip(output)
+            .fold((0.0f32, f32::NAN), |(worst, at), (&x, &got)| {
+                let exact = want(x);
+                let error = ((got as f64 - exact).abs() / exact.abs().max(floor as f64)) as f32;
+                if error > worst {
+                    (error, x)
+                } else {
+                    (worst, at)
+                }
+            })
+    }
+
+    #[test]
+    fn simd_log_matches_the_scalar_function() {
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        {
+            if !crate::backend::cpu::microkernels::has_avx2() {
+                return;
+            }
+            let inputs = log_spaced(1024, 1.0e-6, 1.0e6);
+            let mut output = vec![0.0f32; inputs.len()];
+            unsafe { log_f32_avx2(&inputs, &mut output) };
+            let (worst, at) = worst_error(&inputs, &output, 0.25, |x| (x as f64).ln());
+            assert!(worst < 1.0e-5, "worst log error {worst} at x={at}");
+        }
+    }
+
+    #[test]
+    fn simd_exp_matches_the_scalar_function() {
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        {
+            if !crate::backend::cpu::microkernels::has_avx2() {
+                return;
+            }
+            let inputs = line_spaced(1024, -20.0, 20.0);
+            let mut output = vec![0.0f32; inputs.len()];
+            unsafe { exp_f32_avx2(&inputs, &mut output) };
+            let (worst, at) = worst_error(&inputs, &output, 1.0e-12, |x| (x as f64).exp());
+            assert!(worst < 1.0e-5, "worst exp error {worst} at x={at}");
+        }
+    }
+
+    #[test]
+    fn simd_softplus_matches_the_scalar_function() {
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        {
+            if !crate::backend::cpu::microkernels::has_avx2() {
+                return;
+            }
+            // The degree-4 `ln` polynomial this used to call was 4.9e-3 out at
+            // ln(2), so softplus inherited a systematic error of that size.
+            let inputs = line_spaced(1024, -20.0, 20.0);
+            let mut output = vec![0.0f32; inputs.len()];
+            unsafe { softplus_f32_avx2(&inputs, &mut output) };
+            let (worst, at) =
+                worst_error(&inputs, &output, 0.25, |x| (1.0 + (x as f64).exp()).ln());
+            assert!(worst < 1.0e-5, "worst softplus error {worst} at x={at}");
+        }
+    }
 }
