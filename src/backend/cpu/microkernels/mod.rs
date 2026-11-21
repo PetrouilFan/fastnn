@@ -18,6 +18,8 @@ pub mod direct_depthwise_conv;
 pub mod gemm;
 pub mod misc;
 pub mod ops;
+#[cfg(all(test, feature = "simd", target_arch = "x86_64"))]
+mod parity;
 #[cfg(test)]
 pub mod tests;
 
