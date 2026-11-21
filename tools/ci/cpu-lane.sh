@@ -42,6 +42,15 @@ fi
 echo "clippy warnings: $warning_count (budget $CLIPPY_MAX_WARNINGS; warnings are denied)"
 ci::check "clippy (warning budget 0)"
 
+# The documentation build is its own gate. It emitted 86 warnings until they
+# were cleared, and nothing stopped them coming back: `cargo clippy` does not
+# read doc comments the way rustdoc does, so it cannot see an unresolved
+# intra-doc link. Those were not cosmetic — two of them named items that no
+# longer exist, which is a wrong promise in the public docs.
+ci::run "Rustdoc (warnings are denied)" \
+    'RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --lib' \
+    "rustdoc, warnings denied"
+
 ci::run "Build with --no-default-features (pyo3 extension-module cannot link standalone targets)" \
     "cargo build --no-default-features"
 ci::run "Library tests (fn3 + 2.x unit tests)" \
@@ -64,4 +73,4 @@ ci::run "Inference CLI binary smoke" \
 ci::run "CI tooling selftests" \
     "python3 tools/ci/model_pin.py selftest && python3 tools/ci/lane_status.py selftest"
 
-ci::passed "fmt clean; versions agree; clippy warnings denied (budget 0); no-default build; lib and every integration target pass; CLI binary smoke; CI tooling selftests"
+ci::passed "fmt clean; versions agree; clippy warnings denied (budget 0); rustdoc warning-free; no-default build; lib and every integration target pass; CLI binary smoke; CI tooling selftests"
