@@ -24,7 +24,7 @@ cargo build --no-default-features
 cargo build --lib --features vulkan
 
 # Inference CLI (the `fastnn-infer` target requires the `cli` feature)
-cargo build --release --no-default-features --features cli,vulkan --bin fastnn-infer
+cargo build --release --no-default-features --features cli,simd,parallel,vulkan --bin fastnn-infer
 ```
 
 ### Running Tests

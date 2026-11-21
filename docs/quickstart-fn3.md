@@ -16,11 +16,16 @@ recorded in [FN3-17 evidence](reports/fn3-17-cli-quickstart.md).
 ## 0. Build
 
 ```bash
-cargo build --release --no-default-features --features cli
+cargo build --release --no-default-features --features cli,simd,parallel
 ```
 
-The binary is `target/release/fastnn-infer`. A Vulkan build is the same command with
-`--features cli,vulkan`; the Vulkan section below shows that exact build.
+The binary is `target/release/fastnn-infer`. `--no-default-features` keeps the Python
+extension out of the binary, but dropping the CPU kernel features with it would also
+drop the AVX2 kernels and Rayon work sharing: on the trained GPT-2 artifact a
+`cli`-only build prefills 256 tokens in 3.55-3.65 s where `cli,simd,parallel` takes
+2.39-2.46 s, a 1.5x difference from the feature list alone. A Vulkan build is the
+same command with `--features cli,simd,parallel,vulkan`; the Vulkan section below
+shows that exact build.
 
 ## 1. The model
 
@@ -314,7 +319,7 @@ fastnn-infer inference
 Build with Vulkan and diagnose first:
 
 ```bash
-cargo build --release --no-default-features --features cli,vulkan
+cargo build --release --no-default-features --features cli,simd,parallel,vulkan
 ./target/release/fastnn-infer diagnose
 ```
 

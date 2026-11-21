@@ -36,7 +36,7 @@ curl --fail --location --output "$MODEL" \
   https://huggingface.co/onnx-community/tiny-random-gpt2-ONNX/resolve/90f61e71d6fa8e571d0ab0f95a637a5d7d8ed52f/onnx/model.onnx
 printf '%s  %s\n' e18370ba6247c564a4aef7b6a83aa86d5d036f47a73c0935e51bbcfe178141a1 "$MODEL" | sha256sum -c -
 
-cargo build --release --no-default-features --features cli --bin fastnn-infer
+cargo build --release --no-default-features --features cli,simd,parallel --bin fastnn-infer
 CLI=./target/release/fastnn-infer
 
 "$CLI" prepare --onnx "$MODEL" --out tiny-gpt2.fnn3
@@ -44,7 +44,7 @@ CLI=./target/release/fastnn-infer
   --tokens 464,2068,7586,21831 --max-new-tokens 4
 ```
 
-The API and CLI accept token IDs. Use the model's tokenizer in your application to encode prompts and decode generated IDs. For a GPU source build, use `--features cli,vulkan`, run `fastnn-infer diagnose` with a compatible Vulkan driver installed, then select `--device vulkan`. Add `--weight-int8` to `run` or `generate` to enable packed INT8 projections.
+The API and CLI accept token IDs. Use the model's tokenizer in your application to encode prompts and decode generated IDs. For a GPU source build, use `--features cli,simd,parallel,vulkan`, run `fastnn-infer diagnose` with a compatible Vulkan driver installed, then select `--device vulkan`. Add `--weight-int8` to `run` or `generate` to enable packed INT8 projections.
 
 ### Python
 

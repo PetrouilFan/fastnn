@@ -60,7 +60,7 @@ ci::run "Library tests (fn3 + 2.x unit tests)" \
 ci::run "Integration tests (every target)" \
     "cargo test --no-fail-fast --tests"
 ci::run "Inference CLI binary smoke" \
-    "cargo test --no-default-features --features cli --test fn3_cli fastnn_infer_binary_"
+    "cargo test --no-default-features --features cli,simd,parallel --test fn3_cli fastnn_infer_binary_"
 ci::run "CI tooling selftests" \
     "python3 tools/ci/model_pin.py selftest && python3 tools/ci/lane_status.py selftest"
 

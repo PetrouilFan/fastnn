@@ -107,7 +107,20 @@ pub fn cpu_capabilities() -> Capabilities {
         max_buffer_bytes: 16 * 1024 * 1024 * 1024,
         max_shape_rank: 8,
         max_workgroup_size: [1, 1, 1],
-        max_threads: parallel::process_budget().min(u32::MAX as usize) as u32,
+        // The budget is what this *build* can spend, not how many CPUs the
+        // machine has. Without the `parallel` feature no kernel splits work:
+        // `in_worker` is always false, so every kernel runs serially and a
+        // budget equal to the CPU count would advertise threads nothing uses.
+        max_threads: {
+            #[cfg(feature = "parallel")]
+            {
+                parallel::process_budget().min(u32::MAX as usize) as u32
+            }
+            #[cfg(not(feature = "parallel"))]
+            {
+                1
+            }
+        },
         supports_strided_views: true,
         features: CapabilityFeatures {
             broadcasting: true,
@@ -567,6 +580,21 @@ mod tests {
             out.as_f32_slice().unwrap(),
             &[11.0, 22.0, 33.0, 14.0, 25.0, 36.0]
         );
+    }
+
+    #[test]
+    fn the_reported_thread_budget_is_one_without_the_parallel_feature() {
+        // A `cli`-only build cannot split work: `in_worker` is always false,
+        // so every kernel runs serially. Advertising the machine's CPU count
+        // there would promise threads the backend never spends.
+        let reported = cpu_capabilities().max_threads;
+        #[cfg(feature = "parallel")]
+        assert!(
+            reported >= 1,
+            "a parallel build must report a usable budget"
+        );
+        #[cfg(not(feature = "parallel"))]
+        assert_eq!(reported, 1);
     }
 
     #[test]

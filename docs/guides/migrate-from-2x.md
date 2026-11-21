@@ -7,7 +7,7 @@ JSON graph, and `run` read raw tensor buffers. The new CLI accepts token IDs and
 executes a session with a KV cache.
 
 ```bash
-cargo build --release --no-default-features --features cli --bin fastnn-infer
+cargo build --release --no-default-features --features cli,simd,parallel --bin fastnn-infer
 ./target/release/fastnn-infer prepare --onnx model.onnx --out model.fnn3
 ./target/release/fastnn-infer inspect model.fnn3
 ./target/release/fastnn-infer run --model model.fnn3 --tokens 464,2068,7586
