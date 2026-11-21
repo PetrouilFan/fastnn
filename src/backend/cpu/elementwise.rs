@@ -130,6 +130,176 @@ fn fused_binary_activation_dispatch_slices(
     }
 }
 
+/// One contiguous span of the output, together with where each operand starts
+/// and how far it advances per element (`1` when it is contiguous, `0` when it
+/// repeats a single value across the span).
+struct BroadcastRun {
+    destination: usize,
+    lhs: usize,
+    rhs: usize,
+    len: usize,
+    lhs_step: usize,
+    rhs_step: usize,
+}
+
+/// Decomposes a broadcast into contiguous runs.
+///
+/// `for_each_broadcast_index` decodes the coordinates of every output element,
+/// which costs one division and one modulo per axis per element: a channel-wise
+/// broadcast over `[1, 128, 22, 28]` paid six divisions for each of 78 848
+/// elements and landed at a few GB/s. The runs carry the same information with
+/// the coordinate math hoisted out of the element loop, so the inner loop is a
+/// plain slice walk that the compiler can vectorise.
+fn broadcast_runs(
+    lhs_shape: &[usize],
+    rhs_shape: &[usize],
+    output_shape: &[usize],
+    output_elements: usize,
+) -> Vec<BroadcastRun> {
+    let rank = output_shape.len();
+    // Per output axis: the operand's own row-major multiplier, or zero when the
+    // axis is broadcast (its extent is one) or absent from the operand.
+    let multipliers = |shape: &[usize]| -> Vec<usize> {
+        let pad = rank - shape.len();
+        let mut strides = vec![0usize; rank];
+        let mut running = 1usize;
+        for axis in (0..shape.len()).rev() {
+            strides[pad + axis] = running;
+            running *= shape[axis];
+        }
+        (0..rank)
+            .map(|axis| {
+                let extent = if axis < pad { 1 } else { shape[axis - pad] };
+                if extent == 1 && output_shape[axis] > 1 {
+                    0
+                } else {
+                    strides[axis]
+                }
+            })
+            .collect()
+    };
+    let lhs_multiplier = multipliers(lhs_shape);
+    let rhs_multiplier = multipliers(rhs_shape);
+
+    // Axes of extent one carry no information; dropping them keeps the odometer
+    // from spending steps that change nothing.
+    let axes: Vec<usize> = (0..rank).filter(|&axis| output_shape[axis] > 1).collect();
+
+    if axes.is_empty() {
+        // Every output element is the same value.
+        return vec![BroadcastRun {
+            destination: 0,
+            lhs: 0,
+            rhs: 0,
+            len: output_elements.max(1),
+            lhs_step: 0,
+            rhs_step: 0,
+        }];
+    }
+
+    // Merge trailing axes into one span while both operands keep advancing by
+    // their existing step. The innermost multiplier of a row-major operand is
+    // always one or zero, so the merged step stays one or zero.
+    let mut len = output_shape[*axes.last().expect("axes is non-empty")];
+    let lhs_step = lhs_multiplier[*axes.last().expect("axes is non-empty")];
+    let rhs_step = rhs_multiplier[*axes.last().expect("axes is non-empty")];
+    let mut odometer_axes = axes.len() - 1;
+    while odometer_axes > 0 {
+        let axis = axes[odometer_axes - 1];
+        if lhs_multiplier[axis] != len * lhs_step || rhs_multiplier[axis] != len * rhs_step {
+            break;
+        }
+        len *= output_shape[axis];
+        odometer_axes -= 1;
+    }
+
+    let mut runs = Vec::with_capacity(output_elements / len.max(1));
+    let mut coordinates = vec![0usize; odometer_axes];
+    let mut lhs_base = 0usize;
+    let mut rhs_base = 0usize;
+    let mut destination = 0usize;
+    loop {
+        runs.push(BroadcastRun {
+            destination,
+            lhs: lhs_base,
+            rhs: rhs_base,
+            len,
+            lhs_step,
+            rhs_step,
+        });
+        destination += len;
+
+        // Odometer carry: one pass per span instead of one pass per element.
+        let mut index = odometer_axes;
+        let mut advanced = false;
+        while index > 0 {
+            index -= 1;
+            let axis = axes[index];
+            coordinates[index] += 1;
+            lhs_base += lhs_multiplier[axis];
+            rhs_base += rhs_multiplier[axis];
+            if coordinates[index] < output_shape[axis] {
+                advanced = true;
+                break;
+            }
+            lhs_base -= lhs_multiplier[axis] * output_shape[axis];
+            rhs_base -= rhs_multiplier[axis] * output_shape[axis];
+            coordinates[index] = 0;
+        }
+        if !advanced {
+            return runs;
+        }
+    }
+}
+
+/// Applies `op` over precomputed runs.
+fn apply_broadcast_runs(
+    runs: &[BroadcastRun],
+    lhs: &[f32],
+    rhs: &[f32],
+    output: &mut [f32],
+    op: impl Fn(f32, f32) -> f32,
+) {
+    for run in runs {
+        let span = &mut output[run.destination..run.destination + run.len];
+        match (run.lhs_step, run.rhs_step) {
+            (1, 1) => {
+                let lhs_span = &lhs[run.lhs..run.lhs + run.len];
+                let rhs_span = &rhs[run.rhs..run.rhs + run.len];
+                for ((slot, &a), &b) in span.iter_mut().zip(lhs_span).zip(rhs_span) {
+                    *slot = op(a, b);
+                }
+            }
+            (1, 0) => {
+                // A single value of the right operand covers the whole span, the
+                // shape a channel or per-row scale takes.
+                let b = rhs[run.rhs];
+                for (slot, &a) in span.iter_mut().zip(&lhs[run.lhs..run.lhs + run.len]) {
+                    *slot = op(a, b);
+                }
+            }
+            (0, 1) => {
+                let a = lhs[run.lhs];
+                for (slot, &b) in span.iter_mut().zip(&rhs[run.rhs..run.rhs + run.len]) {
+                    *slot = op(a, b);
+                }
+            }
+            (0, 0) => {
+                let value = op(lhs[run.lhs], rhs[run.rhs]);
+                span.fill(value);
+            }
+            (lhs_step, rhs_step) => {
+                for (offset, slot) in span.iter_mut().enumerate() {
+                    *slot = op(
+                        lhs[run.lhs + offset * lhs_step],
+                        rhs[run.rhs + offset * rhs_step],
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn for_each_broadcast_index(
     lhs_shape: &[usize],
     rhs_shape: &[usize],
@@ -280,21 +450,14 @@ pub(super) fn broadcast_binary_dispatch(
                 .copy_from_slice(&result);
         }
     } else {
+        let runs = broadcast_runs(lhs_shape, rhs_shape, output_shape, output_elements);
         arena::with_binary_f32_slices(
             arena,
             *lhs_slice,
             *rhs_slice,
             output_slice,
             |lhs, rhs, output| {
-                for_each_broadcast_index(
-                    lhs_shape,
-                    rhs_shape,
-                    output_shape,
-                    output_elements,
-                    |destination, lhs_index, rhs_index| {
-                        output[destination] = op(lhs[lhs_index], rhs[rhs_index]);
-                    },
-                );
+                apply_broadcast_runs(&runs, lhs, rhs, output, op);
             },
         );
     }
@@ -420,5 +583,58 @@ mod elementwise_copy_reduction_tests {
         );
 
         assert_eq!(read_f32s(&arena, 2, 4), vec![0.1, 0.1, 0.1, 0.1]);
+    }
+
+    #[test]
+    fn broadcast_runs_cover_every_element_once_and_match_the_per_element_path() {
+        // Real pairings from a CNN graph: a channel vector, a trailing spatial
+        // plane, a token vector, a scalar, the same shape, a rank mismatch that
+        // right-aligns, and a rank-0 operand.
+        let cases: &[(&[usize], &[usize], &[usize])] = &[
+            (&[1, 128, 22, 28], &[1, 128, 1, 1], &[1, 128, 22, 28]),
+            (&[1, 128, 22, 28], &[1, 1, 22, 28], &[1, 128, 22, 28]),
+            (&[16, 49, 49], &[1, 49, 1], &[16, 49, 49]),
+            (&[1, 3, 336, 448], &[1], &[1, 3, 336, 448]),
+            (&[2, 3, 4], &[2, 3, 4], &[2, 3, 4]),
+            (&[5], &[1, 5], &[1, 5]),
+            (&[1, 7, 5], &[], &[1, 7, 5]),
+            (&[1, 1, 1], &[4, 1, 3], &[1, 4, 3]),
+        ];
+
+        for &(lhs_shape, rhs_shape, output_shape) in cases {
+            let lhs_len: usize = lhs_shape.iter().product();
+            let rhs_len: usize = rhs_shape.iter().product::<usize>().max(1);
+            let output_len: usize = output_shape.iter().product();
+            let lhs: Vec<f32> = (0..lhs_len).map(|index| index as f32 * 0.5 - 3.0).collect();
+            let rhs: Vec<f32> = (0..rhs_len)
+                .map(|index| 1.0 + index as f32 * 0.25)
+                .collect();
+
+            // The per-element decoder is the reference.
+            let mut expected = vec![f32::NAN; output_len];
+            for_each_broadcast_index(
+                lhs_shape,
+                rhs_shape,
+                output_shape,
+                output_len,
+                |destination, lhs_index, rhs_index| {
+                    expected[destination] = lhs[lhs_index] * 2.0 + rhs[rhs_index];
+                },
+            );
+
+            let runs = broadcast_runs(lhs_shape, rhs_shape, output_shape, output_len);
+            let covered: usize = runs.iter().map(|run| run.len).sum();
+            assert_eq!(
+                covered, output_len,
+                "runs must cover the output exactly once for {lhs_shape:?} {rhs_shape:?}"
+            );
+
+            let mut actual = vec![f32::NAN; output_len];
+            apply_broadcast_runs(&runs, &lhs, &rhs, &mut actual, |a, b| a * 2.0 + b);
+            assert_eq!(
+                actual, expected,
+                "run decomposition disagrees for {lhs_shape:?} {rhs_shape:?} -> {output_shape:?}"
+            );
+        }
     }
 }
