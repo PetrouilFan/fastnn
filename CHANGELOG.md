@@ -3,6 +3,25 @@
 ## [Unreleased]
 
 ### Changed
+- Convolution correctness: the AVX2 3x3 stride-2 `im2col` kernel stored
+  `lo[0], lo[2], lo[2], lo[0], …` instead of the eight gathered values, so
+  every stride-2 convolution below the parallel threshold was wrong by up to
+  39% of its column elements, and it derived the output extent with `h/2`,
+  dropping the last row and column for odd inputs. A kernel larger than the
+  padded input now produces an empty output instead of one row of stale
+  column-buffer bytes, the tiled fallback no longer wraps its bias index with
+  `%`, and fused GELU uses the same tanh approximation as the AVX2 passes
+  instead of a logistic one.
+- Eager execution and the eager convolution path are considerably faster.
+  Measured on all 95 convolutions of EfficientViT-Depth-5M (`1x3x336x448`)
+  called through `fastnn.Conv2d`, total time fell from 82.79 ms to 43.54 ms:
+  the depthwise 3x3 kernel is threaded over channel planes and its tail is
+  vectorised (44.48 → 12.61 ms), `exec_aot` no longer copies contiguous inputs
+  or copies outputs an extra time on the way into storage, and the CPU
+  executor reuses arena pages between calls instead of allocating and copying
+  a fresh arena on each one (61.32 → 43.54 ms). Depthwise 3x3 in isolation
+  measures 0.155 ms for `160x88x112` (182 GFLOP/s) against 3.4 ms for the old
+  scalar path.
 - Cleanup and performance pass on the 3.0 inference tree: removed never-built
   benchmark binaries and stale baseline tooling, merged the two SHA-256
   implementations, dropped the superseded Vulkan smoke registry and other
