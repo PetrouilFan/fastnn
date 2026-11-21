@@ -89,7 +89,7 @@ pub enum ThreadBudget {
     #[default]
     Auto,
     /// At most this many threads; `Fixed(1)` is the serial path. Values above
-    /// [`process_budget`] are clamped to it.
+    /// `process_budget` are clamped to it.
     Fixed(usize),
 }
 
@@ -210,6 +210,24 @@ pub fn balanced_lengths(total: usize, tasks: usize) -> Vec<usize> {
         .collect()
 }
 
+/// Which path a parallel helper actually took.
+///
+/// Returned rather than only counted so that a caller — and a test — can
+/// observe the decision without reading the process-global diagnostics, which
+/// any other thread may be incrementing at the same time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchPath {
+    /// One thread ran every chunk, either because the budget was one, there
+    /// was a single task, or the caller was already inside a worker.
+    Serial,
+    /// The chunks were handed to the Rayon pool.
+    ///
+    /// A build without the `parallel` feature can never produce this variant,
+    /// but the type is the same in every build so a caller can match on it.
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    Parallel,
+}
+
 /// Run `body` once per disjoint slice of `out`, in parallel up to `threads`.
 ///
 /// `lengths` must sum to `out.len()`; the slices are produced with
@@ -218,7 +236,14 @@ pub fn balanced_lengths(total: usize, tasks: usize) -> Vec<usize> {
 ///
 /// Falls back to a serial loop when the budget is one, when there is only one
 /// task, or when the caller is already inside a worker (no nested pools).
-pub fn par_slices_mut<T, F>(threads: usize, out: &mut [T], lengths: &[usize], body: F)
+/// Returns the path taken; the counters in [`stats`] are a running total for
+/// telemetry and cannot answer "what did *this* call do".
+pub fn par_slices_mut<T, F>(
+    threads: usize,
+    out: &mut [T],
+    lengths: &[usize],
+    body: F,
+) -> DispatchPath
 where
     T: Send,
     F: Fn(usize, &mut [T]) + Sync + Send,
@@ -233,13 +258,26 @@ where
     }
     debug_assert!(rest.is_empty(), "lengths did not cover the output");
 
-    if threads <= 1 || slices.len() <= 1 || in_worker() {
+    // Without the `parallel` feature there is no pool to split into, whatever
+    // budget the caller passes: `process_budget` reports the machine's CPUs
+    // either way, so the feature itself has to decide.
+    #[cfg(feature = "parallel")]
+    let split = threads > 1 && slices.len() > 1 && !in_worker();
+    #[cfg(not(feature = "parallel"))]
+    let split = {
+        // No pool exists in this build, so the budget cannot pick the path.
+        let _ = threads;
+        false
+    };
+
+    if !split {
         SERIAL_OPS.fetch_add(1, Ordering::Relaxed);
         for (index, part) in slices.into_iter().enumerate() {
             body(index, part);
         }
-        return;
+        return DispatchPath::Serial;
     }
+
     PARALLEL_OPS.fetch_add(1, Ordering::Relaxed);
     #[cfg(feature = "parallel")]
     {
@@ -252,14 +290,15 @@ where
                 body(index, part);
                 leave();
             });
+        DispatchPath::Parallel
     }
     #[cfg(not(feature = "parallel"))]
     {
-        // The `parallel` feature is off, so the budget can never exceed one;
-        // this arm exists only to keep the signature total.
+        // Keeps the function total in a build that has no pool to split into.
         for (index, part) in slices.into_iter().enumerate() {
             body(index, part);
         }
+        DispatchPath::Serial
     }
 }
 
@@ -459,14 +498,24 @@ mod tests {
 
     #[test]
     fn a_budget_of_one_never_runs_a_parallel_dispatch() {
-        reset_stats();
+        // The counters are process-global, so a test running at the same time
+        // can bump them: assert on the path this call returned and on a
+        // monotone delta rather than on absolute values, which made this test
+        // fail roughly one run in four under the default test harness.
+        let before = stats().serial_ops;
         let mut values = vec![0u8; 64];
-        par_slices_mut(1, &mut values, &balanced_lengths(64, 4), |_, part| {
+        let path = par_slices_mut(1, &mut values, &balanced_lengths(64, 4), |_, part| {
             part[0] = 1
         });
-        let snapshot = stats();
-        assert_eq!(snapshot.parallel_ops, 0);
-        assert_eq!(snapshot.tasks, 0, "the serial path does not count tasks");
-        assert_eq!(snapshot.serial_ops, 1);
+        assert_eq!(path, DispatchPath::Serial);
+        assert_eq!(
+            values.iter().filter(|&&value| value == 1).count(),
+            4,
+            "the body ran once per slice"
+        );
+        assert!(
+            stats().serial_ops > before,
+            "the serial path counts its dispatch"
+        );
     }
 }
