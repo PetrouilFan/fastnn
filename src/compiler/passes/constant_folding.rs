@@ -136,13 +136,13 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
             .or_else(|| binary_int_op(&input_vals, |a, b| a.max(b)))
             .or_else(|| binary_f32_data_op(&input_vals, |a, b| a.max(b))),
 
-        Opcode::Sign => unary_float_op(&input_vals, |x| x.signum())
+        Opcode::Sign => unary_float_op(&input_vals, crate::ir::semantics::sign_f32)
             .or_else(|| unary_int_op(&input_vals, |x| x.signum())),
 
         Opcode::LogicalNot => unary_int_op(&input_vals, |x| if x == 0 { 1 } else { 0 }),
 
-        Opcode::Round => unary_float_op(&input_vals, |x| x.round())
-            .or_else(|| unary_f32_data_op(&input_vals, |x| x.round())),
+        Opcode::Round => unary_float_op(&input_vals, crate::ir::semantics::round_f32)
+            .or_else(|| unary_f32_data_op(&input_vals, crate::ir::semantics::round_f32)),
 
         Opcode::Erf => unary_float_op(&input_vals, |x| {
             // Approximation of erf(x) using the Horner form of the Abramowitz & Stegun formula

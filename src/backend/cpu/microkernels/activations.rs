@@ -122,9 +122,15 @@ pub unsafe fn sqrt_f32_avx2(input: &[f32], output: &mut [f32]) {
     }
 }
 
+/// ONNX `Sign`: 1 above zero, -1 below it, and **0 at zero**.
+///
+/// The definition is [`crate::ir::semantics::sign_f32`], shared with the
+/// constant folder so a folded `Sign` and an executed one cannot disagree.
+/// `f32::signum` is *not* it: it returns ±1 for ±0.0 because it follows the
+/// sign bit rather than the value comparison.
 #[inline]
 pub fn sign_f32_scalar(x: f32) -> f32 {
-    x.signum()
+    crate::ir::semantics::sign_f32(x)
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -140,12 +146,18 @@ pub unsafe fn sign_f32_avx2(input: &[f32], output: &mut [f32]) {
     let neg_one = _mm256_set1_ps(-1.0);
     while i + 8 <= len {
         let x = _mm256_loadu_ps(input.as_ptr().add(i));
+        let signed = _mm256_or_ps(
+            _mm256_and_ps(_mm256_cmp_ps::<{ _CMP_GT_OQ }>(x, zero), one),
+            _mm256_and_ps(_mm256_cmp_ps::<{ _CMP_LT_OQ }>(x, zero), neg_one),
+        );
+        // Neither comparison is true for NaN, so the mask above would report
+        // zero. The scalar reference propagates the NaN, and a NaN that turns
+        // into a plausible zero is exactly the kind of difference this path
+        // must not introduce.
+        let unordered = _mm256_cmp_ps::<{ _CMP_UNORD_Q }>(x, x);
         _mm256_storeu_ps(
             output.as_mut_ptr().add(i),
-            _mm256_or_ps(
-                _mm256_and_ps(_mm256_cmp_ps::<{ _CMP_GT_OQ }>(x, zero), one),
-                _mm256_and_ps(_mm256_cmp_ps::<{ _CMP_LT_OQ }>(x, zero), neg_one),
-            ),
+            _mm256_blendv_ps(signed, x, unordered),
         );
         i += 8;
     }
@@ -154,9 +166,16 @@ pub unsafe fn sign_f32_avx2(input: &[f32], output: &mut [f32]) {
     }
 }
 
+/// ONNX `Round`: halves go to the nearest **even** integer.
+///
+/// The definition is [`crate::ir::semantics::round_f32`], shared with the
+/// constant folder so a folded `Round` and an executed one cannot disagree.
+/// `f32::round` is *not* it: it rounds halves away from zero, so it returned
+/// -5 where ONNX specifies -4. The AVX2 path uses
+/// `_MM_FROUND_TO_NEAREST_INT`, which is already half-to-even.
 #[inline]
 pub fn round_f32_scalar(x: f32) -> f32 {
-    x.round()
+    crate::ir::semantics::round_f32(x)
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
