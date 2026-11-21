@@ -378,13 +378,34 @@ pub fn plan_memory_with_env(
             ai_idx,
         });
     }
-    // Extend input lifetimes to cover the candidate's output lifetime.
-    // Because this runs BEFORE the allocation loop, the active-list
-    // entries will use the correct (extended) end positions.
+    // Extend the block owner's lifetime to cover the end of the reuse chain.
+    // Because this runs BEFORE the allocation loop, the active-list entries
+    // will use the correct (extended) end positions.
+    //
+    // A candidate's own slot is never allocated, so extending *its* live range
+    // does nothing.  When one candidate reuses another candidate's output
+    // (A -> B -> C, all in place) the extension has to reach the node that
+    // actually owns the buffer, otherwise it stops at B's direct last use and
+    // the block is handed to an unrelated node while C still aliases it.
+    let owner_of: HashMap<NodeId, NodeId> = reuse_candidates
+        .iter()
+        .map(|cand| (cand.node_id, cand.input_id))
+        .collect();
     for cand in &reuse_candidates {
+        let mut owner = cand.input_id;
+        let mut hops = 0usize;
+        while let Some(&next) = owner_of.get(&owner) {
+            owner = next;
+            hops += 1;
+            if hops > reuse_candidates.len() {
+                // Reuse is acyclic by construction; guard anyway so a future
+                // change cannot spin here.
+                break;
+            }
+        }
         if let Some(input_info) = alloc_infos
             .iter_mut()
-            .find(|ai| ai.node_id == cand.input_id && !ai.is_secondary)
+            .find(|ai| ai.node_id == owner && !ai.is_secondary)
         {
             input_info.live_range.1 = input_info.live_range.1.max(cand.output_last_use);
         }
