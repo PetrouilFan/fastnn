@@ -47,6 +47,238 @@ use crate::inference::tensor::{TensorMut, TensorView};
 
 use super::{at, at_mut, decompose, require_dtype, require_output_shape, Locator};
 
+/// A span of output positions that touches each operand with a uniform step.
+///
+/// `len` elements are written starting at `out`, advancing by `out_step`, while
+/// the operands advance by `lhs_step`/`rhs_step`. A step of `0` means the
+/// operand does not move along this span (a promoted axis), which is the case
+/// every broadcast reduces to.
+struct BroadcastRun {
+    out: usize,
+    lhs: usize,
+    rhs: usize,
+    len: usize,
+    out_step: usize,
+    lhs_step: usize,
+    rhs_step: usize,
+}
+
+/// Collapse the result space into runs that are uniform in all three views.
+///
+/// Axes with extent 1 contribute a coordinate that is always 0, so they are
+/// dropped. The innermost surviving axis seeds a run; each axis outside it is
+/// folded into that run while its strides are exactly the inner extent times
+/// the run's current step, which is what "contiguous in all three views" means.
+/// Remaining outer axes are walked with an odometer, so one step costs a
+/// coordinate increment instead of a division per element.
+fn broadcast_runs(
+    dims: &[u64],
+    out_locator: &Locator,
+    lhs_locator: &Locator,
+    rhs_locator: &Locator,
+) -> Result<Vec<BroadcastRun>, Fn3Error> {
+    let rank = dims.len();
+    let out_strides = out_locator.strides();
+    let lhs_strides = lhs_locator.strides();
+    let rhs_strides = rhs_locator.strides();
+    debug_assert_eq!(out_strides.len(), rank);
+    debug_assert_eq!(lhs_strides.len(), rank);
+    debug_assert_eq!(rhs_strides.len(), rank);
+
+    let mut kept: Vec<usize> = Vec::with_capacity(rank);
+    for axis in 0..rank {
+        if dims[axis] != 1 {
+            kept.push(axis);
+        }
+    }
+    if kept.is_empty() {
+        // Every axis is extent 1: the whole output is one element.
+        return Ok(vec![BroadcastRun {
+            out: out_locator.offset(),
+            lhs: lhs_locator.offset(),
+            rhs: rhs_locator.offset(),
+            len: 1,
+            out_step: 0,
+            lhs_step: 0,
+            rhs_step: 0,
+        }]);
+    }
+
+    let mut merged = 1usize;
+    let mut merged_axes = 0usize;
+    let mut out_step = 0usize;
+    let mut lhs_step = 0usize;
+    let mut rhs_step = 0usize;
+    for &axis in kept.iter().rev() {
+        let os = out_strides[axis];
+        let ls = lhs_strides[axis];
+        let rs = rhs_strides[axis];
+        if merged_axes == 0 {
+            out_step = os;
+            lhs_step = ls;
+            rhs_step = rs;
+            merged = usize::try_from(dims[axis]).map_err(|_| Fn3Error::ShapeOverflow {
+                context: "cpu elementwise broadcast extent",
+                axis: Some(axis),
+                detail: "extent does not fit in usize".to_string(),
+            })?;
+            merged_axes = 1;
+            continue;
+        }
+        // Fold this axis in only while all three views stay uniform. An
+        // overflow means the strides cannot describe `merged` elements, so the
+        // axis stays outside and the odometer handles it.
+        let uniform = merged.checked_mul(out_step).is_some_and(|want| want == os)
+            && merged.checked_mul(lhs_step).is_some_and(|want| want == ls)
+            && merged.checked_mul(rhs_step).is_some_and(|want| want == rs);
+        if !uniform {
+            break;
+        }
+        merged = merged
+            .checked_mul(
+                usize::try_from(dims[axis]).map_err(|_| Fn3Error::ShapeOverflow {
+                    context: "cpu elementwise broadcast extent",
+                    axis: Some(axis),
+                    detail: "extent does not fit in usize".to_string(),
+                })?,
+            )
+            .ok_or(Fn3Error::ShapeOverflow {
+                context: "cpu elementwise broadcast run",
+                axis: Some(axis),
+                detail: "run length does not fit in usize".to_string(),
+            })?;
+        merged_axes += 1;
+    }
+
+    let outer_axes = &kept[..kept.len() - merged_axes];
+    let mut coordinates = vec![0usize; outer_axes.len()];
+    let mut runs = Vec::new();
+    loop {
+        let mut out = out_locator.offset();
+        let mut lhs = lhs_locator.offset();
+        let mut rhs = rhs_locator.offset();
+        for (position, &axis) in outer_axes.iter().enumerate() {
+            let coordinate = coordinates[position];
+            out = out.saturating_add(coordinate.saturating_mul(out_strides[axis]));
+            lhs = lhs.saturating_add(coordinate.saturating_mul(lhs_strides[axis]));
+            rhs = rhs.saturating_add(coordinate.saturating_mul(rhs_strides[axis]));
+        }
+        runs.push(BroadcastRun {
+            out,
+            lhs,
+            rhs,
+            len: merged,
+            out_step,
+            lhs_step,
+            rhs_step,
+        });
+        if outer_axes.is_empty() {
+            break;
+        }
+        // Odometer carry over the outer axes.
+        let mut exhausted = true;
+        for position in (0..outer_axes.len()).rev() {
+            coordinates[position] += 1;
+            if (coordinates[position] as u64) < dims[outer_axes[position]] {
+                exhausted = false;
+                break;
+            }
+            coordinates[position] = 0;
+        }
+        if exhausted {
+            break;
+        }
+    }
+    Ok(runs)
+}
+
+/// Whether every index a run touches is inside its buffer.
+///
+/// The runs come from the same metadata the per-element path validates, so this
+/// only fails on a malformed view; in that case the caller keeps the checked
+/// per-element path instead of indexing past the end.
+fn runs_within_bounds(
+    runs: &[BroadcastRun],
+    out_len: usize,
+    lhs_len: usize,
+    rhs_len: usize,
+) -> bool {
+    let inside = |start: usize, step: usize, len: usize, extent: usize| -> bool {
+        if len == 0 {
+            return true;
+        }
+        start
+            .checked_add(step.saturating_mul(len - 1))
+            .is_some_and(|last| last < extent)
+    };
+    runs.iter().all(|run| {
+        inside(run.out, run.out_step, run.len, out_len)
+            && inside(run.lhs, run.lhs_step, run.len, lhs_len)
+            && inside(run.rhs, run.rhs_step, run.len, rhs_len)
+    })
+}
+
+/// Evaluate every run, choosing the cheapest loop shape the steps allow.
+fn apply_broadcast_runs(
+    runs: &[BroadcastRun],
+    output: &mut [f32],
+    lhs: &[f32],
+    rhs: &[f32],
+    evaluate: impl Fn(f32, f32) -> f32,
+) {
+    for run in runs {
+        // A non-unit output step means the write side is not contiguous, which
+        // the wide arms below cannot express; the scalar arm handles it.
+        if run.out_step != 1 {
+            let mut target = run.out;
+            for offset in 0..run.len {
+                output[target] = evaluate(
+                    lhs[run.lhs + offset * run.lhs_step],
+                    rhs[run.rhs + offset * run.rhs_step],
+                );
+                target += run.out_step;
+            }
+            continue;
+        }
+        let span = &mut output[run.out..run.out + run.len];
+        match (run.lhs_step, run.rhs_step) {
+            (1, 1) => {
+                let left = &lhs[run.lhs..run.lhs + run.len];
+                let right = &rhs[run.rhs..run.rhs + run.len];
+                for ((slot, &x), &y) in span.iter_mut().zip(left.iter()).zip(right.iter()) {
+                    *slot = evaluate(x, y);
+                }
+            }
+            (1, 0) => {
+                let right = rhs[run.rhs];
+                let left = &lhs[run.lhs..run.lhs + run.len];
+                for (slot, &x) in span.iter_mut().zip(left.iter()) {
+                    *slot = evaluate(x, right);
+                }
+            }
+            (0, 1) => {
+                let left = lhs[run.lhs];
+                let right = &rhs[run.rhs..run.rhs + run.len];
+                for (slot, &y) in span.iter_mut().zip(right.iter()) {
+                    *slot = evaluate(left, y);
+                }
+            }
+            (0, 0) => {
+                let value = evaluate(lhs[run.lhs], rhs[run.rhs]);
+                span.fill(value);
+            }
+            _ => {
+                for (offset, slot) in span.iter_mut().enumerate() {
+                    *slot = evaluate(
+                        lhs[run.lhs + offset * run.lhs_step],
+                        rhs[run.rhs + offset * run.rhs_step],
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Elementwise binary op with right-aligned broadcasting.
 pub(crate) fn binary(
     op: OpId,
@@ -130,6 +362,14 @@ pub(crate) fn binary(
     let lhs_data = lhs.storage_slice::<f32>()?;
     let rhs_data = rhs.storage_slice::<f32>()?;
     let out_data = out.storage_slice_mut::<f32>()?;
+    // Runs first: the per-element path below resolves three locators and
+    // decomposes a coordinate for every output element, which is the most
+    // expensive part of a broadcast by an order of magnitude.
+    let runs = broadcast_runs(shape.dims(), &out_locator, &lhs_locator, &rhs_locator)?;
+    if runs_within_bounds(&runs, out_data.len(), lhs_data.len(), rhs_data.len()) {
+        apply_broadcast_runs(&runs, out_data, lhs_data, rhs_data, &evaluate);
+        return Ok(());
+    }
     let rank = shape.rank();
     let mut coordinates = vec![0u64; rank];
     for linear in 0..numel {
@@ -632,5 +872,142 @@ mod tests {
         assert!(!Scalar::F32(-0.0).to_bool());
         assert!(Scalar::F32(0.5).to_bool());
         assert_eq!(Scalar::Bool(true).to_f32(), 1.0);
+    }
+}
+
+#[cfg(test)]
+mod broadcast_run_tests {
+    use super::*;
+
+    /// Row-major contiguous strides of `shape`, with `0` on every axis the
+    /// result promotes (a result extent larger than the operand's extent 1).
+    fn promoted_strides(operand: &[u64], result: &[u64]) -> Vec<usize> {
+        let lead = result.len() - operand.len();
+        let mut strides = vec![0usize; result.len()];
+        let mut running = 1usize;
+        for axis in (0..operand.len()).rev() {
+            let extent = usize::try_from(operand[axis]).expect("extent fits usize");
+            let promoted = result[lead + axis] != operand[axis];
+            strides[lead + axis] = if promoted { 0 } else { running };
+            running *= extent;
+        }
+        strides
+    }
+
+    fn numel(shape: &[u64]) -> usize {
+        shape.iter().map(|&d| d as usize).product()
+    }
+
+    /// The per-element reference: resolve every output element through the
+    /// locators, exactly as the path the runs replace does.
+    fn expected(
+        result: &[u64],
+        out: (usize, &[usize]),
+        lhs: (usize, &[usize]),
+        rhs: (usize, &[usize]),
+        lhs_data: &[f32],
+        rhs_data: &[f32],
+    ) -> Vec<f32> {
+        let out_locator = Locator::from_parts(out.0, out.1.to_vec());
+        let lhs_locator = Locator::from_parts(lhs.0, lhs.1.to_vec());
+        let rhs_locator = Locator::from_parts(rhs.0, rhs.1.to_vec());
+        let total = numel(result);
+        let mut coordinates = vec![0u64; result.len()];
+        let mut values = Vec::with_capacity(total);
+        for linear in 0..total {
+            decompose(linear as u64, result, &mut coordinates);
+            let left = lhs_data[lhs_locator
+                .index(OpId::Add, &coordinates)
+                .expect("lhs index")];
+            let right = rhs_data[rhs_locator
+                .index(OpId::Add, &coordinates)
+                .expect("rhs index")];
+            // The output locator must agree with the linear order.
+            assert_eq!(
+                out_locator
+                    .index(OpId::Add, &coordinates)
+                    .expect("out index"),
+                linear
+            );
+            values.push(left * 2.0 + right);
+        }
+        values
+    }
+
+    fn check(result: &[u64], lhs_shape: &[u64], rhs_shape: &[u64]) {
+        let lhs_strides = promoted_strides(lhs_shape, result);
+        let rhs_strides = promoted_strides(rhs_shape, result);
+        let out_strides = promoted_strides(result, result);
+        let lhs_data: Vec<f32> = (0..numel(lhs_shape)).map(|i| i as f32 * 0.5).collect();
+        let rhs_data: Vec<f32> = (0..numel(rhs_shape))
+            .map(|i| i as f32 * 0.25 + 1.0)
+            .collect();
+
+        let want = expected(
+            result,
+            (0, &out_strides),
+            (0, &lhs_strides),
+            (0, &rhs_strides),
+            &lhs_data,
+            &rhs_data,
+        );
+
+        let out_locator = Locator::from_parts(0, out_strides.clone());
+        let lhs_locator = Locator::from_parts(0, lhs_strides.clone());
+        let rhs_locator = Locator::from_parts(0, rhs_strides.clone());
+        let runs = broadcast_runs(result, &out_locator, &lhs_locator, &rhs_locator).expect("runs");
+        assert!(
+            runs_within_bounds(&runs, want.len(), lhs_data.len(), rhs_data.len()),
+            "{result:?} {lhs_shape:?} {rhs_shape:?}: runs escape their buffers"
+        );
+        assert_eq!(
+            runs.iter().map(|run| run.len).sum::<usize>(),
+            want.len(),
+            "{result:?} {lhs_shape:?} {rhs_shape:?}: runs must cover every element once"
+        );
+        let mut got = vec![f32::NAN; want.len()];
+        apply_broadcast_runs(&runs, &mut got, &lhs_data, &rhs_data, |x, y| x * 2.0 + y);
+        for (index, (left, right)) in want.iter().zip(got.iter()).enumerate() {
+            assert_eq!(
+                left.to_bits(),
+                right.to_bits(),
+                "{result:?} {lhs_shape:?} {rhs_shape:?} at {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn runs_match_the_per_element_path() {
+        // Per-channel scale, per-row bias, full broadcast, tail broadcast, and
+        // a 1-D promotion: the combinations a decoder and a CNN both hit.
+        check(&[1, 128, 22, 28], &[1, 128, 1, 1], &[1, 128, 1, 1]);
+        check(&[1, 128, 22, 28], &[1, 128, 22, 28], &[1, 128, 1, 1]);
+        check(&[1, 128, 22, 28], &[1, 128, 22, 28], &[1, 1, 22, 28]);
+        check(&[16, 49, 49], &[16, 49, 49], &[1, 49, 1]);
+        check(&[1, 3, 336, 448], &[1, 3, 336, 448], &[1]);
+        check(&[2, 3, 4], &[2, 3, 4], &[2, 3, 4]);
+        check(&[1, 5], &[1, 5], &[5]);
+        check(&[1, 1, 1], &[1, 1, 1], &[4, 1, 3]);
+    }
+
+    #[test]
+    fn a_fully_contiguous_broadcast_merges_into_one_run() {
+        let result = [2u64, 3, 4];
+        let out = promoted_strides(&result, &result);
+        let lhs = promoted_strides(&result, &result);
+        let rhs = promoted_strides(&[1], &result);
+        let runs = broadcast_runs(
+            &result,
+            &Locator::from_parts(0, out),
+            &Locator::from_parts(0, lhs),
+            &Locator::from_parts(0, rhs),
+        )
+        .expect("runs");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].len, 24);
+        assert_eq!(
+            (runs[0].out_step, runs[0].lhs_step, runs[0].rhs_step),
+            (1, 1, 0)
+        );
     }
 }

@@ -221,6 +221,33 @@ impl Locator {
         })
     }
 
+    /// Element offset this operand starts at.
+    ///
+    /// Exposed so a kernel can precompute runs of output positions that touch
+    /// each operand with a uniform step, instead of resolving every element
+    /// through [`Locator::index`].
+    pub(crate) fn offset(&self) -> usize {
+        self.offset
+    }
+
+    /// Build a locator from explicit parts.
+    ///
+    /// Test-only: the broadcast run builder has to be checked against the
+    /// per-element path for shape combinations that are awkward to construct
+    /// through real tensors, and that check needs a locator without a view.
+    #[cfg(test)]
+    pub(crate) fn from_parts(offset: usize, strides: Vec<usize>) -> Locator {
+        Locator { offset, strides }
+    }
+
+    /// Per-result-axis element strides, with `0` on every promoted axis.
+    ///
+    /// Same purpose as [`Locator::offset`]: the run builder needs the strides
+    /// themselves to decide which axes advance uniformly together.
+    pub(crate) fn strides(&self) -> &[usize] {
+        &self.strides
+    }
+
     /// Element index of `coordinates` (length = result rank).
     pub(crate) fn index(&self, op: OpId, coordinates: &[u64]) -> Result<usize, Fn3Error> {
         let mut index = self.offset as u64;
