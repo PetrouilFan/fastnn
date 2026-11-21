@@ -417,10 +417,13 @@ fn test_memory_plan_output_elementwise_does_not_reuse_operand_that_is_graph_outp
         plan.slots.get(&intermediate_id).unwrap().offset,
         "graph-output elementwise node must not reuse an operand that is also a graph output"
     );
+    // Two slots, not three: the input dies once its only consumer has
+    // run, so the output reuses its slot. Only graph outputs and
+    // required nodes stay live to the end of the graph.
     assert_eq!(
         plan.total_size,
-        3 * 64,
-        "input, intermediate output, and final output must occupy distinct aligned slots"
+        2 * 64,
+        "the input slot is free once Relu has run, so the final output reuses it"
     );
 }
 
@@ -455,10 +458,13 @@ fn test_memory_plan_output_elementwise_does_not_reuse_operand_that_is_required_n
         plan.slots.get(&required_id).unwrap().offset,
         "graph-output elementwise node must not reuse an operand that is a required node"
     );
+    // Two slots, not three: the input dies once its only consumer has
+    // run, so the output reuses its slot. Only graph outputs and
+    // required nodes stay live to the end of the graph.
     assert_eq!(
         plan.total_size,
-        3 * 64,
-        "input, required node, and output must occupy distinct aligned slots"
+        2 * 64,
+        "the input slot is free once the required node has run, so the output reuses it"
     );
 }
 
@@ -491,10 +497,13 @@ fn test_memory_plan_cast_does_not_reuse_same_byte_size_different_dtype_operand()
         plan.slots.get(&intermediate_id).unwrap().offset,
         "same-byte-size Cast must not reuse an operand with a different dtype"
     );
+    // Two slots, not three: the input dies once its only consumer has
+    // run, so the output reuses its slot. Only graph outputs and
+    // required nodes stay live to the end of the graph.
     assert_eq!(
         plan.total_size,
-        3 * 64,
-        "input, f32 intermediate, and i32 output must occupy distinct aligned slots"
+        2 * 64,
+        "the input slot is free once the f32 intermediate has run, so the i32 output reuses it"
     );
 }
 

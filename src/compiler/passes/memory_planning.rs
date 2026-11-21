@@ -154,32 +154,26 @@ pub fn plan_memory_with_env(
     let position: HashMap<NodeId, usize> =
         order.iter().enumerate().map(|(i, &id)| (id, i)).collect();
 
-    // ── Transitive consumer analysis ─────────────────────────────────
-    // Compute the latest position of any transitive consumer that is a
-    // required node or graph output.  This ensures that a node's lifetime
-    // is extended if its data flows (through any chain of consumers) to a
-    // required node or output.
-    let mut transitive_last_use: HashMap<NodeId, usize> = HashMap::new();
-    // Process nodes in reverse topological order so that consumers are
-    // processed before their producers.
-    for &node_id in order.iter().rev() {
-        let _node = match graph.get_node(node_id) {
-            Some(n) => n,
-            None => continue,
-        };
+    // ── Last-use analysis ────────────────────────────────────────────
+    // A value dies after the latest position of a node that reads it
+    // *directly*; only graph outputs and required nodes have to survive to
+    // the end.  An earlier version propagated each consumer's own last use
+    // instead, which in a chain reached the final output for every
+    // intermediate: no slot was ever freed and the arena grew by one buffer
+    // per node (a 21-conv chain of 6.3 MB tensors asked for 138.9 MB where
+    // 12.6 MB suffices).
+    let mut last_use_at: HashMap<NodeId, usize> = HashMap::new();
+    for &node_id in &order {
         let my_pos = position.get(&node_id).copied().unwrap_or(0);
         let is_terminal =
             graph.outputs.contains(&node_id) || graph.required_nodes.contains(&node_id);
-        let base = if is_terminal { order.len() - 1 } else { my_pos };
-        // Start with our own position (or end if terminal)
-        let mut last = base;
-        // Propagate through direct consumers
+        let mut last = if is_terminal { order.len() - 1 } else { my_pos };
         for &cid in &graph.consumers(node_id) {
-            if let Some(&consumer_last) = transitive_last_use.get(&cid) {
-                last = last.max(consumer_last);
+            if let Some(&consumer_pos) = position.get(&cid) {
+                last = last.max(consumer_pos);
             }
         }
-        transitive_last_use.insert(node_id, last);
+        last_use_at.insert(node_id, last);
     }
 
     let mut alloc_infos: Vec<AllocInfo> = Vec::with_capacity(graph.nodes.len());
@@ -207,13 +201,9 @@ pub fn plan_memory_with_env(
             } else {
                 position.get(&node_id).copied().unwrap_or(0)
             };
-            // Use transitive consumer analysis for last_use.  This ensures
-            // that a node's lifetime is extended if its data flows (through
-            // any chain of consumers) to a required node or graph output.
-            let last_use = transitive_last_use
-                .get(&node_id)
-                .copied()
-                .unwrap_or(first_use);
+            // Use the direct-consumer last use computed above, so a value's
+            // slot is released as soon as its final reader has run.
+            let last_use = last_use_at.get(&node_id).copied().unwrap_or(first_use);
 
             alloc_infos.push(AllocInfo {
                 node_id,
@@ -228,11 +218,8 @@ pub fn plan_memory_with_env(
             let sec_size = tensor_byte_size(sec_type, shape_env).map_err(|e| e.to_string())?;
             if sec_size > 0 {
                 let first_use = position.get(&node_id).copied().unwrap_or(0);
-                // Use transitive consumer analysis for secondary output too
-                let last_use = transitive_last_use
-                    .get(&node_id)
-                    .copied()
-                    .unwrap_or(first_use);
+                // The secondary output shares the primary's last-use point.
+                let last_use = last_use_at.get(&node_id).copied().unwrap_or(first_use);
                 alloc_infos.push(AllocInfo {
                     node_id,
                     size: sec_size,
