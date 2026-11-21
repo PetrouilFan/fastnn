@@ -234,21 +234,28 @@ use matmul::{
     quantized_matmul_dispatch_i8_u8,
 };
 
-type PackedWeightCacheKey = (usize, usize, usize, TypeId);
+type PackedWeightCacheKey = (usize, usize, usize, usize, TypeId);
 static PACKED_WEIGHT_CACHE: OnceLock<
     Mutex<HashMap<PackedWeightCacheKey, Arc<dyn std::any::Any + Send + Sync>>>,
 > = OnceLock::new();
 
-/// Per-plan packed weight cache keyed by `(raw_ptr, write_offset, raw_len, TypeId)`.
-/// The raw data pointer acts as a unique compilation-session identifier so that
-/// distinct weight values (even at the same arena offset) never collide.
+/// Per-plan packed weight cache keyed by `(arena_ptr, weight, write_offset, raw_len, TypeId)`.
+///
+/// `weight` is the address of the [`QuantizedWeightMeta`] the compiler built for
+/// one instruction, so it identifies the weight rather than the slot holding it.
+/// The arena pointer alone is not enough: two instructions of one plan can share
+/// a dead slot at the same offset and size, and the second weight would then be
+/// served the first one's packed words. A weight used by two instructions gets
+/// one entry each -- correctness over deduplication.
 fn get_or_cache_packed<T: PackedWord + 'static>(
+    weight: usize,
     write_offset: usize,
     write_size: usize,
     raw: &[u8],
 ) -> Arc<Vec<T>> {
     let cache_key = (
         raw.as_ptr() as usize,
+        weight,
         write_offset,
         write_size,
         TypeId::of::<T>(),
@@ -267,11 +274,13 @@ fn get_or_cache_packed<T: PackedWord + 'static>(
     v
 }
 
-type F32WeightCacheKey = (usize, usize, usize, TypeId);
+type F32WeightCacheKey = (usize, usize, usize, usize, TypeId);
 
-/// Global cache for unpacked f32 weights, keyed by `(raw_ptr, write_offset, write_size, TypeId)`.
-/// The raw data pointer acts as a unique compilation-session identifier so that
-/// distinct weight values (even at the same arena offset) never collide.
+/// Global cache for unpacked f32 weights, keyed like [`get_or_cache_packed`].
+///
+/// The metadata address separates two weights that a planner placed in the same
+/// arena slot; see [`get_or_cache_packed`] for why the arena pointer is not an
+/// identity on its own.
 /// This cache is scoped to the process lifetime but can be cleared between
 /// executor instances (different quantization dtypes) via
 /// [`clear_f32_weight_cache()`] to prevent memory accumulation.
@@ -303,6 +312,7 @@ pub fn clear_f32_weight_cache() {
 /// that repeated dispatch of the same conv layer reuses the f32 weights without
 /// re-dequantization.
 fn get_or_cache_f32_weights<T: PackedWord + 'static>(
+    weight: usize,
     write_offset: usize,
     write_size: usize,
     raw: &[u8],
@@ -314,6 +324,7 @@ fn get_or_cache_f32_weights<T: PackedWord + 'static>(
 ) -> Arc<PackedTensor<T>> {
     let cache_key = (
         raw.as_ptr() as usize,
+        weight,
         write_offset,
         write_size,
         TypeId::of::<T>(),
@@ -327,7 +338,7 @@ fn get_or_cache_f32_weights<T: PackedWord + 'static>(
             return arc_pt;
         }
     }
-    let packed_data = get_or_cache_packed::<T>(write_offset, write_size, raw);
+    let packed_data = get_or_cache_packed::<T>(weight, write_offset, write_size, raw);
     let mut pt =
         PackedTensor::from_raw_arc(packed_data, shape.to_vec(), scales.to_vec(), zeros.to_vec());
     pt.quant_block_size = quant_block_size;
@@ -343,8 +354,8 @@ fn get_or_cache_f32_weights<T: PackedWord + 'static>(
 #[cfg(test)]
 mod packed_weight_cache_tests {
     use super::{
-        clear_f32_weight_cache, get_or_cache_packed, CpuBackend, CpuBuffer, F32_WEIGHT_CACHE,
-        PACKED_WEIGHT_CACHE,
+        clear_f32_weight_cache, get_or_cache_f32_weights, get_or_cache_packed, CpuBackend,
+        CpuBuffer, F32_WEIGHT_CACHE, PACKED_WEIGHT_CACHE,
     };
     use crate::backend::executor::GraphExecutor;
     use crate::dtypes::{PackedWord, U4x8};
@@ -375,13 +386,78 @@ mod packed_weight_cache_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut raw = vec![0u8; 4];
-        let first = get_or_cache_packed::<U4x8>(0, raw.len(), &raw);
+        let first = get_or_cache_packed::<U4x8>(0, 0, raw.len(), &raw);
         assert_eq!(first[0].to_bits(), 0);
 
         raw.fill(0xff);
         clear_f32_weight_cache();
-        let second = get_or_cache_packed::<U4x8>(0, raw.len(), &raw);
+        let second = get_or_cache_packed::<U4x8>(0, 0, raw.len(), &raw);
         assert_eq!(second[0].to_bits(), u32::MAX);
+    }
+
+    #[test]
+    fn a_weight_is_not_served_from_another_weights_slot() {
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_f32_weight_cache();
+        // One arena slot holding the codes 1,1,1,1 (four nibbles, one word).
+        let raw = vec![0x11u8; 4];
+        let shape = [1usize, 4];
+
+        // Two instructions whose weights a planner placed in the same slot at
+        // the same offset. The arena pointer cannot tell them apart, so the
+        // metadata address is what separates them.
+        let first = get_or_cache_f32_weights::<U4x8>(
+            0x1000,
+            0,
+            raw.len(),
+            &raw,
+            &shape,
+            &[1.0],
+            &[0.0],
+            0,
+            &[],
+        );
+        let second = get_or_cache_f32_weights::<U4x8>(
+            0x2000,
+            0,
+            raw.len(),
+            &raw,
+            &shape,
+            &[2.0],
+            &[0.0],
+            0,
+            &[],
+        );
+        assert!(
+            !std::sync::Arc::ptr_eq(&first, &second),
+            "the second weight must not reuse the first weight's dequantized copy"
+        );
+        assert_eq!(first.get_or_init_f32_weights(), &[1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(second.get_or_init_f32_weights(), &[2.0, 2.0, 2.0, 2.0]);
+        assert_eq!(
+            first.get_or_init_f32_weights(),
+            &[1.0, 1.0, 1.0, 1.0],
+            "serving the second weight must not rewrite the first one"
+        );
+
+        // The same weight asked for twice is still one entry.
+        let again = get_or_cache_f32_weights::<U4x8>(
+            0x1000,
+            0,
+            raw.len(),
+            &raw,
+            &shape,
+            &[1.0],
+            &[0.0],
+            0,
+            &[],
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &again),
+            "the cache still hits"
+        );
     }
 
     #[test]
@@ -393,7 +469,7 @@ mod packed_weight_cache_tests {
         // SAFETY: the test arena owns exactly 64 initialized bytes and no mutable view exists.
         let raw = unsafe { arena.view_u8(0, 64) };
         let pointer = raw.as_ptr() as usize;
-        let _packed = get_or_cache_packed::<U4x8>(0, 64, raw);
+        let _packed = get_or_cache_packed::<U4x8>(0, 0, 64, raw);
         drop(arena);
 
         assert!(!PACKED_WEIGHT_CACHE
@@ -402,7 +478,7 @@ mod packed_weight_cache_tests {
             .lock()
             .unwrap()
             .keys()
-            .any(|(cached_pointer, _, _, _)| *cached_pointer == pointer));
+            .any(|(cached_pointer, _, _, _, _)| *cached_pointer == pointer));
     }
 
     /// Run one small Conv2d through `target`.
@@ -556,13 +632,13 @@ impl Drop for CpuBuffer {
             cache
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .retain(|(pointer, _, _, _), _| *pointer < start || *pointer >= end);
+                .retain(|(pointer, _, _, _, _), _| *pointer < start || *pointer >= end);
         }
         if let Some(cache) = F32_WEIGHT_CACHE.get() {
             cache
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .retain(|(pointer, _, _, _), _| *pointer < start || *pointer >= end);
+                .retain(|(pointer, _, _, _, _), _| *pointer < start || *pointer >= end);
         }
         // Hand the pages back to this thread's arena pool. An eager model
         // allocates and frees an arena of the same size on every call, and a
@@ -6391,6 +6467,7 @@ impl Backend for CpuBackend {
                                             payload.extend_from_slice(col_u8);
                                             let kp = inner.div_ceil(I4x8::ITEMS);
                                             let w_sl = get_or_cache_packed::<I4x8>(
+                                                std::sync::Arc::as_ptr(&meta) as usize,
                                                 w_slice.offset,
                                                 w_slice.size,
                                                 raw,
@@ -6460,6 +6537,7 @@ impl Backend for CpuBackend {
                                             // U8 path: pack i8 â†’ I8x4 (lossless), use fast packed SWAR GEMM
                                             let kp = inner.div_ceil(I8x4::ITEMS);
                                             let w_sl = get_or_cache_packed::<I8x4>(
+                                                std::sync::Arc::as_ptr(&meta) as usize,
                                                 w_slice.offset,
                                                 w_slice.size,
                                                 raw,
@@ -6671,6 +6749,7 @@ impl Backend for CpuBackend {
                                 macro_rules! dispatch_packed_conv_cached {
                                     ($PackedType:ty) => {{
                                         let pt = get_or_cache_f32_weights::<$PackedType>(
+                                            std::sync::Arc::as_ptr(&meta) as usize,
                                             w_slice.offset,
                                             w_slice.size,
                                             &raw,

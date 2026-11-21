@@ -212,7 +212,14 @@ pub(super) fn quantized_matmul_dispatch<T: PackedWord + 'static>(
         let typed_data = {
             // SAFETY: weight slice does not overlap with activation or output.
             let raw: &[u8] = unsafe { arena.view_u8(w_slice.offset, w_slice.size) };
-            get_or_cache_packed::<T>(w_slice.offset, w_slice.size, raw)
+            get_or_cache_packed::<T>(
+                weight_meta
+                    .as_ref()
+                    .map_or(0, |meta| std::sync::Arc::as_ptr(meta) as usize),
+                w_slice.offset,
+                w_slice.size,
+                raw,
+            )
         };
         let meta = weight_meta.clone().unwrap_or_else(|| {
             std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
@@ -371,7 +378,14 @@ pub(super) fn quantized_matmul_dispatch_i8_u8(
         validate_i8_activation_affine(activation_payload, kernel_name)?;
         let typed_data = {
             let raw: &[u8] = unsafe { arena.view_u8(w_slice.offset, w_slice.size) };
-            get_or_cache_packed::<I8x4>(w_slice.offset, w_slice.size, raw)
+            get_or_cache_packed::<I8x4>(
+                weight_meta
+                    .as_ref()
+                    .map_or(0, |meta| std::sync::Arc::as_ptr(meta) as usize),
+                w_slice.offset,
+                w_slice.size,
+                raw,
+            )
         };
         let meta = weight_meta.clone().ok_or_else(|| {
             BackendError::Dispatch(format!("{kernel_name}: missing quantized weight metadata"))
@@ -439,7 +453,14 @@ pub(super) fn quantized_matmul_dispatch_i8_u4(
         let activation_payload: &[u8] = unsafe { arena.view_u8(a_slice.offset, a_slice.size) };
         let typed_data = {
             let raw: &[u8] = unsafe { arena.view_u8(w_slice.offset, w_slice.size) };
-            get_or_cache_packed::<I4x8>(w_slice.offset, w_slice.size, raw)
+            get_or_cache_packed::<I4x8>(
+                weight_meta
+                    .as_ref()
+                    .map_or(0, |meta| std::sync::Arc::as_ptr(meta) as usize),
+                w_slice.offset,
+                w_slice.size,
+                raw,
+            )
         };
         let meta = weight_meta.clone().ok_or_else(|| {
             BackendError::Dispatch(format!("{kernel_name}: missing quantized weight metadata"))
