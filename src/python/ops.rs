@@ -400,31 +400,29 @@ fn _set_seed(seed: u64) {
     set_seeded_rng(seed);
 }
 
+/// Choose how many workers the CPU backend runs on.
+///
+/// `n <= 0` means "as many as the machine offers, without pinning", which is
+/// what the backend already does when nobody asks. This can only take effect
+/// before the first parallel operation, because that is when Rayon builds its
+/// global pool; afterwards the error says so instead of failing with Rayon's
+/// own wording.
 #[pyfunction]
 #[cfg(feature = "parallel")]
 fn _set_num_threads(n: i32) -> PyResult<()> {
-    if n > 0 {
-        // User explicitly set thread count — respect it (no pinning to avoid odd counts)
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(n as usize)
-            .build_global()
-            .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Failed to set num threads: {}",
-                    e
-                ))
-            })
+    let threads = if n > 0 {
+        n as usize
     } else {
-        // Auto: use pinned thread pool with physical core count
-        crate::backend::cpu::affinity::ensure_global_pool_initialized();
-        Ok(())
-    }
+        std::thread::available_parallelism().map_or(1, |count| count.get())
+    };
+    crate::backend::cpu::affinity::configure_threads(threads)
+        .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
 }
 
 #[pyfunction]
 #[cfg(feature = "parallel")]
 fn _get_num_threads() -> usize {
-    rayon::current_num_threads()
+    crate::backend::cpu::affinity::worker_count()
 }
 
 #[pyfunction]

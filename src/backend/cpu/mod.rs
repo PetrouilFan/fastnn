@@ -3910,10 +3910,6 @@ impl Backend for CpuBackend {
                 plan.arena_size
             )));
         }
-        // Ensure the global thread pool is initialized with pinned physical cores.
-        #[cfg(feature = "parallel")]
-        crate::backend::cpu::affinity::ensure_global_pool_initialized();
-
         // â”€â”€ Debug: collect MaxPool primary output ranges â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         //     (only active with `debug_canary` feature â€” expensive)
         // ANCHOR: debug-canary-start
