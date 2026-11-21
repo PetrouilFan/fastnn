@@ -104,6 +104,7 @@ deleted training tree.
 | IR shapes and memory planning | `cargo test --test {shape_inference_tests,memory_planning_tests,arena_liveness}` |
 | compiler passes | `cargo test --test {compiler_edge_cases,residual_add_norm,concat_to_conv_eligibility}` |
 | Vulkan (physical GPU) | `cargo test --features vulkan --test fn3_vulkan_smoke` |
+| Vulkan library unit tests | `VK_ICD_FILENAMES=… FN3_VK_TEST_SOFTWARE=1 cargo test --no-default-features --features vulkan --lib -- --test-threads=1` |
 | 2.x CPU/quantized pipeline | `cargo test --test quantized_pipeline -- --test-threads=1` |
 | Python binding | `maturin develop --release && pytest tests/ -m "not slow"` |
 
@@ -111,7 +112,10 @@ The CPU lane runs the library tests and then every integration target; the
 narrow commands above are for iterating on one area, not a substitute for the
 lane. `cargo test --lib parity` is the only place a pointwise AVX2 kernel is
 checked against its scalar reference, so a new SIMD activation needs a row
-there, not a bespoke test.
+there, not a bespoke test. The Vulkan library unit tests need a loader and an
+ICD, which only the CI-only software lane installs, so that lane runs them
+after the smoke test; `vulkan-build` compiles them with `--no-run` and executes
+nothing.
 
 The pinned model is never committed; tests print a skip reason when it is
 absent. Do not weaken a tolerance to hide a regression, and do not delete a

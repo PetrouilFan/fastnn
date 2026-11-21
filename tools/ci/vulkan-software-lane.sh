@@ -81,4 +81,28 @@ if ! grep -qiE 'llvmpipe|lavapipe' "$SMOKE_LOG"; then
 fi
 ci::check "CI-only lavapipe smoke test dispatched and reported the software device"
 
-ci::passed "CI-ONLY software Vulkan smoke passed under lavapipe with validation enabled; this is NOT physical GPU evidence"
+# The 112 unit tests under src/fn3/backend/vulkan/** were compiled by the
+# vulkan-build lane with --no-run and executed nowhere: that lane installs
+# spirv-tools and glslc but no loader, so it cannot run them. This lane is the
+# only place in CI with a working loader and ICD, which makes it the only place
+# they can actually execute.
+LIB_LOG="$CI_ROOT/target/ci-vulkan-lib.log"
+echo
+echo "== CI-ONLY software Vulkan library unit tests (lavapipe) =="
+echo "\$ VK_ICD_FILENAMES=$ICD FN3_VK_TEST_SOFTWARE=1 cargo test --no-default-features --features vulkan --lib -- --test-threads=1"
+if ! VK_ICD_FILENAMES="$ICD" \
+     FN3_VK_TEST_SOFTWARE=1 \
+     cargo test --no-default-features --features vulkan --lib -- --test-threads=1 2>&1 | tee "$LIB_LOG"; then
+    ci::failed "Vulkan library unit tests failed under lavapipe" \
+        "VK_ICD_FILENAMES=$ICD FN3_VK_TEST_SOFTWARE=1 cargo test --no-default-features --features vulkan --lib -- --test-threads=1"
+fi
+# A suite in which every test ignored itself also exits 0, so require that at
+# least one test actually passed. The count is read back from the result line
+# rather than pinned here, so this stays true as the suite grows.
+if ! grep -qE '^test result: ok\. [1-9][0-9]* passed' "$LIB_LOG"; then
+    ci::failed "the Vulkan library unit suite reported no passing test; a run in which everything skipped proves nothing" \
+        "VK_ICD_FILENAMES=$ICD FN3_VK_TEST_SOFTWARE=1 cargo test --no-default-features --features vulkan --lib -- --test-threads=1"
+fi
+ci::check "Vulkan library unit tests passed under lavapipe"
+
+ci::passed "CI-ONLY software Vulkan smoke and library unit tests passed under lavapipe with validation enabled; this is NOT physical GPU evidence"
