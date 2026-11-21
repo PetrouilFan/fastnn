@@ -3,6 +3,25 @@
 ## [Unreleased]
 
 ### Changed
+- A convolution model can now be imported and executed end to end as one
+  AOT graph. `If`/`Mod` shape plumbing is resolved at import by
+  `fastnn.io.shape_specialize`, which folds the computed integer tensors into
+  initializers using ONNX Runtime and inlines the taken branch (1339 nodes
+  become 406 on EfficientViT-Depth-5M, and ONNX Runtime agrees with the
+  specialised graph bit for bit). `Pad` honours its `pads` input and
+  `mode="edge"`, and `Resize` honours an explicit `sizes` input with
+  half-pixel coordinates instead of falling back to a 2x2 scale.
+- Four correctness fixes that a 406-node graph exposed: an in-place
+  elementwise reuse chain now keeps its block alive to its last reader (two
+  graph outputs were planned onto one slot and an add read `x + x`), the
+  activation-fusion pass only fuses into operators whose kernels apply it
+  (concat, softmax, transpose, slice, pad and resize discarded it), the AVX2
+  `log` polynomial returned ln(2) as 0.69804 instead of 0.69315 (4.9e-3, which
+  every log, softplus and mish result inherited), and prepared static-weight
+  keys are pruned when the planner recycles their arena range for an
+  activation. The model now matches ONNX Runtime to 5.2e-06 maximum absolute
+  error, having been 8.6e+01.
+
 - Convolution correctness: the AVX2 3x3 stride-2 `im2col` kernel stored
   `lo[0], lo[2], lo[2], lo[0], …` instead of the eight gathered values, so
   every stride-2 convolution below the parallel threshold was wrong by up to
