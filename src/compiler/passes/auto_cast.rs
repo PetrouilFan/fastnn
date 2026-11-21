@@ -295,17 +295,28 @@ mod tests {
             vec![input_id, shared_weight_id],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
-        // Use shared_weight in a non-MatMul op (Relu) to trigger Dequantize insertion
+        graph.set_inputs(vec![input_id, mm_weight_id, shared_weight_id]);
+        graph.set_outputs(vec![mm_id, mm2_id]);
+
+        crate::compiler::passes::shape_inference::infer_shapes(&mut graph).unwrap();
+
+        // Quantize the weights while every consumer is still a MatMul: a
+        // constant that a non-MatMul op also reads is left alone and the
+        // MatMul is pointed at a copy, which is the right result but cannot
+        // produce the input this test is about. Quantizing here makes the
+        // shared weight genuinely packed, so the reader added below is a real
+        // quantized-weight consumer. The weight is a constant, so the
+        // transpose the packed layout applies to a 2-D weight is invisible.
+        crate::compiler::passes::quantization::quantize_weights(&mut graph, 4, true, None)
+            .expect("exclusive MatMul weights quantize in place");
+
+        // Now a non-MatMul op reads the quantized weight.
         let relu_id = graph.add_node(
             Opcode::Relu,
             vec![shared_weight_id],
             TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
         );
-
-        graph.set_inputs(vec![input_id, mm_weight_id, shared_weight_id]);
         graph.set_outputs(vec![mm_id, mm2_id, relu_id]);
-
-        crate::compiler::passes::shape_inference::infer_shapes(&mut graph).unwrap();
 
         let opts = AutoCastOptions {
             weight_bit_width: Some(4),
@@ -313,11 +324,12 @@ mod tests {
         };
         auto_cast(&mut graph, &opts).unwrap();
 
-        // shared_weight should be quantized
+        // The weight was already packed, so auto_cast leaves it packed and the
+        // MatMul reads it directly.
         let shared_weight_node = graph.get_node(shared_weight_id).unwrap();
         assert!(
             matches!(shared_weight_node.output_type.dtype(), IrDType::I4),
-            "shared_weight should be quantized"
+            "the quantized weight stays packed"
         );
 
         // The Relu node consumes shared_weight (quantized). Since Relu is not

@@ -233,6 +233,84 @@ pub fn quantize_matmul_weights_k_grouped_i4(
 /// When `signed` is true, packed storage uses signed `I4x8`/`I8x4` and
 /// IrDType produces `I4`/`I8Scaled`.  When `signed` is false, packing uses
 /// unsigned `U4x8`/`U8x4` and IrDType produces `U4Scaled`/`U8Scaled`.
+/// Which constant the quantized bytes should be written to.
+///
+/// Quantization rewrites the constant in place, and a 2-D weight is also
+/// transposed for the packed GEMM. Both are only safe when every consumer
+/// reads the quantized layout: a constant shared with anything else — a tied
+/// embedding read by both `Gather` and `MatMul`, a weight also exposed as a
+/// graph output, a constant added elementwise — would silently see permuted or
+/// repacked values. Those consumers keep the original node and the quantized
+/// ones are pointed at a private copy.
+///
+/// Returns `None` when no consumer can read the quantized form, in which case
+/// the weight is left as it is.
+fn quantized_target_for(
+    graph: &mut ComputeGraph,
+    const_id: NodeId,
+    transposes: bool,
+) -> Option<NodeId> {
+    let mut quantized_consumers = Vec::new();
+    // A graph output is observable on its own, so it counts as a consumer that
+    // needs the original bytes.
+    let mut exclusive = !graph.outputs.contains(&const_id);
+    for consumer_id in graph.consumers(const_id) {
+        let accepts = graph.get_node(consumer_id).is_some_and(|consumer| {
+            consumer.inputs.get(1).copied() == Some(const_id)
+                && match consumer.opcode {
+                    Opcode::MatMul => true,
+                    // A conv weight keeps its layout whatever its rank is. A
+                    // rank-2 weight is transposed, and only a MatMul kernel
+                    // expects that.
+                    Opcode::Conv1d | Opcode::Conv2d | Opcode::Conv3d => !transposes,
+                    _ => false,
+                }
+        });
+        if accepts {
+            quantized_consumers.push(consumer_id);
+        } else {
+            exclusive = false;
+        }
+    }
+    if quantized_consumers.is_empty() {
+        return None;
+    }
+    if exclusive {
+        return Some(const_id);
+    }
+
+    let (opcode, output_type, name) = {
+        let node = graph.get_node(const_id)?;
+        let name = node.name.trim();
+        let name = if name.is_empty() {
+            String::new()
+        } else {
+            format!("{name}.quantized")
+        };
+        (node.opcode.clone(), node.output_type.clone(), name)
+    };
+    // The copy starts from the same constant so it carries the bytes this
+    // function is about to replace.
+    let copy_id = if name.is_empty() {
+        graph.add_node(opcode, Vec::new(), output_type)
+    } else {
+        graph.add_node_with_name(opcode, Vec::new(), output_type, &name)
+    };
+    for consumer_id in quantized_consumers {
+        if let Some(consumer) = graph.get_node_mut(consumer_id) {
+            if let Some(slot) = consumer.inputs.get_mut(1) {
+                if *slot == const_id {
+                    *slot = copy_id;
+                }
+            }
+        }
+    }
+    // `get_node_mut` does not invalidate the consumer index, and the edges
+    // above changed which node consumes the original constant.
+    graph.mark_mutated();
+    Some(copy_id)
+}
+
 pub fn quantize_weights(
     graph: &mut ComputeGraph,
     bit_width: u8,
@@ -275,6 +353,12 @@ pub fn quantize_weights(
         Ok(())
     })
     .map_err(FastnnError::compilation)?;
+
+    // One weight can be reachable from several ops, and a shared constant now
+    // yields one copy for all of them. Quantize each constant once so the
+    // second pass cannot add a second copy of the same bytes.
+    to_quantize.sort_unstable();
+    to_quantize.dedup_by_key(|(const_id, _)| *const_id);
 
     if to_quantize.is_empty() {
         return Ok(());
@@ -323,6 +407,13 @@ pub fn quantize_weights(
         if orig_shape.len() < 2 {
             continue;
         }
+
+        // A constant another consumer also reads must not be rewritten in
+        // place; see `quantized_target_for`. A 2-D weight is transposed for
+        // the packed GEMM, so only a MatMul can read the quantized form.
+        let Some(quantize_id) = quantized_target_for(graph, const_id, orig_shape.len() == 2) else {
+            continue;
+        };
 
         // For 2D MatMul weights, transpose from [K, N] to [N, K] so the
         // packed GEMM kernel (gemm_packed_batched) sees [N_out, K_in].
@@ -407,7 +498,7 @@ pub fn quantize_weights(
                     bytes: bytes.into(),
                     tensor_type: tt.clone(),
                 };
-                if let Some(node_mut) = graph.get_node_mut(const_id) {
+                if let Some(node_mut) = graph.get_node_mut(quantize_id) {
                     node_mut.opcode = Opcode::Constant(new_value);
                     node_mut.output_type = tt;
                 }
@@ -454,7 +545,7 @@ pub fn quantize_weights(
                     bytes: bytes.into(),
                     tensor_type: tt.clone(),
                 };
-                if let Some(node_mut) = graph.get_node_mut(const_id) {
+                if let Some(node_mut) = graph.get_node_mut(quantize_id) {
                     node_mut.opcode = Opcode::Constant(new_value);
                     node_mut.output_type = tt;
                 }
@@ -501,7 +592,7 @@ pub fn quantize_weights(
                 bytes: bytes.into(),
                 tensor_type: tt.clone(),
             };
-            if let Some(node_mut) = graph.get_node_mut(const_id) {
+            if let Some(node_mut) = graph.get_node_mut(quantize_id) {
                 node_mut.opcode = Opcode::Constant(new_value);
                 node_mut.output_type = tt;
             }
@@ -546,7 +637,7 @@ pub fn quantize_weights(
                 bytes: bytes.into(),
                 tensor_type: tt.clone(),
             };
-            if let Some(node_mut) = graph.get_node_mut(const_id) {
+            if let Some(node_mut) = graph.get_node_mut(quantize_id) {
                 node_mut.opcode = Opcode::Constant(new_value);
                 node_mut.output_type = tt;
             }
@@ -603,6 +694,12 @@ pub fn quantize_weights_fp(
     })
     .map_err(FastnnError::compilation)?;
 
+    // One weight can be reachable from several ops, and a shared constant now
+    // yields one copy for all of them. Quantize each constant once so the
+    // second pass cannot add a second copy of the same bytes.
+    to_quantize.sort_unstable();
+    to_quantize.dedup_by_key(|(const_id, _)| *const_id);
+
     if to_quantize.is_empty() {
         return Ok(());
     }
@@ -646,6 +743,13 @@ pub fn quantize_weights_fp(
         if orig_shape.len() < 2 {
             continue;
         }
+
+        // A constant another consumer also reads must not be rewritten in
+        // place; see `quantized_target_for`. A 2-D weight is transposed for
+        // the packed GEMM, so only a MatMul can read the quantized form.
+        let Some(quantize_id) = quantized_target_for(graph, const_id, orig_shape.len() == 2) else {
+            continue;
+        };
 
         // A non-finite weight has no meaningful scale: every block or channel
         // scale becomes NaN or Inf, and the codebook path's k-means
@@ -848,7 +952,7 @@ pub fn quantize_weights_fp(
             tensor_type: new_tensor_type.clone(),
         };
 
-        if let Some(node_mut) = graph.get_node_mut(const_id) {
+        if let Some(node_mut) = graph.get_node_mut(quantize_id) {
             node_mut.opcode = Opcode::Constant(new_value);
             node_mut.output_type = new_tensor_type;
             // Store the block size so the backend can reconstruct PackedTensor correctly.
@@ -929,6 +1033,107 @@ mod tests {
         let weight = gb.constant(&weight_bytes, weight_tt);
         let _output = gb.matmul(&input, &weight);
         gb.to_graph()
+    }
+
+    #[test]
+    fn a_shared_weight_is_copied_instead_of_corrupted() {
+        // A tied embedding is the real case: one constant is a MatMul weight and
+        // something else still needs the original bytes. Quantization both
+        // repacks the weight and, for a 2-D one, transposes it for the packed
+        // GEMM, so writing in place would hand the other reader a permuted
+        // buffer with a different width and it would quietly compute on it.
+        // The quantized consumers get a private copy instead.
+        let weights: Vec<f32> = (0..16).map(|index| index as f32 * 0.5 - 3.0).collect();
+        let gb = GraphBuilder::new();
+        let input = gb.input_with_dims(&[DimExpr::Known(1), DimExpr::Known(8)], IrDType::F32);
+        // `[K, N]` for the MatMul; quantization transposes it to `[N, K]`.
+        let weight_tt = TensorType::new(vec![DimExpr::Known(8), DimExpr::Known(2)], IrDType::F32);
+        let weight_bytes: Vec<u8> = bytemuck::cast_slice(&weights).to_vec();
+        let weight = gb.constant(&weight_bytes, weight_tt.clone());
+        let weight_id = weight.node_id();
+        let matmul_id = gb.matmul(&input, &weight).node_id();
+        let mut graph = gb.to_graph();
+
+        // A reader that only accepts the weight in its original f32 layout.
+        let shared = graph.add_node(Opcode::Add, vec![weight_id, weight_id], weight_tt);
+        graph.inputs = gb.recorded_input_ids();
+        graph.outputs = vec![shared, matmul_id];
+
+        let constants = |graph: &ComputeGraph| {
+            graph
+                .nodes
+                .iter()
+                .filter(|node| matches!(node.opcode, Opcode::Constant(_)))
+                .count()
+        };
+        let constants_before = constants(&graph);
+
+        quantize_weights(&mut graph, 8, true, None).expect("quantization should succeed");
+
+        // The original constant is untouched: still native f32 with its bytes.
+        let original = graph
+            .get_node(weight_id)
+            .expect("the original constant survives");
+        let original_bytes = match &original.opcode {
+            Opcode::Constant(TensorValue::Data { bytes, tensor_type }) => {
+                assert_eq!(tensor_type.dtype(), IrDType::F32);
+                bytes.clone()
+            }
+            other => panic!("the shared constant was rewritten as {other:?}"),
+        };
+        assert_eq!(
+            bytemuck::cast_slice::<u8, f32>(&original_bytes),
+            weights.as_slice(),
+            "the reader that needs the original layout keeps the original values"
+        );
+
+        // The MatMul reads a packed copy, and that copy is the only new constant.
+        let matmul_weight = graph
+            .get_node(matmul_id)
+            .and_then(|node| node.inputs.get(1).copied())
+            .expect("the MatMul has a weight input");
+        assert_ne!(
+            matmul_weight, weight_id,
+            "the quantized weight must be a copy, not the shared node"
+        );
+        let quantized = graph.get_node(matmul_weight).expect("the copy exists");
+        assert!(
+            matches!(&quantized.opcode, Opcode::Constant(TensorValue::Data { tensor_type, .. })
+                if tensor_type.dtype() != IrDType::F32),
+            "the MatMul weight is packed"
+        );
+        assert_eq!(
+            constants(&graph),
+            constants_before + 1,
+            "exactly one copy is added"
+        );
+
+        // Both readers still run, and the shared one sees its own values.
+        let mut executor = GraphExecutor::new(CpuBackend);
+        let (mut plan, memory_plan, compiled) = executor
+            .compile_with_target(graph, crate::types::CompileTarget::Native, None)
+            .expect("a graph with a shared weight compiles");
+        let outputs = executor
+            .execute(
+                &compiled,
+                &mut plan,
+                &memory_plan,
+                &[bytemuck::cast_slice(&[0.5f32; 8])],
+            )
+            .expect("both consumers execute");
+        assert_eq!(outputs.len(), 2);
+        let shared_out: &[f32] = bytemuck::cast_slice(&outputs[0]);
+        let matmul_out: &[f32] = bytemuck::cast_slice(&outputs[1]);
+        let expected: Vec<f32> = weights.iter().map(|value| value * 2.0).collect();
+        assert_eq!(shared_out.len(), expected.len());
+        for (got, want) in shared_out.iter().zip(&expected) {
+            assert!((got - want).abs() <= 1e-5, "{got} != {want}");
+        }
+        assert_eq!(
+            matmul_out.len(),
+            2,
+            "the MatMul still produces one row per output channel"
+        );
     }
 
     #[test]
