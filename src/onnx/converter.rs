@@ -2081,8 +2081,17 @@ fn parse_ints_i64(attrs: &HashMap<String, String>, key: &str, default: &[i64]) -
 
 /// Split an ONNX spatial attribute into its integer entries.
 fn spatial_values(raw: &str, what: &str) -> Result<Vec<isize>, String> {
+    // Three spellings reach this function: a bare integer (`padding` written as
+    // one value), a comma list (`1,1`), and the Python repr of a list
+    // (`[1, 1]`), which is how the `.fnn` writer stringifies an attribute it
+    // was handed as a list. All three mean the same thing.
+    let trimmed = raw.trim();
+    let inner = trimmed
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(trimmed);
     let mut values = Vec::new();
-    for part in raw.split(',') {
+    for part in inner.split(',') {
         let part = part.trim();
         if part.is_empty() {
             continue;
@@ -2141,6 +2150,12 @@ fn pads_attr(
     let Some(&first) = values.first() else {
         return Ok(default);
     };
+    if values.len() == 1 {
+        // A single value is this tree's own convention for "pad that much on
+        // every side of every axis", which is what a hand-built node and an
+        // already-collapsed `.fnn` carry. ONNX always sends the full list.
+        return usize::try_from(first).map_err(|_| format!("{what} '{raw}' is negative"));
+    }
     if values.len() % 2 != 0 {
         return Err(format!(
             "{what} '{raw}' is not a (begin, end) pair per axis"

@@ -67,6 +67,16 @@ def get_pooling_config(node, default_kernel=(2, 2)):
     return {"kernel_size": kernel, "stride": stride, "padding": padding}
 
 
+_SCALAR_SPATIAL_KEYS = ("kernel_size", "stride", "padding")
+
+
+def _uniform(value):
+    """Collapse a uniform per-axis list to the single value it stands for."""
+    if isinstance(value, (list, tuple)) and value and all(entry == value[0] for entry in value):
+        return value[0]
+    return value
+
+
 def _get_attr(node: "onnx.NodeProto", name: str, default=None):
     import onnx
     from onnx import numpy_helper
@@ -579,9 +589,14 @@ def _compute_graph_to_layers(cg: Dict[str, Any]) -> List[Dict[str, Any]]:
         attrs = node.get("attrs", {})
         layer = {"type": opcode, "name": node.get("name", "")}
 
-        # Add attributes as layer properties
+        # Add attributes as layer properties. The spatial ones stay whole on the
+        # node so the Rust converter can check every axis; the summary describes
+        # the operator, and these operators take one value per attribute, so a
+        # uniform list is reported as that value. A list whose entries disagree
+        # is left alone: it is not expressible, and the summary should not
+        # pretend it collapsed cleanly.
         for key, value in attrs.items():
-            layer[key] = value
+            layer[key] = _uniform(value) if key in _SCALAR_SPATIAL_KEYS else value
 
         # Add shape info if available
         output_shape = node.get("output_shape", {})
