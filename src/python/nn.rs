@@ -1496,13 +1496,16 @@ impl AotExecutor {
         #[cfg(feature = "prepared-plan")]
         let output_data = {
             if self.compiled.prepared_plan.static_weight_binding_count() > 0 {
+                // The view was built when the model was compiled; rebuilding
+                // it here copied every fp32 weight on every forward call.
                 self.executor
-                    .execute_prepared_no_copy(
+                    .execute_prepared_no_copy_with_view(
                         &self.compiled.graph,
                         &mut self.plan,
                         &self.memory_plan,
                         &input_refs,
                         &self.compiled.prepared_plan,
+                        &self.compiled.persistent_prepared_weights,
                     )
                     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
             } else {

@@ -2069,6 +2069,34 @@ mod tests {
         assert!(!PersistentPreparedWeights::new().belongs_to(&first));
     }
 
+    #[test]
+    fn a_stored_view_serves_the_same_payload_on_every_lookup() {
+        // Building a view copies every fp32 weight into a fresh `Arc`, so the
+        // executor keeps the one built at compile time and hands it to every
+        // forward call. That is only sound if a lookup keeps returning the
+        // payload that was registered, which is what this pins.
+        let prepared = PreparedExecutablePlan {
+            identity: 7,
+            ..PreparedExecutablePlan::default()
+        };
+        let mut view = build_persistent_prepared_weights(&prepared);
+        let key = (16, 8);
+        assert!(
+            view.insert(key, Arc::new(vec![1.0, 2.0])),
+            "the payload matches the slot byte length"
+        );
+
+        let first = view.get(&key).expect("the payload is registered");
+        let first_pointer = first.as_ptr();
+        assert_eq!(first, &[1.0, 2.0]);
+        let second = view.get(&key).expect("a second lookup still finds it");
+        assert_eq!(
+            first_pointer,
+            second.as_ptr(),
+            "a reused view must not rebuild its payloads"
+        );
+    }
+
     fn empty_plan() -> ExecutablePlan {
         ExecutablePlan {
             instructions: vec![],

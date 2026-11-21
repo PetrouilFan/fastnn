@@ -1263,6 +1263,52 @@ impl<B: Backend> GraphExecutor<B> {
         .map(|(outputs, _profile)| outputs)
     }
 
+    /// Run the no-copy prepared path on a view the caller already built.
+    ///
+    /// [`Self::execute_prepared_no_copy`] rebuilds the view on every call, and
+    /// building it copies every fp32 weight the plan binds into a fresh
+    /// `Arc<Vec<f32>>`: on a 95-convolution model that is several megabytes of
+    /// memcpy before the first kernel runs. A caller that compiled once and
+    /// then executes many times already owns that view, so it can hand it back
+    /// instead of paying for it per call.
+    ///
+    /// The view must belong to the plan being validated; a view built for a
+    /// different prepared plan is rejected rather than run against the wrong
+    /// weights.
+    // Reachable only through the Python bindings (`src/python/nn.rs`), like
+    // `execute_prepared_no_copy_reusing_outputs_with_view` below.
+    #[cfg(all(feature = "prepared-plan", feature = "python"))]
+    pub(crate) fn execute_prepared_no_copy_with_view(
+        &mut self,
+        graph: &ComputeGraph,
+        plan: &mut ExecutablePlan,
+        memory_plan: &MemoryPlan,
+        inputs: &[&[u8]],
+        prepared: &crate::backend::prepared::PreparedExecutablePlan,
+        view: &crate::backend::prepared::PersistentPreparedWeights,
+    ) -> Result<Vec<Vec<u8>>, BackendError> {
+        crate::backend::prepared::validate_prepared_against_plan_with_limits(
+            prepared,
+            plan,
+            &self.resource_limits.prepared,
+        )?;
+        if !view.belongs_to(prepared) {
+            return Err(BackendError::Dispatch(
+                "persistent prepared-weight view does not belong to the validated prepared plan"
+                    .into(),
+            ));
+        }
+        self.execute_internal_with_persistent_view(
+            graph,
+            plan,
+            memory_plan,
+            inputs,
+            false,
+            Some(view),
+        )
+        .map(|(outputs, _profile)| outputs)
+    }
+
     #[cfg(feature = "prepared-plan")]
     pub fn execute_prepared_no_copy_reusing_outputs(
         &mut self,
