@@ -359,6 +359,14 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
     metadata_model = onnx.load(onnx_path, load_external_data=False)
     _validate_external_data(metadata_model, onnx_path)
     model = onnx.load(onnx_path, load_external_data=True)
+    # A graph that computes its shapes at run time cannot be expressed by the
+    # static-shape AOT engine, and ONNX Runtime is the only thing here able to
+    # resolve those computations. Fold them into initializers once, at import,
+    # where every input dimension is already fixed.
+    from fastnn.io.shape_specialize import needs_specialisation, specialize
+
+    if needs_specialisation(model):
+        model = specialize(model)
     # Run ONNX shape inference to populate intermediate tensor shapes (value_info)
     try:
         model = onnx.shape_inference.infer_shapes(model)
@@ -415,6 +423,8 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
         # converter; runtime-produced forms remain graph inputs and must use
         # genuine dynamic lowering.
         constant_input_attrs = {
+            "Pad": ((1, "pads"),),
+            "Resize": ((3, "sizes"),),
             "Slice": ((1, "starts"), (2, "ends"), (3, "axes"), (4, "steps")),
             "Split": ((1, "split"),),
             "Squeeze": ((1, "axes"),),
