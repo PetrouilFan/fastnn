@@ -11,6 +11,18 @@
   specialised graph bit for bit). `Pad` honours its `pads` input and
   `mode="edge"`, and `Resize` honours an explicit `sizes` input with
   half-pixel coordinates instead of falling back to a 2x2 scale.
+- Single-graph execution of that model fell further, from 92 ms to 41 ms
+  (min 40.8, median 41.7), after three kernel fixes measured with a per-op
+  profile. A permuted tensor whose leading axes stay put now transposes as
+  one blocked 2-D copy per slab, using the AVX2 transpose kernel for the
+  contiguous interior instead of a per-element gather with a division per
+  axis (38 transposes: 21.3 → 0.37 ms). `pad_f32` copies one contiguous span
+  per row instead of deriving a source index per element (an edge pad of
+  `1x3x336x448`: 10.1 → 0.19 ms), and `upsample_bilinear2d` builds its
+  horizontal sampling table once per call and blends with two f32 lerps
+  (88x112 → 336x448: 11.9 → 2.4 ms). The output still matches ONNX Runtime
+  to 5.4e-06.
+
 - Four correctness fixes that a 406-node graph exposed: an in-place
   elementwise reuse chain now keeps its block alive to its last reader (two
   graph outputs were planned onto one slot and an add read `x + x`), the
