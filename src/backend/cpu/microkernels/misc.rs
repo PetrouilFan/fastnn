@@ -357,6 +357,45 @@ pub fn upsample_nearest2d_f32(
     }
 }
 
+/// Nearest-neighbour resize to an explicit output extent.
+///
+/// `scale`-based upsampling can only replicate an integer block; an ONNX
+/// `Resize` may ask for a fractional ratio (336 from 88), so each output index
+/// maps back to an input index instead. With `half_pixel` the sample point is
+/// `(dst + 0.5) * in/out - 0.5`, ONNX's `half_pixel` transformation; without
+/// it the mapping is `dst * in/out`.
+pub fn upsample_nearest2d_extent_f32(
+    input: &[f32],
+    output: &mut [f32],
+    nc: usize,
+    h_in: usize,
+    w_in: usize,
+    h_out: usize,
+    w_out: usize,
+    half_pixel: bool,
+) {
+    let hw = h_in * w_in;
+    let map = |index: usize, in_len: usize, out_len: usize| -> usize {
+        let mapped = if half_pixel {
+            (index as f64 + 0.5) * (in_len as f64 / out_len as f64) - 0.5
+        } else {
+            index as f64 * (in_len as f64 / out_len as f64)
+        };
+        // `floor` after clamping, so the sample never leaves the input.
+        mapped.floor().clamp(0.0, (in_len - 1) as f64) as usize
+    };
+    for nci in 0..nc {
+        for hi in 0..h_out {
+            let src_h = map(hi, h_in, h_out);
+            let out_row = nci * h_out * w_out + hi * w_out;
+            for wi in 0..w_out {
+                let src_w = map(wi, w_in, w_out);
+                output[out_row + wi] = input[nci * hw + src_h * w_in + src_w];
+            }
+        }
+    }
+}
+
 /// AVX2 nearest-neighbor upsampling using broadcast stores.
 ///
 /// For `scale_w ∈ {1, 2, 4}`, processes `8 / scale_w` input columns per

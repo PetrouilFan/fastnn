@@ -1202,6 +1202,23 @@ impl GraphBuilder {
 
     /// Pad a tensor.
     pub fn pad(&self, input: &GraphTensor, pads: &[(usize, usize)]) -> GraphTensor {
+        self.pad_with_mode(input, pads, "constant")
+    }
+
+    /// Pad with an explicit ONNX mode. `constant` fills with zero; `edge`
+    /// replicates the nearest input element, which is what an ONNX
+    /// `Pad(mode="edge")` means. Any other mode is rejected rather than
+    /// silently treated as zero, because the padded values would differ.
+    pub fn pad_with_mode(
+        &self,
+        input: &GraphTensor,
+        pads: &[(usize, usize)],
+        mode: &str,
+    ) -> GraphTensor {
+        assert!(
+            matches!(mode, "constant" | "edge"),
+            "pad mode '{mode}' is not supported"
+        );
         let input_shape = input.shape();
         let mut output_shape = input_shape.to_vec();
         for (i, &(lo, hi)) in pads.iter().enumerate() {
@@ -1218,6 +1235,7 @@ impl GraphBuilder {
             .map(|(lo, hi)| format!("{},{}", lo, hi))
             .collect();
         attrs.insert("pads".to_string(), pads_str.join(","));
+        attrs.insert("mode".to_string(), mode.to_string());
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node_with_attrs(
             Opcode::Pad,
@@ -1947,6 +1965,71 @@ impl GraphBuilder {
                 tt.clone(),
                 attrs,
             )
+        };
+        GraphTensor::new(self.clone(), node_id, tt)
+    }
+
+    /// Resize to an explicit output extent, as an ONNX `Resize` with a `sizes`
+    /// input specifies. An integer scale cannot express a ratio such as
+    /// 336/88, so the requested extent is what the kernel maps from.
+    ///
+    /// `half_pixel` selects ONNX's `half_pixel` coordinate transformation
+    /// (`src = (dst + 0.5) * in/out - 0.5`, clamped) over the asymmetric
+    /// `src = dst * in/out` used by the scale-based constructors.
+    pub fn resize_bilinear2d(
+        &self,
+        input: &GraphTensor,
+        out_h: usize,
+        out_w: usize,
+        half_pixel: bool,
+    ) -> GraphTensor {
+        self.resize_2d(Opcode::UpsampleBilinear2d, input, out_h, out_w, half_pixel)
+    }
+
+    /// Nearest-neighbour resize to an explicit output extent.
+    pub fn resize_nearest2d(
+        &self,
+        input: &GraphTensor,
+        out_h: usize,
+        out_w: usize,
+        half_pixel: bool,
+    ) -> GraphTensor {
+        self.resize_2d(Opcode::UpsampleNearest2d, input, out_h, out_w, half_pixel)
+    }
+
+    fn resize_2d(
+        &self,
+        opcode: Opcode,
+        input: &GraphTensor,
+        out_h: usize,
+        out_w: usize,
+        half_pixel: bool,
+    ) -> GraphTensor {
+        assert!(out_h > 0 && out_w > 0, "resize requires a non-empty output");
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("out_h".to_string(), out_h.to_string());
+        attrs.insert("out_w".to_string(), out_w.to_string());
+        attrs.insert(
+            "half_pixel".to_string(),
+            usize::from(half_pixel).to_string(),
+        );
+        let input_shape = input.shape();
+        let out_shape = if input_shape.len() >= 4 {
+            vec![
+                input_shape[0].clone(),
+                input_shape[1].clone(),
+                DimExpr::Known(out_h as u64),
+                DimExpr::Known(out_w as u64),
+            ]
+        } else {
+            input_shape.to_vec()
+        };
+        let tt = input.tensor_type.with_shape(out_shape);
+        let node_id = {
+            let mut inner = self.inner.borrow_mut();
+            inner
+                .graph
+                .add_node_with_attrs(opcode, vec![input.node_id], tt.clone(), attrs)
         };
         GraphTensor::new(self.clone(), node_id, tt)
     }

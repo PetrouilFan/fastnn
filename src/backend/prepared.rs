@@ -1876,6 +1876,22 @@ impl PersistentPreparedWeights {
         self.by_key.get(key).map(|arc| arc.as_slice())
     }
 
+    /// Keep only the entries whose slot still names the weight.
+    ///
+    /// Keys are `(offset, size)` byte ranges, so they only identify a weight
+    /// while that block belongs to it. The memory planner recycles a freed
+    /// constant block for a later activation, at which point the same pair
+    /// names a different tensor and a lookup would return weight bytes for an
+    /// activation. Callers drop those keys here so the weight keeps its
+    /// `WriteConst` and every reader goes through the arena.
+    pub fn retain_keys<F>(&mut self, keep: F)
+    where
+        F: Fn(&PreparedWeightKey) -> bool,
+    {
+        self.by_key.retain(|key, _| keep(key));
+        self.by_key_u8.retain(|key, _| keep(key));
+    }
+
     /// Register an immutable u8 payload for the `(offset, size)`
     /// slot `key`.  Used for quantized weight slots.
     ///

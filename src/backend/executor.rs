@@ -1565,6 +1565,45 @@ impl<B: Backend> GraphExecutor<B> {
         // ── Dispatch: no-copy persistent view path vs standard path ──
         #[cfg(feature = "prepared-plan")]
         if let Some(view) = persistent_view {
+            // A weight slot is identified by `(offset, size)`, which only names
+            // it while the block belongs to the weight. The planner recycles a
+            // freed constant block for a later activation, so an activation can
+            // start at the same offset with the same size; a lookup would then
+            // hand that activation the weight's bytes. Such recycled blocks are
+            // exactly the slots another instruction writes, so drop those keys
+            // here: their `WriteConst` is kept below and every reader of the
+            // block goes through the arena instead of the view.
+            let recycled: std::collections::HashSet<(usize, usize)> = plan
+                .instructions
+                .iter()
+                .flat_map(|instruction| match instruction {
+                    Instruction::CallKernel {
+                        output_slice,
+                        secondary_output_slice,
+                        ..
+                    } => [
+                        Some((output_slice.offset, output_slice.size)),
+                        secondary_output_slice.map(|slice| (slice.offset, slice.size)),
+                    ],
+                    Instruction::MemCopy { dst, .. } | Instruction::Fill { dst, .. } => {
+                        [Some((dst.offset, dst.size)), None]
+                    }
+                    Instruction::WriteConst { .. } => [None, None],
+                })
+                .flatten()
+                .filter(|key| view.get(key).is_some())
+                .collect();
+            let pruned_view;
+            let view = if recycled.is_empty() {
+                view
+            } else {
+                pruned_view = {
+                    let mut pruned = view.clone();
+                    pruned.retain_keys(|key| !recycled.contains(key));
+                    pruned
+                };
+                &pruned_view
+            };
             let dispatch_plan: ExecutablePlan = if view.is_empty()
                 && !self.stable_constants_initialized
             {
@@ -1667,7 +1706,6 @@ impl<B: Backend> GraphExecutor<B> {
                 )?;
                 Vec::new()
             };
-
             if let (Some(telemetry), Some(start)) = (runtime_telemetry.as_mut(), dispatch_start) {
                 telemetry.dispatch_ns = start.elapsed().as_nanos();
             }
@@ -1835,6 +1873,23 @@ pub fn tighten_slices(
     // input node, but since both have identical sizes, the HashMap
     // collision is harmless (min(sz, current) = sz for both).
     let mut offset_size: HashMap<usize, usize> = HashMap::new();
+    // Capacity of each offset: several values can share one offset with
+    // different sizes when a smaller value reuses a larger freed block. A
+    // constant's payload is fixed at its own byte length, so it must be
+    // clamped to the *capacity* of its block, not to whichever size happened
+    // to be recorded last (that rejected a 73,728-byte weight because a
+    // 50,176-byte tensor also lived at the same offset).
+    let mut offset_capacity: HashMap<usize, usize> = HashMap::new();
+    for slot in tightened_memory_plan
+        .slots
+        .values()
+        .chain(tightened_memory_plan.secondary_slots.values())
+    {
+        offset_capacity
+            .entry(slot.offset)
+            .and_modify(|capacity| *capacity = (*capacity).max(slot.size))
+            .or_insert(slot.size);
+    }
     for (_node_id, slot) in &tightened_memory_plan.slots {
         offset_size.insert(slot.offset, slot.size);
     }
@@ -1936,9 +1991,12 @@ pub fn tighten_slices(
                     dst.size = dst.size.min(sz);
                 }
             }
-            Instruction::WriteConst { dst, .. } => {
-                if let Some(&sz) = offset_size.get(&dst.offset) {
-                    dst.size = dst.size.min(sz);
+            Instruction::WriteConst { dst, data } => {
+                if let Some(&capacity) = offset_capacity.get(&dst.offset) {
+                    // Keep the payload intact: shrink only to the block, so a
+                    // block that is genuinely too small is still rejected by
+                    // the plan validator instead of silently truncating.
+                    dst.size = data.len().min(capacity);
                 }
             }
         }
@@ -3652,7 +3710,7 @@ mod execution_storage_size_tests {
                 input_slices: vec![crate::backend::BufferSlice::new(0, 8)],
                 output_slice: crate::backend::BufferSlice::new(0, 20),
                 secondary_output_slice: None,
-                params: vec![1, 2, 1, 2],
+                params: vec![1, 2, 1, 2, 0],
                 param_dims: None,
                 node_id: Some(0),
                 weight_meta: None,
@@ -3906,7 +3964,7 @@ mod execution_storage_size_tests {
                 input_slices: vec![crate::backend::BufferSlice::new(0, 4)],
                 output_slice: crate::backend::BufferSlice::new(4, 16),
                 secondary_output_slice: None,
-                params: vec![2, 2, 0, 1],
+                params: vec![2, 2, 0, 1, 0, 0, 0],
                 param_dims: None,
                 node_id: Some(0),
                 weight_meta: None,
@@ -3927,7 +3985,7 @@ mod execution_storage_size_tests {
                 input_slices: vec![crate::backend::BufferSlice::new(0, 4)],
                 output_slice: crate::backend::BufferSlice::new(4, 0),
                 secondary_output_slice: None,
-                params: vec![0, 1, 1, 1],
+                params: vec![0, 1, 1, 1, 0, 0, 0],
                 param_dims: None,
                 node_id: Some(0),
                 weight_meta: None,

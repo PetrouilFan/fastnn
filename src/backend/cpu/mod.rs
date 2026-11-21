@@ -1845,13 +1845,17 @@ impl Backend for CpuBackend {
                         .unwrap_or_default();
                     let input_shape = input_shapes.first().cloned().unwrap_or_default();
                     let rank = input_shape.len();
-                    let mut pad_params = Vec::with_capacity(1 + rank * 3);
+                    let mut pad_params = Vec::with_capacity(2 + rank * 3);
                     pad_params.push(rank);
                     pad_params.extend(input_shape.into_iter().map(|size| size as usize));
                     for dimension in 0..rank {
                         pad_params.push(parsed_pads.get(dimension * 2).copied().unwrap_or(0));
                         pad_params.push(parsed_pads.get(dimension * 2 + 1).copied().unwrap_or(0));
                     }
+                    // 0 = constant (zero) fill, 1 = edge replication.
+                    let edge_mode =
+                        usize::from(node.attrs.get("mode").map(String::as_str) == Some("edge"));
+                    pad_params.push(edge_mode);
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "pad_f32".to_string(),
@@ -2482,9 +2486,25 @@ impl Backend for CpuBackend {
                         .optional_attr::<usize>("scale_w")
                         .map_err(|error| BackendError::Compilation(error.to_string()))?
                         .unwrap_or(2);
-                    if scale_h == 0 || scale_w == 0 {
+                    // A resize may instead carry an explicit output extent, which
+                    // is the only way to express a non-integer ratio (336/88).
+                    let out_h = node
+                        .optional_attr::<usize>("out_h")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
+                        .unwrap_or(0);
+                    let out_w = node
+                        .optional_attr::<usize>("out_w")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
+                        .unwrap_or(0);
+                    let sized = out_h != 0 && out_w != 0;
+                    let half_pixel = node
+                        .optional_attr::<usize>("half_pixel")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
+                        .unwrap_or(0)
+                        == 1;
+                    if !sized && (scale_h == 0 || scale_w == 0) {
                         return Err(BackendError::Compilation(format!(
-                            "Upsample node {node_id} requires positive scales"
+                            "Upsample node {node_id} requires positive scales or an output extent"
                         )));
                     }
                     // Pass input spatial dims so the kernel doesn't need to guess H,W
@@ -2507,7 +2527,15 @@ impl Backend for CpuBackend {
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![scale_h, scale_w, h_in, w_in],
+                        params: vec![
+                            scale_h,
+                            scale_w,
+                            h_in,
+                            w_in,
+                            out_h,
+                            out_w,
+                            usize::from(half_pixel),
+                        ],
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -6996,7 +7024,7 @@ impl Backend for CpuBackend {
                             let rank = params[0];
                             let expected_params = rank
                                 .checked_mul(3)
-                                .and_then(|count| count.checked_add(1))
+                                .and_then(|count| count.checked_add(2))
                                 .ok_or_else(|| {
                                     BackendError::Dispatch(
                                         "pad_f32: parameter count overflows".into(),
@@ -7008,7 +7036,8 @@ impl Backend for CpuBackend {
                                 ));
                             }
                             let input_shape = &params[1..1 + rank];
-                            let pads = &params[1 + rank..];
+                            let pads = &params[1 + rank..1 + rank * 3];
+                            let edge_mode = params[1 + rank * 3] == 1;
                             let input_elements =
                                 input_shape.iter().try_fold(1usize, |count, dimension| {
                                     count.checked_mul(*dimension).ok_or_else(|| {
@@ -7087,7 +7116,18 @@ impl Backend for CpuBackend {
                                             if coordinate < low_pad
                                                 || coordinate >= low_pad + input_shape[dimension]
                                             {
-                                                inside = false;
+                                                if edge_mode {
+                                                    // Replicate the nearest element, as
+                                                    // ONNX Pad(mode="edge") defines.
+                                                    let clamped =
+                                                        coordinate.saturating_sub(low_pad).min(
+                                                            input_shape[dimension]
+                                                                .saturating_sub(1),
+                                                        );
+                                                    source_index += clamped * source_stride;
+                                                } else {
+                                                    inside = false;
+                                                }
                                             } else {
                                                 source_index +=
                                                     (coordinate - low_pad) * source_stride;
@@ -8912,15 +8952,19 @@ impl Backend for CpuBackend {
                         }
 
                         "upsample_nearest2d" => {
-                            if input_slices.len() != 1 || params.len() != 4 {
+                            if input_slices.len() != 1 || params.len() != 7 {
                                 return Err(BackendError::Dispatch(
-                                    "upsample_nearest2d: expected one input and scale/input geometry"
+                                    "upsample_nearest2d: expected one input and scale/extent geometry"
                                         .into(),
                                 ));
                             }
-                            let [scale_h, scale_w, h_in, w_in] = params[..] else {
+                            let [scale_h, scale_w, h_in, w_in, out_h, out_w, half_pixel] =
+                                params[..]
+                            else {
                                 unreachable!();
                             };
+                            let half_pixel = half_pixel == 1;
+                            let sized = out_h != 0 && out_w != 0;
                             let input_slice = input_slices[0];
                             let output_slice = BufferSlice::new(out_start, out_end - out_start);
                             let scalar_bytes = std::mem::size_of::<f32>();
@@ -8930,21 +8974,33 @@ impl Backend for CpuBackend {
                                     "upsample_nearest2d: input geometry overflows".into(),
                                 )
                             })?;
-                            let scale = scale_h.checked_mul(scale_w).ok_or_else(|| {
-                                BackendError::Dispatch(
-                                    "upsample_nearest2d: scale geometry overflows".into(),
+                            let (h_out, w_out) = if sized {
+                                (out_h, out_w)
+                            } else {
+                                (
+                                    h_in.checked_mul(scale_h).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "upsample_nearest2d: output height overflows".into(),
+                                        )
+                                    })?,
+                                    w_in.checked_mul(scale_w).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "upsample_nearest2d: output width overflows".into(),
+                                        )
+                                    })?,
                                 )
-                            })?;
-                            let expected_output = input_elements
-                                .checked_mul(scale)
+                            };
+                            let nc = input_elements / hw;
+                            let expected_output = nc
+                                .checked_mul(h_out)
+                                .and_then(|elements| elements.checked_mul(w_out))
                                 .and_then(|elements| elements.checked_mul(scalar_bytes))
                                 .ok_or_else(|| {
                                     BackendError::Dispatch(
                                         "upsample_nearest2d: output size overflows".into(),
                                     )
                                 })?;
-                            if scale_h == 0
-                                || scale_w == 0
+                            if (!sized && (scale_h == 0 || scale_w == 0))
                                 || h_in == 0
                                 || w_in == 0
                                 || !input_elements.is_multiple_of(hw)
@@ -8968,6 +9024,16 @@ impl Backend for CpuBackend {
                                 output_slice,
                                 "upsample_nearest2d input",
                                 |input, out_f32| {
+                                    // An explicit extent needs the fractional mapping
+                                    // (floor of the scaled index), so the integer
+                                    // tiling kernels do not apply.
+                                    if sized || half_pixel {
+                                        crate::backend::cpu::microkernels::upsample_nearest2d_extent_f32(
+                                            input, out_f32, nc, h_in, w_in, h_out, w_out,
+                                            half_pixel,
+                                        );
+                                        return;
+                                    }
                                     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                                     {
                                         use crate::backend::cpu::microkernels::has_avx2;
@@ -8987,15 +9053,19 @@ impl Backend for CpuBackend {
                             )?;
                         }
                         "upsample_bilinear2d" => {
-                            if input_slices.len() != 1 || params.len() != 4 {
+                            if input_slices.len() != 1 || params.len() != 7 {
                                 return Err(BackendError::Dispatch(
-                                    "upsample_bilinear2d: expected one input and scale/input geometry"
+                                    "upsample_bilinear2d: expected one input and scale/extent geometry"
                                         .into(),
                                 ));
                             }
-                            let [scale_h, scale_w, h_in, w_in] = params[..] else {
+                            let [scale_h, scale_w, h_in, w_in, out_h, out_w, half_pixel] =
+                                params[..]
+                            else {
                                 unreachable!();
                             };
+                            let half_pixel = half_pixel == 1;
+                            let sized = out_h != 0 && out_w != 0;
                             let input_slice = input_slices[0];
                             let output_slice = BufferSlice::new(out_start, out_end - out_start);
                             let scalar_bytes = std::mem::size_of::<f32>();
@@ -9005,25 +9075,10 @@ impl Backend for CpuBackend {
                                     "upsample_bilinear2d: input geometry overflows".into(),
                                 )
                             })?;
-                            let scale = scale_h.checked_mul(scale_w).ok_or_else(|| {
-                                BackendError::Dispatch(
-                                    "upsample_bilinear2d: scale geometry overflows".into(),
-                                )
-                            })?;
-                            let expected_output = input_elements
-                                .checked_mul(scale)
-                                .and_then(|elements| elements.checked_mul(scalar_bytes))
-                                .ok_or_else(|| {
-                                    BackendError::Dispatch(
-                                        "upsample_bilinear2d: output size overflows".into(),
-                                    )
-                                })?;
-                            if scale_h == 0
-                                || scale_w == 0
+                            if (!sized && (scale_h == 0 || scale_w == 0))
                                 || h_in == 0
                                 || w_in == 0
                                 || !input_elements.is_multiple_of(hw)
-                                || output_slice.size != expected_output
                                 || !input_slice
                                     .offset
                                     .is_multiple_of(std::mem::align_of::<f32>())
@@ -9036,17 +9091,58 @@ impl Backend for CpuBackend {
                                     "upsample_bilinear2d: invalid geometry or f32 storage".into(),
                                 ));
                             }
+                            // An explicit extent is what a non-integer ratio needs
+                            // (336/88); otherwise the output is the input times the
+                            // integer scale.
+                            let (h_out, w_out) = if sized {
+                                (out_h, out_w)
+                            } else {
+                                (
+                                    h_in.checked_mul(scale_h).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "upsample_bilinear2d: output height overflows".into(),
+                                        )
+                                    })?,
+                                    w_in.checked_mul(scale_w).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "upsample_bilinear2d: output width overflows".into(),
+                                        )
+                                    })?,
+                                )
+                            };
                             let nc = input_elements / hw;
-                            let h_out = h_in.checked_mul(scale_h).ok_or_else(|| {
-                                BackendError::Dispatch(
-                                    "upsample_bilinear2d: output height overflows".into(),
-                                )
-                            })?;
-                            let w_out = w_in.checked_mul(scale_w).ok_or_else(|| {
-                                BackendError::Dispatch(
-                                    "upsample_bilinear2d: output width overflows".into(),
-                                )
-                            })?;
+                            let expected_output = nc
+                                .checked_mul(h_out)
+                                .and_then(|elements| elements.checked_mul(w_out))
+                                .and_then(|elements| elements.checked_mul(scalar_bytes))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "upsample_bilinear2d: output size overflows".into(),
+                                    )
+                                })?;
+                            if output_slice.size != expected_output {
+                                return Err(BackendError::Dispatch(
+                                    "upsample_bilinear2d: invalid geometry or f32 storage".into(),
+                                ));
+                            }
+                            // ONNX `half_pixel` samples at (dst + 0.5) * in/out - 0.5;
+                            // the scale-based form samples at dst / scale, which is what
+                            // `nn::Upsample` has always produced.
+                            let map_coord = |index: usize,
+                                             in_len: usize,
+                                             out_len: usize,
+                                             scale: usize|
+                             -> f64 {
+                                if half_pixel {
+                                    ((index as f64 + 0.5) * (in_len as f64 / out_len as f64) - 0.5)
+                                        .clamp(0.0, (in_len - 1) as f64)
+                                } else if sized {
+                                    (index as f64 * (in_len as f64 / out_len as f64))
+                                        .clamp(0.0, (in_len - 1) as f64)
+                                } else {
+                                    (index as f64 / scale as f64).min((in_len - 1) as f64)
+                                }
+                            };
                             arena::with_unary_f32_slices(
                                 arena,
                                 input_slice,
@@ -9054,11 +9150,9 @@ impl Backend for CpuBackend {
                                 |input, out_f32| {
                                     for nci in 0..nc {
                                         for hi in 0..h_out {
+                                            let src_h = map_coord(hi, h_in, h_out, scale_h);
                                             for wi in 0..w_out {
-                                                let src_h = (hi as f64 / scale_h as f64)
-                                                    .min((h_in - 1) as f64);
-                                                let src_w = (wi as f64 / scale_w as f64)
-                                                    .min((w_in - 1) as f64);
+                                                let src_w = map_coord(wi, w_in, w_out, scale_w);
                                                 let h0 = src_h.floor() as usize;
                                                 let w0 = src_w.floor() as usize;
                                                 let h1 = (h0 + 1).min(h_in - 1);
@@ -11857,20 +11951,44 @@ fn dispatch_matmul_fp32_with_view(
             .and_then(|value| value.checked_mul(4))
             .ok_or_else(|| BackendError::Dispatch(format!("{kernel_name}: {label} size overflows")))
     };
-    let expected_a = checked_f32_size(&[m, k], "left operand")?;
-    let expected_b = checked_f32_size(&[k, n], "right operand")?;
-    let expected_output = checked_f32_size(&[m, n], "output")?;
+    let matrix_left = checked_f32_size(&[m, k], "left operand")?;
+    let matrix_right = checked_f32_size(&[k, n], "right operand")?;
+    let matrix_output = checked_f32_size(&[m, n], "output")?;
     let expected_bias = checked_f32_size(&[n], "bias")?;
+    // MatMul broadcasts over any leading batch dimensions, so an operand may
+    // carry one matrix per batch entry while the other is shared. The output
+    // extent decides the batch count, matching the in-arena `matmul` kernel.
+    let output_elements = output_slice.size / 4;
+    let matrix_output_elements = matrix_output / 4;
+    if !output_slice.size.is_multiple_of(4)
+        || matrix_output_elements == 0
+        || !output_elements.is_multiple_of(matrix_output_elements)
+    {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: output storage of {} bytes is not a whole number of {m}x{n} matrices",
+            output_slice.size
+        )));
+    }
+    let batch_count = output_elements / matrix_output_elements;
+    let left_batched = a_slice.size == matrix_left * batch_count;
+    let right_batched = b_slice.size == matrix_right * batch_count;
     if !a_slice.offset.is_multiple_of(4)
         || !b_slice.offset.is_multiple_of(4)
         || !output_slice.offset.is_multiple_of(4)
-        || a_slice.size != expected_a
-        || b_slice.size != expected_b
-        || output_slice.size != expected_output
+        || (a_slice.size != matrix_left && !left_batched)
+        || (b_slice.size != matrix_right && !right_batched)
         || bias_slice.is_some_and(|bias| bias.offset % 4 != 0 || bias.size != expected_bias)
     {
         return Err(BackendError::Dispatch(format!(
-            "{kernel_name}: storage does not match matrix dimensions"
+            "{kernel_name}: storage does not match matrix dimensions [m={m} k={k} n={n} batch={batch_count}] a={}/{} b={}/{} out={}/{} bias={:?}/{}",
+            a_slice.size,
+            matrix_left * batch_count,
+            b_slice.size,
+            matrix_right * batch_count,
+            output_slice.size,
+            matrix_output * batch_count,
+            bias_slice.map(|bias| bias.size),
+            expected_bias
         )));
     }
     let output_end = output_slice.offset + output_slice.size;
@@ -11936,7 +12054,26 @@ fn dispatch_matmul_fp32_with_view(
         )
     };
 
-    matmul_blas_into(a_f32, b_slice_ref, out_f32, m, k, n);
+    let left_stride = matrix_left / 4;
+    let right_stride = matrix_right / 4;
+    let output_stride = matrix_output / 4;
+    for batch in 0..batch_count {
+        let left_start = if left_batched { batch * left_stride } else { 0 };
+        let right_start = if right_batched {
+            batch * right_stride
+        } else {
+            0
+        };
+        let output_start = batch * output_stride;
+        matmul_blas_into(
+            &a_f32[left_start..left_start + left_stride],
+            &b_slice_ref[right_start..right_start + right_stride],
+            &mut out_f32[output_start..output_start + output_stride],
+            m,
+            k,
+            n,
+        );
+    }
 
     // Apply fused activation / bias on top of the GEMM output, mirroring
     // the `matmul_activation_dispatch` semantics.
@@ -11952,14 +12089,14 @@ fn dispatch_matmul_fp32_with_view(
         "matmul_silu" | "fused_matmul_add_silu" => |x: f32| x / (1.0 + (-x).exp()),
         _ => |x| x,
     };
-    for i in 0..out_f32.len() {
-        let x = out_f32[i]
-            + if has_bias && i % n < bias_slice_ref.len() {
-                bias_slice_ref[i % n]
+    for index in 0..out_f32.len() {
+        let x = out_f32[index]
+            + if has_bias && index % n < bias_slice_ref.len() {
+                bias_slice_ref[index % n]
             } else {
                 0.0
             };
-        out_f32[i] = act(x);
+        out_f32[index] = act(x);
     }
     Ok(())
 }

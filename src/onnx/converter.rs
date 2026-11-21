@@ -1010,13 +1010,24 @@ impl<'a> OnnxConverter<'a> {
             }
             "Pad" => {
                 let pads: Vec<usize> = parse_ints(&node.attrs, "pads", &[]);
+                let mode = node
+                    .attrs
+                    .get("mode")
+                    .map(String::as_str)
+                    .unwrap_or("constant");
+                if !matches!(mode, "constant" | "edge") {
+                    return Err(format!(
+                        "Pad node '{}' uses mode '{mode}', which this backend cannot express",
+                        node.name
+                    ));
+                }
                 if pads.len() >= 2 {
                     let half = pads.len() / 2;
                     let mut pairs: Vec<(usize, usize)> = Vec::new();
                     for i in 0..half {
                         pairs.push((pads[i], pads[i + half]));
                     }
-                    self.out(node, self.graph.pad(&ins[0], &pairs));
+                    self.out(node, self.graph.pad_with_mode(&ins[0], &pairs, mode));
                 } else {
                     self.out(node, ins[0].clone());
                 }
@@ -1477,11 +1488,44 @@ impl<'a> OnnxConverter<'a> {
                     .get("mode")
                     .map(|s| s.as_str())
                     .unwrap_or("nearest");
-                // Resize in ONNX takes scales or sizes as tensor inputs (indices 2 and 3).
-                // Prefer explicit attrs injected by Python-side importers, then fall back to
-                // constant scale tensors. This keeps YOLO's nearest 2x upsample honest even
-                // when scales are produced by Constant nodes rather than initializers.
-                let (scale_h, scale_w) = if let (Some(h), Some(w)) = (
+                // ONNX's default coordinate transformation for Resize is
+                // `half_pixel`; the scale-based constructors have always used the
+                // asymmetric mapping, which is only correct when it is not asked for.
+                let half_pixel = node
+                    .attrs
+                    .get("coordinate_transformation_mode")
+                    .map(|s| s == "half_pixel")
+                    .unwrap_or(true);
+                // Resize takes scales (input 2) or sizes (input 3). The sizes
+                // tensor is normally a constant initializer, and this importer
+                // folds constant inputs into attributes because it drops empty
+                // input names, so read the attribute first and only then look
+                // for a live `sizes` input. Sizes win when both are present, and
+                // an explicit size is the only way to express a non-integer
+                // ratio such as 336/88.
+                let size_attr = parse_ints(&node.attrs, "sizes", &[]);
+                let extent = if size_attr.len() >= 4 && size_attr[2] > 0 && size_attr[3] > 0 {
+                    Some((size_attr[2], size_attr[3]))
+                } else {
+                    node.inputs
+                        .get(3)
+                        .filter(|name| !name.is_empty())
+                        .and_then(|name| self.params.get(name.as_str()))
+                        .map(|sizes| sizes.to_numpy().map_err(|error| error.to_string()))
+                        .transpose()?
+                        .and_then(|values| {
+                            let dims: Vec<usize> = values
+                                .iter()
+                                .map(|value| value.round().max(0.0) as usize)
+                                .collect();
+                            (dims.len() >= 4 && dims[2] > 0 && dims[3] > 0)
+                                .then(|| (dims[2], dims[3]))
+                        })
+                };
+                // Prefer explicit attrs injected by Python-side importers, then
+                // constant scale tensors. This keeps YOLO's nearest 2x upsample
+                // honest even when scales come from Constant nodes.
+                let scales = if let (Some(h), Some(w)) = (
                     node.attrs
                         .get("scale_h")
                         .and_then(|v| v.parse::<usize>().ok()),
@@ -1489,38 +1533,54 @@ impl<'a> OnnxConverter<'a> {
                         .get("scale_w")
                         .and_then(|v| v.parse::<usize>().ok()),
                 ) {
-                    (h.max(1), w.max(1))
-                } else if node.inputs.len() > 2 {
-                    let scales_name = &node.inputs[2];
-                    if let Some(scale_tensor) = self.params.get(scales_name.as_str()) {
-                        let data: Vec<f32> =
-                            scale_tensor.to_numpy().map_err(|error| error.to_string())?;
-                        if data.len() >= 4 {
-                            (
-                                data[2].round().max(1.0) as usize,
-                                data[3].round().max(1.0) as usize,
-                            )
-                        } else {
-                            // Fallback: uniform 2x upsampling
-                            let s = data.last().copied().unwrap_or(2.0).round().max(1.0) as usize;
-                            (s, s)
-                        }
-                    } else if node.inputs.len() > 3 {
-                        // Try sizes input instead
-                        // (sizes handling skipped for now — would need i64 tensor parsing)
-                        (2, 2)
-                    } else {
-                        (2, 2)
-                    }
+                    Some((h.max(1), w.max(1)))
+                } else if extent.is_some() {
+                    None
+                } else if let Some(scales_name) = node.inputs.get(2).filter(|name| !name.is_empty())
+                {
+                    self.params
+                        .get(scales_name.as_str())
+                        .map(|scale_tensor| scale_tensor.to_numpy())
+                        .transpose()
+                        .map_err(|error| error.to_string())?
+                        .map(|data| {
+                            if data.len() >= 4 {
+                                (
+                                    data[2].round().max(1.0) as usize,
+                                    data[3].round().max(1.0) as usize,
+                                )
+                            } else {
+                                // Fallback: uniform upsampling
+                                let s =
+                                    data.last().copied().unwrap_or(2.0).round().max(1.0) as usize;
+                                (s, s)
+                            }
+                        })
                 } else {
-                    (2, 2)
+                    None
                 };
-                let mut out = match mode {
-                    "nearest" => self.graph.upsample_nearest2d(&ins[0], scale_h, scale_w),
-                    "linear" | "bilinear" => {
+                let mut out = match (mode, extent, scales) {
+                    ("nearest", Some((out_h, out_w)), _) => self
+                        .graph
+                        .resize_nearest2d(&ins[0], out_h, out_w, half_pixel),
+                    ("linear" | "bilinear", Some((out_h, out_w)), _) => self
+                        .graph
+                        .resize_bilinear2d(&ins[0], out_h, out_w, half_pixel),
+                    ("nearest", None, Some((scale_h, scale_w))) => {
+                        self.graph.upsample_nearest2d(&ins[0], scale_h, scale_w)
+                    }
+                    ("linear" | "bilinear", None, Some((scale_h, scale_w))) => {
                         self.graph.upsample_bilinear2d(&ins[0], scale_h, scale_w)
                     }
-                    other => {
+                    // Neither an extent nor a scale: a resize with no target is
+                    // not something to guess at.
+                    (_, None, None) => {
+                        return Err(format!(
+                            "Resize '{}' needs a sizes or scales input",
+                            node.name
+                        ))
+                    }
+                    (other, _, _) => {
                         return Err(format!(
                             "Resize mode '{}' not supported (only nearest/linear)",
                             other
