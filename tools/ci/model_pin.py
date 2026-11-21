@@ -116,6 +116,21 @@ def check(pin_path: Path) -> tuple[int, str, dict]:
             details,
         )
 
+    # The manifest is a model lock, so it names the revision too. Two files that
+    # disagree mean one of them was edited alone, and the lane would then fetch
+    # one revision while claiming another.
+    try:
+        manifest_revision = json.loads(manifest.read_text(encoding="utf-8")).get("revision")
+    except (OSError, json.JSONDecodeError) as error:
+        return (EXIT_INVALID, f"INVALID PIN: {manifest_name}: {error}", details)
+    if manifest_revision != revision:
+        return (
+            EXIT_INVALID,
+            f"INVALID PIN: {manifest_name} pins revision {manifest_revision!r} but "
+            f"{_relative(pin_path)} says {revision!r}; one of the two was edited alone.",
+            details,
+        )
+
     return (EXIT_OK, f"PINNED: {_relative(pin_path)} revision={revision} fixtures={manifest_name} sha256={actual}", details)
 
 
@@ -162,9 +177,11 @@ def selftest() -> int:
         if code != EXIT_INVALID or "40-hex" not in message:
             failures.append(f"bad revision: expected exit 1, got {code}: {message}")
 
-        # A pinned pin with a matching manifest hash must pass.
+        # A pinned pin with a matching manifest hash and revision must pass.
         manifest = temp_path / "manifest.json"
-        manifest.write_text('{"schema": 1, "revision": "x"}\n', encoding="utf-8")
+        manifest.write_text(
+            json.dumps({"schema": 1, "revision": "0" * 40}), encoding="utf-8"
+        )
         pinned = temp_path / "pinned.json"
         pinned.write_text(
             json.dumps(
@@ -182,7 +199,10 @@ def selftest() -> int:
         if code != EXIT_OK or not message.startswith("PINNED"):
             failures.append(f"pinned: expected exit 0, got {code}: {message}")
 
-        manifest.write_text('{"schema": 1, "revision": "changed"}\n', encoding="utf-8")
+        manifest.write_text(
+            json.dumps({"schema": 1, "revision": "0" * 40, "changed": True}),
+            encoding="utf-8",
+        )
         code, message, _ = check(pinned)
         if code != EXIT_INVALID or "changed without a new pin" not in message:
             failures.append(f"drifted manifest: expected exit 1, got {code}: {message}")

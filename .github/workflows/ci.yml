@@ -10,7 +10,7 @@
 #   vulkan-build            SPIR-V + feature compile, NO DEVICE
 #   vulkan-software-smoke   CI-ONLY lavapipe; NOT a GPU
 #   packaging               wheel build/install smoke, NO GPU
-#   pinned-model            one pinned revision, offline; NOT VERIFIED until #49
+#   pinned-model            stages the pinned revision, verifies it, runs it
 #   gpu-physical            evidence validation only; hosted runners have NO GPU
 #
 # Removed under 3.0 (see docs/reports/fn3-20-ci-lanes.md):
@@ -168,7 +168,7 @@ jobs:
           if-no-files-found: ignore
 
   pinned-model:
-    name: "pinned-model — offline, single revision (NOT VERIFIED until #49)"
+    name: "pinned-model — stage and run the pinned revision"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -176,7 +176,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run the pinned-model lane
         env:
-          HF_HUB_OFFLINE: "1"
+          # The lane stages the graph from the revision the lock pins; cargo
+          # itself stays offline. HF_HUB_OFFLINE must not be set here or the
+          # fetch cannot reach the Hub, so the lane's fetch step unsets it.
           TRANSFORMERS_OFFLINE: "1"
         run: tools/ci/model-pin-lane.sh
       - name: Upload lane status

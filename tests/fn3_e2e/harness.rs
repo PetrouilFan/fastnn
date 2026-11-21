@@ -201,6 +201,16 @@ pub fn pinned() -> Option<ModelImport> {
                 .unwrap_or_else(|error| panic!("the pinned model failed to import:\n{error}")),
         );
     }
+    // A lane that is supposed to prove the pinned model runs must not be able
+    // to pass by skipping: the caller sets this, and an absent model becomes a
+    // failure naming the file it looked for.
+    if std::env::var("FN3_E2E_REQUIRE_MODEL").is_ok_and(|value| value == "1") {
+        panic!(
+            "FN3_E2E_REQUIRE_MODEL=1 but the pinned 27,897,974-byte ONNX model is not \
+             present. Set FASTNN_FN3_ONNX_MODEL, or run \
+             `python3 tools/parity/fetch_models.py --suite tiny-gpt2 --graph-only`."
+        );
+    }
     println!(
         "SKIP: the pinned 27,897,974-byte ONNX model is not present. Set \
          FASTNN_FN3_ONNX_MODEL or run `python3 tools/parity/fetch_models.py --suite tiny-gpt2`."

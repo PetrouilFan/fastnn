@@ -1,11 +1,11 @@
 {
   "schema": 1,
-  "status": "unpinned",
+  "status": "pinned",
   "owner_issue": 49,
-  "producer": "FN3-03 (#49) owns fixtures/ and the pinned fixture revision",
+  "producer": "fixtures/parity/tiny-gpt2/model.lock.json pins the revision and every file digest",
   "consumer": "tools/ci/model_pin.py + the pinned-model CI lane",
-  "fixtures_manifest": "fixtures/manifest.json",
-  "fixtures_manifest_sha256": null,
-  "revision": null,
-  "note": "This is the only file CI reads to decide which model fixtures a run uses. status must be 'pinned', revision must be a 40-hex commit, and fixtures_manifest_sha256 must match the manifest bytes before the pinned-model lane runs. While status is 'unpinned' the lane reports NOT VERIFIED naming this file and FN3-03 (#49); it never silently passes. Run 'python3 tools/ci/model_pin.py seal' after FN3-03 publishes fixtures/ to fill the hash."
+  "fixtures_manifest": "fixtures/parity/tiny-gpt2/model.lock.json",
+  "fixtures_manifest_sha256": "064f985816ab164ff692b4c01c8260e6560cfde712f28e76d3f4ada9a1627711",
+  "revision": "90f61e71d6fa8e571d0ab0f95a637a5d7d8ed52f",
+  "note": "This is the only file CI reads to decide whether a model-dependent lane may run. status must be 'pinned', revision must be the 40-hex commit the model lock names, and fixtures_manifest_sha256 must match the bytes of fixtures_manifest, so a lock that changed without a new pin is refused instead of silently trusted. While status is 'unpinned' the lane reports NOT VERIFIED. Run 'python3 tools/ci/model_pin.py seal' after editing fixtures_manifest."
 }

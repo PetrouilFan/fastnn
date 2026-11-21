@@ -6,8 +6,17 @@
 # script reads the consumer-side pin and never guesses.
 #
 # An absent or unpinned file is NOT VERIFIED, with a message naming the file
-# and the owning issue. It is never a silent pass. The run itself is offline:
-# HF_HUB_OFFLINE and CARGO_NET_OFFLINE are set so CI cannot download a model.
+# and the owning issue. It is never a silent pass.
+#
+# Once the pin is valid this lane stages the graph the pin names, verifies its
+# size and SHA-256 against fixtures/parity/tiny-gpt2/model.lock.json, and runs
+# the end-to-end test against it with FN3_E2E_REQUIRE_MODEL=1. That variable
+# makes an absent model a failure instead of a skip, which is what let this job
+# pass while nothing ran. Cargo itself still runs offline: no crate is fetched.
+#
+# PINNED_MODEL_ALLOW_SKIP=1 turns an unstageable graph into NOT VERIFIED rather
+# than a failure, for a checkout with no network that only wants the rest of the
+# suite. It is never set in CI.
 set -uo pipefail
 
 CI_LANE=pinned-model
@@ -47,7 +56,33 @@ if [[ -z "$E2E_TEST" ]]; then
     ci::not_verified "the pin is $PIN_MESSAGE but the end-to-end fixture test does not exist yet (FN3-16 / #62): tests/fn3_e2e.rs or tests/fn3_e2e/main.rs"
 fi
 
-ci::run "Pinned end-to-end test (offline)" \
-    "cd '$CI_ROOT' && HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 CARGO_NET_OFFLINE=true cargo test --test fn3_e2e -- --test-threads=1"
+echo
+echo "== Stage the pinned graph =="
+MODEL="$CI_ROOT/tools/parity/.cache/models/tiny-gpt2/onnx/model.onnx"
+if [[ ! -f "$MODEL" ]]; then
+    echo "\$ python3 tools/parity/fetch_models.py --suite tiny-gpt2 --graph-only"
+    # The job exports HF_HUB_OFFLINE for the test run; the fetch needs the
+    # network, so it runs with that variable removed. The script itself checks
+    # the size and SHA-256 from the lock before it reports success, so a
+    # truncated or substituted download fails here rather than being executed.
+    if ! env -u HF_HUB_OFFLINE -u TRANSFORMERS_OFFLINE \
+         python3 "$CI_ROOT/tools/parity/fetch_models.py" --suite tiny-gpt2 --graph-only; then
+        if [[ "${PINNED_MODEL_ALLOW_SKIP:-0}" == "1" ]]; then
+            ci::not_verified "PINNED_MODEL_ALLOW_SKIP=1 and the pinned graph could not be staged"
+        fi
+        ci::failed "the pinned graph could not be staged; without it this lane would prove nothing" \
+            "python3 tools/parity/fetch_models.py --suite tiny-gpt2 --graph-only"
+    fi
+fi
+if [[ ! -f "$MODEL" ]]; then
+    ci::failed "the pinned graph is still missing after staging: $MODEL" \
+        "python3 tools/parity/fetch_models.py --suite tiny-gpt2 --graph-only"
+fi
+ci::check "pinned graph staged from the lock's revision"
 
-ci::passed "end-to-end test ran offline against the revision pinned in tools/ci/model-pin.json"
+echo
+echo "== Run the pinned end-to-end test against that file =="
+ci::run "Pinned end-to-end test (staged revision)" \
+    "cd '$CI_ROOT' && FASTNN_FN3_ONNX_MODEL='$MODEL' FN3_E2E_REQUIRE_MODEL=1 CARGO_NET_OFFLINE=true cargo test --test fn3_e2e -- --test-threads=1"
+
+ci::passed "the pinned revision was staged, verified against the lock, and executed end to end"

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Fetch and verify the models pinned by ``fixtures/parity/*/model.lock.json``.
 
-Network is required only for this step.  CI consumes the committed fixtures
-and never runs this script.
+Network is required only for this step. The pinned-model CI lane runs it with
+``--graph-only`` so the end-to-end test has the real graph to execute; every
+file it writes is checked against the size and SHA-256 in the lock before it
+is used.
 
 Examples:
     python tools/parity/fetch_models.py --suite tiny-gpt2
@@ -15,7 +17,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shutil
 import sys
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -63,19 +67,24 @@ def fetch_file(
 ) -> None:
     destination = destination_root / relative
     if not verify_only:
-        from huggingface_hub import hf_hub_download
-
-        hf_hub_download(
-            repo_id=repo_id,
-            filename=relative,
-            revision=revision,
-            local_dir=destination_root,
-        )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        # Standard library only: the CI lane installs no third-party Python
+        # packages, and the Hub answers this URL with a redirect to the CDN that
+        # `urlopen` follows. The bytes are verified below either way, so a
+        # truncated or substituted download fails instead of being used.
+        url = f"https://huggingface.co/{repo_id}/resolve/{revision}/{relative}"
+        try:
+            with urllib.request.urlopen(url) as response, destination.open("wb") as handle:
+                shutil.copyfileobj(response, handle)
+        except OSError as error:
+            raise SystemExit(f"download failed for {url}: {error}") from None
     verify_file(destination, entry)
     print(f"verified {repo_id}@{revision[:12]} {relative} {entry['bytes']} bytes {entry['sha256']}")
 
 
-def process_suite(suite: str, cache: Path, verify_only: bool, all_files: bool) -> None:
+def process_suite(
+    suite: str, cache: Path, verify_only: bool, all_files: bool, graph_only: bool = False
+) -> None:
     lock_path = SUITE_LOCK[suite]
     if not lock_path.is_file():
         raise SystemExit(f"missing lock file: {lock_path}")
@@ -87,8 +96,11 @@ def process_suite(suite: str, cache: Path, verify_only: bool, all_files: bool) -
     selected = [
         entry
         for entry in lock["files"]
-        if all_files or entry["role"] != "unused_variant"
+        if (all_files or entry["role"] != "unused_variant")
+        and (not graph_only or entry["role"] == "graph")
     ]
+    if not selected:
+        raise SystemExit(f"no files selected for {suite}; check the lock's roles")
     for entry in selected:
         fetch_file(
             repo_id=repo_id,
@@ -99,8 +111,10 @@ def process_suite(suite: str, cache: Path, verify_only: bool, all_files: bool) -
             verify_only=verify_only,
         )
 
+    # The reference checkpoint is a PyTorch training artefact, thousands of
+    # times the graph's size. Only a caller that asked for it pays for it.
     reference = lock.get("reference_checkpoint")
-    if reference and reference.get("files"):
+    if reference and reference.get("files") and not graph_only:
         base_root = cache / f"{suite}-hf"
         for entry in reference["files"]:
             fetch_file(
@@ -131,12 +145,17 @@ def main() -> None:
         action="store_true",
         help="also verify every quantized variant listed in the lock (large)",
     )
+    parser.add_argument(
+        "--graph-only",
+        action="store_true",
+        help="fetch only the entries with role 'graph' (the model the tests run)",
+    )
     args = parser.parse_args()
     cache = args.cache.expanduser().resolve()
     suites = ["tiny-gpt2", "trained-gpt2"] if args.suite == "all" else [args.suite]
     for suite in suites:
         print(f"== {suite}")
-        process_suite(suite, cache, args.verify_only, args.all_files)
+        process_suite(suite, cache, args.verify_only, args.all_files, args.graph_only)
     print("all pinned model files verified")
 
 
