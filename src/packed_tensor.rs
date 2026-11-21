@@ -27,7 +27,11 @@ fn kmeans_16(values: &[f32], max_iter: usize) -> [f32; 16] {
     // which wastes centroids on empty tails). For bell-curve NN weights, this
     // naturally puts several centroids near zero where ~60% of values live.
     let mut sorted = values.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    // `partial_cmp` returns `None` for a NaN, and the unwrap this used to be
+    // aborted the whole import inside a sort callback. Callers reject
+    // non-finite weights before they get here, so this only keeps a stray NaN
+    // from turning a rejection into a panic.
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     for i in 0..16 {
         let percentile = (i as f32 + 0.5) / 16.0;
@@ -108,9 +112,10 @@ pub struct PackedTensor<T: PackedWord> {
     pub(crate) quant_block_size: usize,
     /// Per-block codebook for INT4 codebook quantization.  Each block has 16
     /// f32 entries (normalized K-means centroids in [-1, 1]).
-    /// Per-block scales stored in `self.scales` (one per block).
-    /// Dequant: `scales[blk] * codebooks[0][nibble]` (global codebook, per-block scale).
-    /// Replaces scales/zeros when present (they are ignored).
+    /// Per-block scales stored in `self.scales` (one per block), per-block
+    /// offsets in `self.zeros`.
+    /// Dequant: `scales[blk] * codebooks[blk][nibble] + zeros[blk]`, where the
+    /// codebook is the global one when only a single table is stored.
     /// Indexed as `codebooks[row * blocks_per_row + col / quant_block_size]`.
     pub(crate) codebooks: Vec<[f32; 16]>,
     /// Sum of signed quantized codes for every K-axis quantization group.
@@ -443,8 +448,6 @@ impl<T: PackedWord> PackedTensor<T> {
             1
         };
         let actual_words = m * k_packed;
-        let bpr = self.blocks_per_row();
-        let qb = self.quant_block_size;
         let mut result = Vec::with_capacity(numel);
 
         for (i, word) in self.data[..actual_words].iter().enumerate() {
@@ -457,9 +460,8 @@ impl<T: PackedWord> PackedTensor<T> {
                 let elem_idx = elem_idx_base + j;
                 if elem_idx < numel && elem_idx < row_end {
                     let col = elem_idx % inner_stride;
-                    let blk = row * bpr + col / qb;
                     let nibble = extract_nibble(word, j);
-                    result.push(self.scales[blk] * self.codebooks[0][nibble]);
+                    result.push(self.codebook_value(row, col, nibble));
                 }
             }
         }
@@ -574,6 +576,29 @@ impl<T: PackedWord> PackedTensor<T> {
         self.scales.len() > 1
     }
 
+    /// Reconstruct one value from a codebook block: `scale * code + offset`.
+    ///
+    /// The format allows one codebook for the whole tensor or one per
+    /// quantization block, plus an offset per block. Every reader used to
+    /// index `codebooks[0]` and drop the offset, so a per-block table was
+    /// read through block 0's shape and a non-zero block mean was lost
+    /// entirely.
+    #[inline]
+    fn codebook_value(&self, row: usize, col: usize, code: usize) -> f32 {
+        let block = match col.checked_div(self.quant_block_size) {
+            Some(index) => row * self.blocks_per_row() + index,
+            // No block size means the whole tensor is one block.
+            None => 0,
+        };
+        let book = if self.codebooks.len() == 1 {
+            &self.codebooks[0]
+        } else {
+            &self.codebooks[block]
+        };
+        let offset = self.zeros.get(block).copied().unwrap_or(0.0);
+        self.scales[block] * book[code] + offset
+    }
+
     pub fn get_or_init_f32_weights(&self) -> &[f32] {
         self.cached_f32_weights.get_or_init(|| {
             let rows = self.shape[0];
@@ -582,8 +607,6 @@ impl<T: PackedWord> PackedTensor<T> {
 
             // Codebook dequant path
             if !self.codebooks.is_empty() {
-                let bpr = self.blocks_per_row();
-                let qb = self.quant_block_size;
                 let mut buf = vec![0.0f32; rows * inner];
                 for row in 0..rows {
                     let w_row = &self.as_packed()[row * k_packed..(row + 1) * k_packed];
@@ -592,9 +615,8 @@ impl<T: PackedWord> PackedTensor<T> {
                     for word in w_row {
                         for i in 0..T::ITEMS {
                             if idx < inner {
-                                let blk = row * bpr + idx / qb;
                                 let nibble = extract_nibble(word, i);
-                                out_row[idx] = self.scales[blk] * self.codebooks[0][nibble];
+                                out_row[idx] = self.codebook_value(row, idx, nibble);
                                 idx += 1;
                             }
                         }
@@ -689,9 +711,8 @@ impl<T: PackedWord> PackedTensor<T> {
         let col = idx % inner_stride;
 
         if !self.codebooks.is_empty() {
-            let blk = row * self.blocks_per_row() + col / self.quant_block_size;
             let nibble = extract_nibble(&self.data[word_idx], elem_idx);
-            return self.scales[blk] * self.codebooks[0][nibble];
+            return self.codebook_value(row, col, nibble);
         }
 
         let word = self.data[word_idx].unpack_to_f32();
@@ -1009,8 +1030,13 @@ impl<T: PackedWord> PackedTensor<T> {
                 }
                 let range = grp_max - grp_min;
                 if range == 0.0 || unsigned_max == 0.0 {
+                    // A constant group needs no magnitude: code 0 at scale 1
+                    // reproduces it exactly. The offset has to be the value
+                    // itself rather than 0, because an unsigned storage type
+                    // clamps a negative code and the group would then
+                    // dequantize to zeroes.
                     scales.push(1.0);
-                    zeros.push(0.0);
+                    zeros.push(if range == 0.0 { grp_min } else { 0.0 });
                 } else if is_fp4 {
                     let effective_magnitude = 4.0;
                     // Mean over all rows in the group — see per-block rationale above.
@@ -1058,8 +1084,10 @@ impl<T: PackedWord> PackedTensor<T> {
             for row in 0..m {
                 let range = maxs[row] - mins[row];
                 if range == 0.0 || unsigned_max == 0.0 {
+                    // See the per-group arm above: a constant row is stored as
+                    // code 0 with the value as the offset.
                     scales.push(1.0);
-                    zeros.push(0.0);
+                    zeros.push(if range == 0.0 { mins[row] } else { 0.0 });
                 } else if is_fp4 {
                     let effective_magnitude = 4.0;
                     let row_start = row * inner_stride;
@@ -1788,6 +1816,73 @@ mod tests {
     }
 
     #[test]
+    fn a_constant_row_survives_affine_quantization() {
+        // Every element equal means the row has no range, and the packer used to
+        // store scale 1 / zero 0 for it. An unsigned storage type clamps a
+        // negative code, so an all-negative row used to come back as zeros; the
+        // offset is now the value itself.
+        for value in [-3.5f32, -0.25, 0.0, 0.75, 2.5] {
+            let data = [value; 8];
+            for (label, recovered) in [
+                (
+                    "u4",
+                    PackedTensor::<U4x8>::from_f32_per_channel_asymmetric(&data, &[1, 8])
+                        .to_f32_vec(),
+                ),
+                (
+                    "u8",
+                    PackedTensor::<U8x4>::from_f32_per_channel_asymmetric(&data, &[1, 8])
+                        .to_f32_vec(),
+                ),
+                (
+                    "i4",
+                    PackedTensor::<I4x8>::from_f32_per_channel_asymmetric(&data, &[1, 8])
+                        .to_f32_vec(),
+                ),
+                (
+                    "i8",
+                    PackedTensor::<I8x4>::from_f32_per_channel_asymmetric(&data, &[1, 8])
+                        .to_f32_vec(),
+                ),
+            ] {
+                assert_eq!(
+                    recovered, data,
+                    "{label}: a constant row of {value} must round-trip exactly"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_constant_group_inside_a_grouped_tensor_survives() {
+        // A group here spans rows, not columns. One constant group among
+        // varying ones took the same zero-offset arm and used to dequantize to
+        // zeroes whenever the constant was negative.
+        let mut data = vec![0.0f32; 4 * 16];
+        for slot in &mut data[..2 * 16] {
+            *slot = -2.0;
+        }
+        for (index, slot) in data[2 * 16..].iter_mut().enumerate() {
+            *slot = (index as f32 - 16.0) * 0.125;
+        }
+        let recovered =
+            PackedTensor::<U8x4>::from_f32_per_channel_asymmetric_grouped(&data, &[4, 16], 2)
+                .to_f32_vec();
+        for actual in &recovered[..2 * 16] {
+            assert!(
+                (actual + 2.0).abs() < 1e-6,
+                "the constant group produced {actual}"
+            );
+        }
+        for (actual, expected) in recovered[2 * 16..].iter().zip(&data[2 * 16..]) {
+            assert!(
+                (actual - expected).abs() < 0.2,
+                "the varying group produced {actual} for {expected}"
+            );
+        }
+    }
+
+    #[test]
     fn packed_tensor_capacity_matches_canonical_layout() {
         let shape = [2, 9];
         let tensor = PackedTensor::<I4x8>::from_f32_slice(&[0.0; 18], &shape, 1.0, 0.0);
@@ -2509,5 +2604,90 @@ mod tests {
             "Max error {} is too high for codebook quantization",
             max_err
         );
+    }
+
+    /// Pack sixteen 4-bit codes, eight per word.
+    fn pack_codes(codes: &[u8; 16]) -> Vec<I4x8> {
+        let mut words = vec![0u32; 2];
+        for (index, &code) in codes.iter().enumerate() {
+            words[index / 8] |= u32::from(code & 0xF) << (4 * (index % 8));
+        }
+        words.into_iter().map(I4x8).collect()
+    }
+
+    #[test]
+    fn a_per_block_codebook_and_offset_are_honoured_by_every_reader() {
+        // The metadata format allows one codebook per quantization block and an
+        // offset per block, but every reader used to index `codebooks[0]` and
+        // drop the offset, so block 1 was decoded through block 0's table and a
+        // non-zero block mean vanished.
+        let mut block0 = [0.0f32; 16];
+        let mut block1 = [0.0f32; 16];
+        for index in 0..16 {
+            block0[index] = index as f32 / 15.0;
+            block1[index] = -(index as f32) / 15.0;
+        }
+        let codes: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+
+        let mut tensor = PackedTensor::<I4x8>::from_raw(
+            pack_codes(&codes),
+            vec![1, 16],
+            vec![0.5, 0.25],
+            vec![0.125, -0.25],
+        );
+        tensor.quant_block_size = 8;
+        tensor.codebooks = vec![block0, block1];
+
+        let expected: Vec<f32> = (0..16)
+            .map(|col| {
+                let block = col / 8;
+                let code = usize::from(codes[col]);
+                tensor.scales[block] * tensor.codebooks[block][code] + tensor.zeros[block]
+            })
+            .collect();
+
+        assert_eq!(
+            tensor.to_f32_vec(),
+            expected,
+            "to_f32_vec must apply the block's own codebook and offset"
+        );
+        for (col, want) in expected.iter().enumerate() {
+            assert_eq!(tensor.get(col), *want, "PackedTensor::get at column {col}");
+        }
+        assert_eq!(
+            tensor.get_or_init_f32_weights(),
+            expected.as_slice(),
+            "the cached F32 weights must agree with the other readers"
+        );
+    }
+
+    #[test]
+    fn an_all_zero_block_through_the_codebook_path_reconstructs_zero() {
+        // A dead channel or a pruned row is all zeroes. Its magnitude is zero,
+        // so the block scale is zero and the codebook only supplies shape:
+        // every code there reconstructs to exactly zero.
+        let mut data = vec![0.0f32; 32];
+        for (index, value) in data[16..].iter_mut().enumerate() {
+            *value = (index as f32 - 8.0) * 0.25;
+        }
+        let tensor = PackedTensor::<I4x8>::from_f32_per_block_codebook(&data, &[2, 16], 16);
+
+        assert_eq!(
+            tensor.scales[0], 0.0,
+            "an all-zero block carries no magnitude"
+        );
+        let recovered = tensor.to_f32_vec();
+        assert!(
+            recovered[..16].iter().all(|value| *value == 0.0),
+            "the all-zero block must reconstruct to zero, got {:?}",
+            &recovered[..16]
+        );
+        for (index, &original) in data[16..].iter().enumerate() {
+            assert!(
+                (recovered[16 + index] - original).abs() <= 0.5,
+                "the varying block must still round-trip: {original} became {}",
+                recovered[16 + index]
+            );
+        }
     }
 }

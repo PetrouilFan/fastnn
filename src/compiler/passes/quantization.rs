@@ -607,7 +607,7 @@ pub fn quantize_weights_fp(
         return Ok(());
     }
 
-    for (const_id, _consumer_id) in to_quantize {
+    for (const_id, consumer_id) in to_quantize {
         let const_node = match graph.get_node(const_id) {
             Some(n) => n,
             None => continue,
@@ -645,6 +645,24 @@ pub fn quantize_weights_fp(
         // is the number of rows, which breaks for 1D [N] tensors.
         if orig_shape.len() < 2 {
             continue;
+        }
+
+        // A non-finite weight has no meaningful scale: every block or channel
+        // scale becomes NaN or Inf, and the codebook path's k-means
+        // initialization sorts the values, where a NaN comparison used to
+        // abort the import from inside a sort callback. Reject it while the
+        // node is still known, so the message names the weight a caller has to
+        // fix. The check runs before the MatMul transpose below, so the index
+        // is the element's position in the weight as stored.
+        if let Some(index) = f32_data.iter().position(|value| !value.is_finite()) {
+            let node_name = graph
+                .get_node(consumer_id)
+                .map(|node| node.name.clone())
+                .unwrap_or_default();
+            return Err(FastnnError::compilation(format!(
+                "cannot quantize the weight of node '{node_name}': element {index} is {}",
+                f32_data[index]
+            )));
         }
 
         let (quant_data, quant_shape) = if orig_shape.len() == 2 {
@@ -862,6 +880,35 @@ mod tests {
         let mut graph = ComputeGraph::new();
         let error = quantize_weights_fp(&mut graph, &QuantTarget::I4, None).unwrap_err();
         assert!(error.to_string().contains("floating or codebook target"));
+    }
+
+    #[test]
+    fn a_non_finite_weight_is_rejected_with_the_element_that_is_bad() {
+        // A NaN weight used to reach the codebook path's k-means initialisation,
+        // which sorted the values with `partial_cmp(..).unwrap()`: the abort came
+        // from inside a sort callback and named neither the weight nor the
+        // element. Every scale of a NaN block is NaN too, so there is no
+        // meaningful quantisation to fall back to.
+        let mut weights = vec![0.5f32; 16];
+        weights[5] = f32::NAN;
+        let mut graph = build_matmul_graph(&weights, &[2, 8]);
+
+        let error = quantize_weights_fp(&mut graph, &QuantTarget::I4Codebook, None)
+            .expect_err("a NaN weight must be rejected");
+        let message = error.to_string();
+        assert!(
+            message.contains("cannot quantize the weight of node"),
+            "{message}"
+        );
+        assert!(message.contains("element 5"), "{message}");
+        assert!(message.contains("NaN"), "{message}");
+
+        // The same weight below a finite value is still rejected.
+        weights[5] = f32::INFINITY;
+        let mut graph = build_matmul_graph(&weights, &[2, 8]);
+        let error = quantize_weights_fp(&mut graph, &QuantTarget::I4Codebook, None)
+            .expect_err("an infinite weight must be rejected");
+        assert!(error.to_string().contains("element 5"), "{error}");
     }
 
     /// Helper: create a ComputeGraph with a MatMul and f32 Constant weight.

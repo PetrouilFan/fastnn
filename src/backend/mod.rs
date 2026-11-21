@@ -531,10 +531,17 @@ impl QuantizedWeightMeta {
                 self.scales.len(), self.dequant_offsets.len()
             )));
         }
-        if self
-            .scales
-            .iter()
-            .any(|scale| !scale.is_finite() || *scale <= 0.0)
+        // A codebook block whose source is entirely zero carries a zero scale:
+        // the codebook supplies the shape, the scale the magnitude, and a zero
+        // block has no magnitude, so every code there reconstructs to zero.
+        // The affine path has no such case, so it keeps requiring a strictly
+        // positive scale. A negative scale is rejected either way, because it
+        // would silently invert the codebook.
+        let allows_zero_scale = !self.codebooks.is_empty();
+        let invalid_scale = |scale: &f32| {
+            !scale.is_finite() || *scale < 0.0 || (*scale == 0.0 && !allows_zero_scale)
+        };
+        if self.scales.iter().any(invalid_scale)
             || self
                 .dequant_offsets
                 .iter()
@@ -1274,6 +1281,50 @@ mod executable_plan_validation_tests {
             execution: QuantizedExecutionContract::current_for_kernel("matmul_i8", 8, false),
         };
         assert!(non_finite.validate(0).is_err());
+    }
+
+    #[test]
+    fn a_zero_scale_codebook_block_is_loadable_but_an_affine_one_is_not() {
+        let mut codebook = [0.0f32; 16];
+        for (index, centroid) in codebook.iter_mut().enumerate() {
+            *centroid = index as f32 / 15.0 * 2.0 - 1.0;
+        }
+        let codebook_meta = QuantizedWeightMeta {
+            bit_width: 4,
+            // The second block is all zeroes. The codebook supplies the shape
+            // and a zero scale removes the magnitude, so every code there
+            // reconstructs to zero; rejecting the weight would refuse a
+            // perfectly representable one.
+            scales: vec![0.5, 0.0],
+            dequant_offsets: vec![0.0, 0.0],
+            shape: vec![2, 8],
+            quant_block_size: 8,
+            codebooks: vec![codebook],
+            execution: QuantizedExecutionContract::current_for_kernel("matmul_i4", 4, false),
+            quantized_group_sums: vec![],
+        };
+        codebook_meta
+            .validate(0)
+            .expect("a zero-scale codebook block is loadable");
+
+        // The affine path has no zero-scale case: there the scale is the only
+        // carrier of magnitude, so zero would silently erase the block.
+        let mut affine = codebook_meta.clone();
+        affine.codebooks.clear();
+        let error = affine
+            .validate(0)
+            .expect_err("the affine path still requires a positive scale");
+        assert!(
+            error.to_string().contains("invalid affine values"),
+            "{error}"
+        );
+
+        let mut inverted = codebook_meta.clone();
+        inverted.scales[1] = -0.5;
+        assert!(
+            inverted.validate(0).is_err(),
+            "a negative scale would invert the codebook"
+        );
     }
 
     #[test]
