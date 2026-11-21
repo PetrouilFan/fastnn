@@ -46,13 +46,22 @@ ci::run "Build with --no-default-features (pyo3 extension-module cannot link sta
     "cargo build --no-default-features"
 ci::run "Library tests (fn3 + 2.x unit tests)" \
     "cargo test --lib -- --test-threads=1"
-ci::run "fn3 contract tests" \
-    "cargo test --test fn3_contracts"
-ci::run "fn3 CI smoke tests" \
-    "cargo test --test fn3_ci_smoke"
+# Every integration target, not a hand-picked three.
+#
+# This lane used to run only fn3_contracts, fn3_ci_smoke and two fn3_cli tests,
+# which left roughly 500 of the crate's 551 integration tests compiled nowhere
+# and executed nowhere: the IR shape and memory-planning suites, the compiler
+# edge cases, the 2.x reference oracle, the quantized pipeline, the Python
+# error paths, fn3's import/format/planner/session suites and the arena
+# liveness regression all existed and none of them ran. A test that never runs
+# is not coverage, and the two numerical defects fixed in this cycle (the
+# stride-2 im2col lane gather and the AVX2 log polynomial) were both found by
+# hand-written scratch tests rather than by CI.
+ci::run "Integration tests (every target)" \
+    "cargo test --no-fail-fast --tests"
 ci::run "Inference CLI binary smoke" \
     "cargo test --no-default-features --features cli --test fn3_cli fastnn_infer_binary_"
 ci::run "CI tooling selftests" \
     "python3 tools/ci/model_pin.py selftest && python3 tools/ci/lane_status.py selftest"
 
-ci::passed "fmt clean; versions agree; clippy warnings denied (budget 0); no-default build; lib + fn3 contract + fn3 smoke tests pass; CI tooling selftests pass"
+ci::passed "fmt clean; versions agree; clippy warnings denied (budget 0); no-default build; lib and every integration target pass; CLI binary smoke; CI tooling selftests"

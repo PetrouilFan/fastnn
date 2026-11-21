@@ -95,16 +95,27 @@ deleted training tree.
 
 | Area | Command |
 |---|---|
+| Everything the CPU lane runs | `cargo test --lib -- --test-threads=1` then `cargo test --no-fail-fast --tests` |
+| AVX2 kernel parity | `cargo test --lib parity` |
 | 3.0 contracts | `cargo test --test fn3_contracts` |
 | 3.0 CPU reference | `cargo test --test fn3_cpu_reference` |
 | import / format / planner / session | `cargo test --test fn3_{import,model_format,planner,session}` |
 | end-to-end (pinned model) | `cargo test --test fn3_e2e` |
+| IR shapes and memory planning | `cargo test --test {shape_inference_tests,memory_planning_tests,arena_liveness}` |
+| compiler passes | `cargo test --test {compiler_edge_cases,residual_add_norm,concat_to_conv_eligibility}` |
 | Vulkan (physical GPU) | `cargo test --features vulkan --test fn3_vulkan_smoke` |
 | 2.x CPU/quantized pipeline | `cargo test --test quantized_pipeline -- --test-threads=1` |
 | Python binding | `maturin develop --release && pytest tests/ -m "not slow"` |
 
+The CPU lane runs the library tests and then every integration target; the
+narrow commands above are for iterating on one area, not a substitute for the
+lane. `cargo test --lib parity` is the only place a pointwise AVX2 kernel is
+checked against its scalar reference, so a new SIMD activation needs a row
+there, not a bespoke test.
+
 The pinned model is never committed; tests print a skip reason when it is
-absent. Do not weaken a tolerance to hide a regression.
+absent. Do not weaken a tolerance to hide a regression, and do not delete a
+parity row that disagrees: the disagreement is the finding.
 
 ## Benchmarks
 
