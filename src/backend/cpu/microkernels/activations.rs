@@ -1055,7 +1055,7 @@ impl_binary_minmax_broadcast!(
 
 // ── Fused: add + relu ──────────────────────────────────────────
 
-/// add + ReLU: out[i] = max(0, a[i % a_len] + b[i % b_len])
+/// add + ReLU: `out[i] = max(0, a[i % a_len] + b[i % b_len])`
 #[inline]
 pub fn fused_add_relu_f32(a: &[f32], b: &[f32], out: &mut [f32]) {
     let a_len = a.len();
@@ -1155,7 +1155,7 @@ pub unsafe fn fused_add_relu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
 
 // ── Fused: mul + relu ──────────────────────────────────────────
 
-/// mul + ReLU: out[i] = max(0, a[i % a_len] * b[i % b_len])
+/// mul + ReLU: `out[i] = max(0, a[i % a_len] * b[i % b_len])`
 pub fn fused_mul_relu_f32(a: &[f32], b: &[f32], out: &mut [f32]) {
     let a_len = a.len();
     let b_len = b.len();

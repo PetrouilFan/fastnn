@@ -22,7 +22,7 @@
 //! # Accumulation order
 //!
 //! For one output element the order is `g = 0, 1, ...` and, inside a group,
-//! `k = start .. end`. A block of up to [`ROW_BLOCK`] output rows is computed
+//! `k = start .. end`. A block of up to `ROW_BLOCK` output rows is computed
 //! together so one activation value feeds several rows, but each output
 //! element keeps its own accumulator and the order above. The blocking is
 //! therefore not a numerical choice; it changes which rows share the load of

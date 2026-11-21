@@ -1050,7 +1050,7 @@ impl Tensor {
     /// and return the output as a `Tensor`.
     ///
     /// `build_graph` receives the [`GraphBuilder`] and its graph-tensor inputs,
-    /// and must return the output [`GraphTensor`]s for the operation.
+    /// and must return the output [`GraphTensor`](crate::ir::builder::GraphTensor)s for the operation.
     pub fn exec_aot<F>(inputs: &[&Tensor], build_graph: F) -> Result<Vec<Tensor>, BackendError>
     where
         F: FnOnce(

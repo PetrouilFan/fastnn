@@ -54,7 +54,7 @@ pub trait PackedWord: Send + Sync + Copy + bytemuck::Pod + bytemuck::Zeroable + 
     /// Pack ITEMS f32 values back into a u32 word
     fn pack_from_f32(vals: Self::Array) -> Self;
 
-    /// Dot product of two packed words: sum(a[i] * b[i]) for i in 0..ITEMS.
+    /// Dot product of two packed words: `sum(a[i] * b[i])` for `i` in `0..ITEMS`.
     /// Default: unpack both to f32 arrays, multiply, sum.
     /// Override for types where LUT-based lookup is faster (e.g., F8x4, F8x4R).
     #[inline(always)]

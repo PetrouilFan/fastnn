@@ -45,7 +45,7 @@
 //!
 //! # Shared launch plumbing
 //!
-//! [`Job`] is the single-submission executor every FN3-13 kernel uses: it
+//! `Job` is the single-submission executor every FN3-13 kernel uses: it
 //! allocates device buffers, uploads through host-visible staging, records
 //! `copy -> barrier -> dispatch+ -> barrier -> copy` as one submission, waits
 //! once, reads the outputs and appends one [`ExecutionRecord`]. It lives here

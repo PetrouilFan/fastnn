@@ -779,7 +779,7 @@ impl GraphBuilder {
 
     /// Transpose with an explicit permutation of dimensions.
     /// The perm vector specifies the source dimension for each output position.
-    /// E.g. perm=[0,2,1] on a 3D tensor swaps dims 1 and 2.
+    /// E.g. `perm=[0,2,1]` on a 3D tensor swaps dims 1 and 2.
     /// Sets the "perm" attribute on the IR node so shape inference can use it.
     pub fn transpose_with_perm(&self, input: &GraphTensor, perm: &[usize]) -> GraphTensor {
         let input_shape = input.shape();
@@ -1452,7 +1452,7 @@ impl GraphBuilder {
     }
 
     /// Dequantize activations INT8 → F32 (symmetric per-tensor).
-    /// Reads the scale from the inline buffer produced by [`quantize_activations`].
+    /// Reads the scale from the inline buffer produced by [`Self::quantize_activations`].
     pub fn dequantize_activations(&self, input: &GraphTensor) -> GraphTensor {
         let output_shape = input.shape().to_vec();
         let output_type = TensorType::new(output_shape, IrDType::F32);

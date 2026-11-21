@@ -15,7 +15,7 @@
 //! | `Tanh` | `f32::tanh` (platform libm) | ≤ 1 ulp of the platform libm |
 //! | `Sin`/`Cos` | `f32::sin`/`f32::cos` (platform libm) | ≤ 1 ulp of the platform libm |
 //! | `Relu` | `max(x, 0)` with the `f32::max` NaN rule documented below | exact |
-//! | `Erf` | [`erf_f64`]: degree-22 Chebyshev fit of `erf(sqrt(u))/sqrt(u)`, evaluated in `f64`, rounded once | ≤ 1.7e-12 in `f64` on `[0, 4]`; ≤ 1.6e-8 (the `|x| > 4` saturation clamp) overall; ≤ 1 `f32` ulp after rounding |
+//! | `Erf` | [`erf_f64`]: degree-22 Chebyshev fit of `erf(sqrt(u))/sqrt(u)`, evaluated in `f64`, rounded once | ≤ 1.7e-12 in `f64` on `[0, 4]`; ≤ 1.6e-8 (the `\|x\| > 4` saturation clamp) overall; ≤ 1 `f32` ulp after rounding |
 //! | `Gelu` (erf form) | `0.5*x*(1+erf(x/sqrt(2)))` in `f64`, rounded once | ≤ 1 `f32` ulp |
 //!
 //! `Erf`/`Gelu` are deliberately evaluated in `f64`: the fixture reference is

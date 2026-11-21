@@ -1,7 +1,7 @@
 //! Pipeline ownership and the registration-time spec check.
 //!
 //! [`Kernel`] is one compiled compute pipeline plus everything derived from a
-//! single [`KernelSpec`](super::kernels::KernelSpec): shader module, descriptor
+//! single [`KernelSpec`]: shader module, descriptor
 //! set layout, pipeline layout and pipeline. Creating it validates the
 //! declaration against the committed SPIR-V (entry point, `LocalSize`,
 //! descriptors, push-constant size) *and* against the device limits, so a

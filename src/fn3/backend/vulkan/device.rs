@@ -438,7 +438,7 @@ impl Device {
     /// `vkWaitForFences` directly and releases only entries that return
     /// success. A buffer shared with a still-running submission keeps its
     /// reference and stays owned for a later pass. It deliberately bypasses
-    /// [`Device::ensure_usable`], because a poisoned device can still have a
+    /// `Device::ensure_usable`, because a poisoned device can still have a
     /// live queue and fences the driver can prove; a genuinely lost device
     /// returns an error and releases nothing.
     pub fn reclaim_quarantine(&self) -> ReclaimReport {

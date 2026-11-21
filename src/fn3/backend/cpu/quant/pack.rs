@@ -26,7 +26,7 @@
 //!
 //! GPT-2 exports `Gemm(A, W)` with `W` shaped `[K, N]` (the ONNX `MatMul`
 //! right-hand side), while the format packs rows along the *output* axis:
-//! `W8A16[N, K]`. [`pack_f32_rhs`] therefore consumes the `[K, N]` source
+//! `W8A16[N, K]`. `pack_f32_rhs` therefore consumes the `[K, N]` source
 //! exactly as the graph carries it and writes the transposed, grouped layout in
 //! one pass. No intermediate `[N, K]` FP32 copy is created.
 //!

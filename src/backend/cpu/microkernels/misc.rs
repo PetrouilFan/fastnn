@@ -499,8 +499,8 @@ pub unsafe fn upsample_nearest2d_f32_avx2(
 /// and permute instructions, falling back to scalar for edge tiles.
 ///
 /// Uses the classic:
-///   t0 = _mm256_unpacklo_ps(a0, a1)  // a0[0], a1[0], a0[1], a1[1], ...
-///   t1 = _mm256_unpackhi_ps(a0, a1)  // a0[2], a1[2], a0[3], a1[3], ...
+///   `t0 = _mm256_unpacklo_ps(a0, a1)  // a0[0], a1[0], a0[1], a1[1], ...`
+///   `t1 = _mm256_unpackhi_ps(a0, a1)  // a0[2], a1[2], a0[3], a1[3], ...`
 ///   ... then combine across rows with permute.
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]

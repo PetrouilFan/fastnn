@@ -91,7 +91,7 @@ pub fn i4x8_dot_packed(a: u32, b: u32) -> i32 {
 
 /// Vectorized I8x4 dot product over slices of packed u32 words.
 ///
-/// Computes Σ i8x4_dot_packed(a[i], b[i]) for i in 0..len
+/// Computes `Σ i8x4_dot_packed(a[i], b[i]) for i in 0..len`
 /// Auto-vectorizes to SIMD on modern CPUs (AVX2/NEON).
 #[inline(always)]
 pub fn i8x4_dot_packed_slice(a: &[u32], b: &[u32]) -> i32 {
@@ -222,7 +222,7 @@ pub fn dequantize_i4x8_to_f32(packed: &[u32], scale: f32, zero_point: f32, out: 
     }
 }
 
-/// Convert u32-packed data to PackedTensor<I8x4>
+/// Convert u32-packed data to `PackedTensor<I8x4>`
 pub fn i8x4_packed_to_tensor(
     packed: Vec<u32>,
     shape: Vec<usize>,
@@ -233,7 +233,7 @@ pub fn i8x4_packed_to_tensor(
     PackedTensor::from_raw(data, shape, vec![scale], vec![zero_point])
 }
 
-/// Convert u32-packed data to PackedTensor<I4x8>
+/// Convert u32-packed data to `PackedTensor<I4x8>`
 pub fn i4x8_packed_to_tensor(
     packed: Vec<u32>,
     shape: Vec<usize>,

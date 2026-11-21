@@ -5,8 +5,8 @@
 //! Every [`OpId`] except [`OpId::MaskedAttention`], which is reserved for the
 //! Vulkan attention kernels (FN3-15 / #61) and is reported as
 //! `Support::Unsupported`. The authoritative list and the measurement of the
-//! pinned graph's ONNX op inventory live in [`support`]; the kernels live in
-//! [`kernels`].
+//! pinned graph's ONNX op inventory live in `support`; the kernels live in
+//! `kernels`.
 //!
 //! ```text
 //! cpu/
@@ -26,8 +26,8 @@
 //!
 //! # Numerical contract
 //!
-//! See [`kernels`] for the module-wide rules and
-//! [`kernels::optimization_handoff`] for the symbols later performance work
+//! See `kernels` for the module-wide rules and
+//! `kernels::optimization_handoff` for the symbols later performance work
 //! (FN3-42 / #71) is expected to replace, together with the reference each one
 //! must keep matching. In short: `f32` compute only, `MatMul` accumulates in
 //! ascending `k`, reductions accumulate in ascending row-major order, and
@@ -37,7 +37,7 @@
 //!
 //! A request the backend does not implement is reported, never approximated:
 //!
-//! - an unimplemented op id is `UnsupportedOp` from [`support`];
+//! - an unimplemented op id is `UnsupportedOp` from `support`;
 //! - a shape or rank outside a kernel's documented contract is `UnsupportedOp`
 //!   naming FN3-07 (#53) and the offending value;
 //! - a wrong dtype, device, arity or attribute is the matching
@@ -161,7 +161,7 @@ impl CpuBackend {
     /// Construct with an explicit per-runtime thread budget.
     ///
     /// The budget bounds how many threads one instruction may use. It is
-    /// resolved on every dispatch against [`parallel::process_budget`], so a cap
+    /// resolved on every dispatch against `parallel::process_budget`, so a cap
     /// above the CPUs this process may use is clamped rather than honoured.
     /// `ThreadBudget::Fixed(1)` is exactly the serial path, which is what the
     /// parity and allocation baselines use.

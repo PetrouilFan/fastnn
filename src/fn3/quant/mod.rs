@@ -13,7 +13,7 @@
 //! buffer: the projection kernel consumes the INT8 code and the per-group
 //! metadata directly and applies the scale after a group's dot product.
 //!
-//! The byte layout is specified and enforced in [`format`]:
+//! The byte layout is specified and enforced in [`mod@format`]:
 //!
 //! * one 64-byte header, `tensor_count` 64-byte descriptors, an 8-byte-per-group
 //!   directory, then a 16-byte-aligned payload;

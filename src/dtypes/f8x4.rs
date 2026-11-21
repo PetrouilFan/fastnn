@@ -92,7 +92,7 @@ pub(crate) fn f8_lut() -> &'static [f32; 256] {
 }
 
 /// Dot product of two F8x4-packed u32 words using LUT-based dequantize.
-/// Returns f32 sum of (act[i] * weight[i]) for i in 0..4.
+/// Returns f32 sum of `act[i] * weight[i]` for `i` in `0..4`.
 #[inline(always)]
 pub fn f8x4_dot_packed_f32(a: u32, b: u32) -> f32 {
     let lut = f8_lut();

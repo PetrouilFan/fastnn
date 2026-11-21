@@ -232,8 +232,8 @@ impl FusedConvBn<NoAct> {
     /// Fold BatchNorm2d parameters into packed conv weights.
     ///
     /// Given Conv weight W and BN params (gamma, beta, mean, var, eps):
-    ///   W_fused[i] = W[i] * gamma[i] / sqrt(var[i] + eps)
-    ///   bias_fused[i] = beta[i] + (bias[i] - mean[i]) * gamma[i] / sqrt(var[i] + eps)
+    ///   `W_fused[i] = W[i] * gamma[i] / sqrt(var[i] + eps)`
+    ///   `bias_fused[i] = beta[i] + (bias[i] - mean[i]) * gamma[i] / sqrt(var[i] + eps)`
     /// Fuse parameters from separate Conv2d and BatchNorm2d layers
     pub fn from_conv_bn(conv: &crate::nn::conv::Conv2d, bn: &crate::nn::norm::BatchNorm2d) -> Self {
         let stride = conv.stride;

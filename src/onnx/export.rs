@@ -277,7 +277,7 @@ fn extract_output_scale_zp(graph: &ComputeGraph, q_node_id: NodeId) -> (f32, i32
 
 /// Export a ComputeGraph to ONNX JSON format.
 ///
-/// Returns a JSON string that can be re-imported via [`OnnxConverter`].
+/// Returns a JSON string that can be re-imported via [`OnnxConverter`](crate::onnx::converter::OnnxConverter).
 ///
 pub fn export_to_onnx_json(graph: &ComputeGraph) -> Result<String, String> {
     export_to_onnx_json_with_config(graph, &ExportConfig::default())
@@ -287,7 +287,7 @@ pub fn export_to_onnx_json(graph: &ComputeGraph) -> Result<String, String> {
 ///
 /// This is the primary export entry point. It validates the graph against
 /// the provided configuration and returns a JSON string suitable for
-/// re-import via [`OnnxConverter`].
+/// re-import via [`OnnxConverter`](crate::onnx::converter::OnnxConverter).
 pub fn export_to_onnx_json_with_config(
     graph: &ComputeGraph,
     _config: &ExportConfig,

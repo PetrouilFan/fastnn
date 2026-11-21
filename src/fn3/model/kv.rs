@@ -235,7 +235,7 @@ impl KvCacheState {
     /// Allocate zero-filled key and value buffers at full capacity.
     ///
     /// The buffers are host memory tagged for `device` (see
-    /// [`allocate`]); on a Vulkan device that is host staging, not a CPU
+    /// `allocate`); on a Vulkan device that is host staging, not a CPU
     /// compute path.
     pub fn new(config: KvCacheConfig, device: DeviceId) -> Result<KvCacheState, Fn3Error> {
         let shape = config.shape();

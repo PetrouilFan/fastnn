@@ -13,9 +13,9 @@ use std::arch::x86_64::*;
 // BatchNorm inference — scalar + AVX2
 // ============================================================
 
-/// BatchNorm inference: out[i] = data[i] * scale[ch] + shift[ch] where
-///   scale[ch] = weight[ch] / sqrt(var[ch] + eps)
-///   shift[ch] = bias[ch] - mean[ch] * scale[ch]
+/// BatchNorm inference: `out[i] = data[i] * scale[ch] + shift[ch]` where
+///   `scale[ch] = weight[ch] / sqrt(var[ch] + eps)`
+///   `shift[ch] = bias[ch] - mean[ch] * scale[ch]`
 ///   ch = i % c  (matches existing dispatch behavior)
 pub fn batch_norm_inference_f32(
     data: &[f32],

@@ -36,7 +36,7 @@
 //!
 //! # Shared launch plumbing
 //!
-//! [`execute_staged`] is the one place the FN3-15 kernels allocate device
+//! `execute_staged` is the one place the FN3-15 kernels allocate device
 //! buffers, lease host-visible staging, record `upload → barrier → dispatch →
 //! barrier → readback` as a single submission, wait once, read back and append a
 //! residency record. `reduce.rs` and `attention.rs` use it too, so every kernel

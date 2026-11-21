@@ -6,7 +6,7 @@
 //!
 //! This module takes the same JSON-like input format (nodes + params + input/output names)
 //! that the Python [`onnx`](https://pypi.org/project/onnx/) library produces,
-//! and builds a [`ComputeGraph`] that the AOT pipeline can compile and execute.
+//! and builds a [`ComputeGraph`](crate::ir::ComputeGraph) that the AOT pipeline can compile and execute.
 //!
 //! # Usage
 //!

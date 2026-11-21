@@ -982,7 +982,7 @@ impl<B: Backend> GraphExecutor<B> {
         self.compile_with_plan_and_quantize(graph, None, None)
     }
 
-    /// Same as [`compile_with_plan`] but with optional weight quantization and
+    /// Same as [`Self::compile_with_plan`] but with optional weight quantization and
     /// optional calibration data for activation quantization.
     ///
     /// Pass `Some(4)` or `Some(8)` to quantize f32 weight constants to
@@ -990,7 +990,7 @@ impl<B: Backend> GraphExecutor<B> {
     /// be used to compute per-tensor/per-channel activation scales for optimal
     /// quantization accuracy.
     ///
-    /// For FP packed types (F8/F8R/F4), use [`compile_with_target`]
+    /// For FP packed types (F8/F8R/F4), use [`Self::compile_with_target`]
     /// instead. This method only supports integer quantization (I4/I8).
     pub fn compile_with_plan_and_quantize(
         &self,
@@ -1131,7 +1131,7 @@ impl<B: Backend> GraphExecutor<B> {
     /// behaviour is byte-identical to a direct `forward()` call.
     ///
     /// In particular this path:
-    /// - does **not** read from any [`PreparedConstantArena`],
+    /// - does **not** read from any [`PreparedConstantArena`](crate::backend::prepared::PreparedConstantArena),
     /// - does **not** skip or remove [`Instruction::WriteConst`],
     /// - does **not** substitute alternative kernels,
     /// - and does **not** perform any per-instruction rewriting.
@@ -1171,7 +1171,7 @@ impl<B: Backend> GraphExecutor<B> {
     }
 
     /// Opt-in prepared fallback that preloads fp32 Conv2d weights from
-    /// the [`PreparedConstantArena`] into their original runtime arena
+    /// the [`PreparedConstantArena`](crate::backend::prepared::PreparedConstantArena) into their original runtime arena
     /// slots, then dispatches a temporary plan with the matching exact
     /// weight-slot [`Instruction::WriteConst`] operations removed.
     ///
@@ -1219,7 +1219,7 @@ impl<B: Backend> GraphExecutor<B> {
     /// the total per-forward weight traffic is zero (down from the
     /// full `O(weights_bytes)` of the existing fallback).
     ///
-    /// This entry point is byte-identical to [`Self::forward`] and
+    /// This entry point is byte-identical to `forward()` and
     /// to [`Self::execute_prepared_arena_fallback`] on every input.
     /// It is gated on the `prepared-plan` cargo feature to match
     /// the rest of the prepared-plan surface; callers that build

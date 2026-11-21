@@ -17,7 +17,7 @@
 //!   the lowest index and a NaN never wins.
 //!
 //! One invocation owns one output element. Shapes ride in a storage-buffer
-//! parameter block (plain scalar std430, the layout [`ParamWriter`] writes), so
+//! parameter block (plain scalar std430, the layout `ParamWriter` writes), so
 //! no push-constant limit constrains the rank; the rank limit is the fn3
 //! contract's 8.
 //!

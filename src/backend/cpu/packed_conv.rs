@@ -294,7 +294,7 @@ unsafe fn im2col_pack_f4x8(
 
 /// Generic conv2d for 8-bit float packed types (F8x4, F8x4R).
 ///
-/// Fast path: does im2col in f32, unpacks weights to f32 via LUT, calls gemm::gemm::<f32>.
+/// Fast path: does im2col in f32, unpacks weights to f32 via LUT, calls `gemm::gemm::<f32>`.
 /// Skips the wasteful f32→packed→f32 quantize/dequantize cycle on activations.
 ///
 /// # Safety

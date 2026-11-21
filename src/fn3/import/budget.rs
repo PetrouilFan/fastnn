@@ -22,17 +22,17 @@
 //!
 //! | Budget | Limit | Enforced in | Protects |
 //! |---|---|---|---|
-//! | [`MAX_MODEL_BYTES`] | 8 GiB | [`super::graph::build_model`] | the one `Vec` the format also caps |
+//! | [`MAX_MODEL_BYTES`] | 8 GiB | `super::graph::build_model` | the one `Vec` the format also caps |
 //! | [`MAX_NODES`] | 2^20 | `proto::decode_graph`, `Builder::register_nodes` | `Vec<NodeProto>`, `Vec<GraphNode>` |
 //! | [`MAX_VALUES`] | 2^20 | `proto::decode_graph`, `Builder::register_nodes` | `Vec<ValueInfo>` |
 //! | [`MAX_WEIGHTS`] | 2^20 | `proto::decode_graph`, `Builder::register_nodes` | `Vec<WeightTensor>` |
-//! | [`MAX_RANK`] | 64 | `proto::decode_tensor`, `proto::decode_shape`, [`super::graph::tensor_shape`] | `TensorProto.dims`, `Shape` |
+//! | [`MAX_RANK`] | 64 | `proto::decode_tensor`, `proto::decode_shape`, `super::graph::tensor_shape` | `TensorProto.dims`, `Shape` |
 //! | [`MAX_PARAM_AXES`] | 1024 | `proto::decode_attribute` | `Vec<f32>`/`Vec<i64>` attribute lists |
 //! | [`MAX_ATTRIBUTES`] | 1024 | `proto::decode_node` | `Vec<Attribute>` |
 //! | [`MAX_OPERANDS`] | 1024 | `proto::decode_node` | `Vec<&str>` inputs and outputs |
 //! | [`MAX_STRING_BYTES`] | 4096 | `proto::Reader::text` | one `String` per name |
 //! | [`MAX_OPSET_IMPORTS`] | 16 | `proto::decode_model` | `Vec<OpsetId>` |
-//! | [`MAX_TRACKED_ELEMENTS`] | 4096 | [`super::graph`] | constant-folded element sequences |
+//! | [`MAX_TRACKED_ELEMENTS`] | 4096 | `super::graph` | constant-folded element sequences |
 //!
 //! # What is *not* bounded here, and why that is honest
 //!
@@ -54,7 +54,7 @@
 //! constant here: they must equal the declared shape, and the shape's product is
 //! checked against `u64` overflow by `Shape::numel`. A tensor whose declared
 //! shape does not match its payload is rejected before the payload is converted
-//! (see [`super::graph::tensor_bytes`]), so a typed payload cannot be expanded
+//! (see `super::graph::tensor_bytes`), so a typed payload cannot be expanded
 //! into a larger buffer than the file itself.
 
 /// Largest ONNX model file this build claims to import, in bytes.
@@ -118,7 +118,7 @@ pub const MAX_TYPED_ELEMENTS: usize = 1 << 24;
 
 /// `true` when a model of `len` bytes is inside [`MAX_MODEL_BYTES`].
 ///
-/// Split out from [`super::graph::build_model`] so the comparison is testable
+/// Split out from `super::graph::build_model` so the comparison is testable
 /// without allocating an eight-gigabyte buffer.
 pub fn model_bytes_within_cap(len: u64) -> bool {
     len <= MAX_MODEL_BYTES

@@ -16,7 +16,7 @@
 //! zero-points never leave their packed form and are never widened except one
 //! scale value per group.
 //!
-//! # Why it is not registered in [`KernelSet`]
+//! # Why it is not registered in [`KernelSet`](super::KernelSet)
 //!
 //! [`KernelSet`](super::KernelSet) holds **one kernel per [`OpId`]**, and the
 //! alpha has no quantized op id: `OpId::MatMul` is the FP32 tiled product and a

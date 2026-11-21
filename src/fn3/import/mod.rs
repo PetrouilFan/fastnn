@@ -50,8 +50,8 @@
 //!
 //! | Consumer | What to call |
 //! |---|---|
-//! | #55 prepared-model format | [`ModelImport::weights`] ([`WeightSet`]: name, [`DType`], [`Shape`], bytes in file order) and [`ModelImport::ir_version`]/[`ModelImport::opset`] |
-//! | #56 planner | [`ModelImport::graph`] ([`GraphIr`]: values, then nodes with [`OpId`], operand [`ValueId`]s, [`crate::inference::backend::OpParams`]) and [`ModelImport::geometry`] |
+//! | #55 prepared-model format | [`ModelImport::weights`] ([`WeightSet`]: name, [`DType`](crate::inference::DType), [`Shape`](crate::inference::Shape), bytes in file order) and [`ModelImport::ir_version`]/[`ModelImport::opset`] |
+//! | #56 planner | [`ModelImport::graph`] ([`GraphIr`]: values, then nodes with [`OpId`](crate::inference::OpId), operand [`ValueId`]s, [`crate::inference::backend::OpParams`]) and [`ModelImport::geometry`] |
 //! | #58 session | [`DecoderGeometry::kv`] for the cache interface and [`DecoderGeometry::kv_cache_config`] for the allocation |
 //! | #62 end-to-end | [`ModelImport::to_model_weights`] plus [`ModelImport::summary`] for an inventory assertion |
 //!

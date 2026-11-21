@@ -3,7 +3,7 @@
 //!
 //! # The contract is the CPU reference
 //!
-//! [`crate::inference::backend::cpu::kernels::matmul`] defines the semantics this
+//! `crate::inference::backend::cpu::kernels::matmul` defines the semantics this
 //! kernel implements; it is not free to invent a different one:
 //!
 //! ```text

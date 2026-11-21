@@ -1647,7 +1647,7 @@ fn apply_integer_affine_dot(
 
 /// Flat-buffer I8 × I8x4 quantized GEMM.
 ///
-/// Activation payload format: [scale_f32][zp_f32][i8_data...]
+/// Activation payload format: `[scale_f32][zp_f32][i8_data...]`
 /// (8-byte header followed by `m × k` signed i8 elements).
 ///
 /// Weights are `PackedTensor<I8x4>` with shape [N, K].

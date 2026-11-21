@@ -21,9 +21,9 @@
 //! # What is proven, not assumed
 //!
 //! Persistence is enforced, not merely observed. After
-//! [`VulkanBackend::prepare_persistent`] every registered tensor is in the
+//! [`VulkanBackend::prepare_persistent`](crate::inference::backend::Backend::prepare_persistent) every registered tensor is in the
 //! table, and the staging path calls
-//! [`VulkanBackend::check_staged_input`] before it copies host bytes: a
+//! [`VulkanBackend::check_staged_input`](crate::inference::backend::vulkan::VulkanBackend::check_staged_input) before it copies host bytes: a
 //! registered tensor that reaches a host upload is a *hard error* and
 //! increments [`ResidencyStats::late_persistent_uploads`]. "Zero weight bytes
 //! uploaded after prepare" is therefore a compile-time-shaped invariant with a
@@ -676,7 +676,7 @@ impl super::VulkanBackend {
 
     /// Persistent entries released because their owning storage dropped.
     ///
-    /// A table-lifetime total; [`VulkanBackend::reset_residency_stats`] does
+    /// A table-lifetime total; [`VulkanBackend::reset_residency_stats`](crate::inference::backend::vulkan::VulkanBackend::reset_residency_stats) does
     /// not clear it.
     pub fn persistent_release_count(&self) -> u64 {
         self.persistent.releases()
@@ -776,7 +776,7 @@ impl super::VulkanBackend {
     /// Reject a host upload of a tensor that `prepare_persistent` made resident.
     ///
     /// This is the enforcement half of "zero weight bytes uploaded after
-    /// prepare": a kernel that forgets to ask [`VulkanBackend::resident_input`]
+    /// prepare": a kernel that forgets to ask [`VulkanBackend::resident_input`](crate::inference::backend::vulkan::VulkanBackend::resident_input)
     /// fails here instead of quietly moving the model again.
     pub fn check_staged_input(&self, view: Option<&TensorView<'_>>, bytes: u64) -> Fn3Result<()> {
         if let Some(view) = view {

@@ -88,11 +88,12 @@ pub struct MemoryPlan {
     /// Secondary output slots for multi-output nodes (e.g. MaxPool argmax indices).
     /// Key is (node_id, output_index).
     pub secondary_slots: HashMap<(NodeId, usize), AllocSlot>,
-    /// Graph output node IDs, in order.  Populated by [`plan_memory_with_env`].
+    /// Graph output node IDs, in order.  Populated by
+    /// [`plan_memory_with_env`](crate::compiler::passes::memory_planning::plan_memory_with_env).
     pub outputs: Vec<NodeId>,
     /// Runtime-resolved kernel parameter values (e.g. [M, K, N] for matmul)
-    /// computed by [`tighten`] using the runtime [`ShapeEnv`].  Populated only
-    /// after a call to [`tighten`]; empty at plan-creation time.
+    /// computed by `tighten` using the runtime [`ShapeEnv`].  Populated only
+    /// after a call to `tighten`; empty at plan-creation time.
     pub tightened_params: HashMap<NodeId, Vec<usize>>,
 }
 
@@ -235,7 +236,7 @@ impl MemoryPlan {
     /// parameters (e.g. [M, K, N] for matmul) for every node whose kernel
     /// depends on shape information.  These are stored so that
     /// [`tighten_slices`](crate::backend::executor::tighten_slices) can
-    /// update [`Instruction::CallKernel`] params without a full recompile.
+    /// update [`Instruction::CallKernel`](crate::backend::Instruction::CallKernel) params without a full recompile.
     pub fn try_tighten(
         &self,
         graph: &ComputeGraph,

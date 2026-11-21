@@ -301,13 +301,13 @@ pub fn gemm_packed_f4x8_fused(
 ///
 /// This is the main entry point for quantized conv2d:
 /// 1. Activations quantized to I8x4 (packed)
-/// 2. Weights already in PackedTensor<I8x4>
+/// 2. Weights already in `PackedTensor<I8x4>`
 /// 3. Direct packed GEMM with fused dequantize + bias + activation
 ///
 /// # Arguments
 /// - `act_packed`: [M, K] packed activations (from im2col_packed)
 /// - `weight_packed`: [N, K] packed weights
-/// - `bias`: Optional bias [N] f32
+/// - `bias`: Optional bias `[N]` f32
 /// - `activation`: Optional fused activation (PreparedActivation enum)
 /// - `c`: Output [M, N] f32 (row-major)
 pub fn gemm_packed_i8x4_fused(
@@ -405,21 +405,21 @@ pub fn gemm_packed_i8x4_fused(
     Ok(())
 }
 
-/// Quantize FP32 activations to PackedTensor<I8x4>
+/// Quantize FP32 activations to `PackedTensor<I8x4>`
 pub fn quantize_activations_to_i8x4(data: &[f32]) -> PackedTensor<I8x4> {
     let (packed, scale, zp) = quantize_f32_to_i8x4(data);
     let shape = vec![packed.len(), 4];
     i8x4_packed_to_tensor(packed, shape, scale, zp)
 }
 
-/// Quantize FP32 activations to PackedTensor<I4x8>
+/// Quantize FP32 activations to `PackedTensor<I4x8>`
 pub fn quantize_activations_to_i4x8(data: &[f32]) -> PackedTensor<I4x8> {
     let (packed, scale, zp) = quantize_f32_to_i4x8(data);
     let shape = vec![packed.len(), 8];
     i4x8_packed_to_tensor(packed, shape, scale, zp)
 }
 
-/// Quantize FP32 activations to PackedTensor<F4x8>
+/// Quantize FP32 activations to `PackedTensor<F4x8>`
 pub fn quantize_activations_to_f4x8(data: &[f32]) -> PackedTensor<F4x8> {
     let inner = data.len().div_ceil(8);
     let mut packed = Vec::with_capacity(inner);
@@ -443,7 +443,7 @@ pub fn quantize_activations_to_f4x8(data: &[f32]) -> PackedTensor<F4x8> {
 /// Generic packed GEMM for float types (F8x4, F8x4R).
 ///
 /// Unpacks activations to f32, uses cached dequantized f32 weights,
-/// computes GEMM via gemm::gemm::<f32>, then applies bias and fused activation.
+/// computes GEMM via `gemm::gemm::<f32>`, then applies bias and fused activation.
 pub fn gemm_packed_float_fused<T: PackedWord>(
     act_packed: &PackedTensor<T>,
     weight_packed: &PackedTensor<T>,

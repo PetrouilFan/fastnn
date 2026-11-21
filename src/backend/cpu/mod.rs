@@ -405,7 +405,7 @@ fn aligned_packed_slice<T: PackedWord>(raw: &[u8]) -> Vec<T> {
 /// [`dispatch`](Backend::dispatch) method can mutate the arena through
 /// a shared `&CpuBuffer` reference.  Dispatch is single-threaded and
 /// processes instructions sequentially, so the `&mut [u8]` slices
-/// returned by [`data_mut`](CpuBuffer::data_mut) are never aliased.
+/// returned by `data_mut` are never aliased.
 ///
 /// `CpuBuffer` is `Send` but deliberately not `Sync`: moving an arena between
 /// threads is valid, while sharing one across concurrent dispatches is not.

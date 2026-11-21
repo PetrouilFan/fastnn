@@ -467,7 +467,7 @@ impl QuantizedExecutionContract {
 
 /// Quantized weight metadata for packed precision kernels.
 /// Carries per-channel scales, dequantization offsets, shape, and bit-width
-/// so the backend dispatch can construct a [`PackedTensor`] for SIMD
+/// so the backend dispatch can construct a [`PackedTensor`](crate::packed_tensor::PackedTensor) for SIMD
 /// or GPU compute shaders.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuantizedWeightMeta {
@@ -627,8 +627,8 @@ pub enum Instruction {
         node_id: Option<NodeId>,
         /// Symbolic dim expressions corresponding to `params`.
         /// When `Some`, the backend can re-evaluate these at dispatch time
-        /// using a [`ShapeEnv`](crate::ir::ShapeEnv) to resolve
-        /// any [`DimExpr::Symbol`](crate::ir::DimExpr::Symbol) dims
+        /// using a [`ShapeEnv`] to resolve
+        /// any [`DimExpr::Symbol`] dims
         /// that were not known at compile time.
         param_dims: Option<Vec<DimExpr>>,
         /// Optional weight metadata for quantized matmul kernels.
