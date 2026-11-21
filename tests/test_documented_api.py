@@ -22,6 +22,19 @@ import fastnn
 ROOT = Path(__file__).resolve().parents[1]
 SKIP_PARTS = {".git", "target", ".venv", "node_modules", "site-packages"}
 BACKTICKED_FACADE = re.compile(r"`fnn\.([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)")
+FENCED_BLOCK = re.compile(r"^```[^\n]*\n.*?^```", re.S | re.M)
+LITERAL_SPAN = re.compile(r"``.+?``", re.S)
+
+
+def _prose(text: str) -> str:
+    """Drop code fences and double-backtick spans before scanning.
+
+    Both are how a document quotes literal markup instead of making a claim: a
+    double-backtick span holding a backticked name is a placeholder, not an API
+    promise. Scanning them would make the gate depend on how a sentence is
+    worded rather than on the surface the package actually exports.
+    """
+    return LITERAL_SPAN.sub("", FENCED_BLOCK.sub("", text))
 
 
 def _documented_facade_names() -> dict[str, list[str]]:
@@ -30,7 +43,7 @@ def _documented_facade_names() -> dict[str, list[str]]:
     for markdown in sorted(ROOT.rglob("*.md")):
         if SKIP_PARTS.intersection(markdown.parts):
             continue
-        text = markdown.read_text(encoding="utf-8", errors="ignore")
+        text = _prose(markdown.read_text(encoding="utf-8", errors="ignore"))
         for match in BACKTICKED_FACADE.finditer(text):
             seen.setdefault(match.group(1), []).append(
                 markdown.relative_to(ROOT).as_posix()
@@ -62,3 +75,15 @@ def test_every_documented_facade_name_exists() -> None:
         f"(mentioned in {', '.join(paths)})"
         for name, paths in sorted(missing.items())
     )
+
+
+def test_a_placeholder_in_a_literal_span_is_not_a_promise() -> None:
+    # The changelog quotes a placeholder this way. Scanning it once turned a
+    # wording choice into a claim about the package and failed the build.
+    text = "write `` `fnn.Something` `` between double backticks to quote it"
+    assert BACKTICKED_FACADE.findall(_prose(text)) == []
+
+
+def test_a_claim_inside_a_code_fence_is_not_a_promise() -> None:
+    text = "for example:\n\n```python\nx = `fnn.Something`\n```\n"
+    assert BACKTICKED_FACADE.findall(_prose(text)) == []

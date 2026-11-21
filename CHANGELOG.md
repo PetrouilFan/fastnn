@@ -37,8 +37,8 @@
 - The API reference no longer documents `RNN`, `LSTM` or `GRU` as Python layer
   classes; none of the three is exported. The ONNX importer does import LSTM and
   GRU nodes, and the page now says so instead. `tests/test_documented_api.py`
-  resolves every `` `fnn.X` `` symbol named in the markdown, because the existing
-  documentation gate only validates links and anchors.
+  resolves every backticked facade name written in the markdown, because the
+  existing documentation gate only validates links and anchors.
 - A convolution model can now be imported and executed end to end as one
   AOT graph. `If`/`Mod` shape plumbing is resolved at import by
   `fastnn.io.shape_specialize`, which folds the computed integer tensors into
