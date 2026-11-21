@@ -96,6 +96,24 @@ def _extract_shape(value_info):
     return shape, dtype
 
 
+def _known_dim(value):
+    """Return the integer of a ``Known(n)`` dimension, else ``None``.
+
+    Dynamic graphs carry dimensions the shape inference cannot resolve, and
+    `_extract_shape` writes those as ``Symbol(name)`` or ``Unknown``. A layer
+    summary that reads a dimension must degrade to "unknown" for those; it must
+    never raise, because summarising a graph is not a reason to reject it.
+    """
+    if isinstance(value, int):
+        return value
+    if not isinstance(value, str) or not value.startswith("Known("):
+        return None
+    try:
+        return int(value[len("Known("):].rstrip(")"))
+    except ValueError:
+        return None
+
+
 def _build_vinfo(model) -> Dict[str, Tuple[List[str], str]]:
     vinfo = {}
     for src in (model.graph.value_info, model.graph.input, model.graph.output):
@@ -579,8 +597,21 @@ def _compute_graph_to_layers(cg: Dict[str, Any]) -> List[Dict[str, Any]]:
             if "in_channels" not in layer and "group" in attrs:
                 layer["in_channels"] = attrs.get("group", 1)
             out_shape = node.get("output_shape", {}).get("shape", [])
-            if out_shape and len(out_shape) >= 2:
-                layer["out_channels"] = int(out_shape[-1].replace("Known(", "").replace(")", ""))
+            out_channels = _known_dim(out_shape[-1]) if len(out_shape) >= 2 else None
+            if out_channels is None:
+                # The weight tensor is authoritative anyway; the output shape is
+                # only a fallback for graphs that do not expose it as a param.
+                inputs = node.get("inputs", [])
+                for candidate in (
+                    inputs[1] if len(inputs) >= 2 else None,
+                    f"{node.get('name', '')}.weight",
+                ):
+                    weight_shape = params.get(candidate, {}).get("shape", []) if candidate else []
+                    out_channels = _known_dim(weight_shape[0]) if weight_shape else None
+                    if out_channels is not None:
+                        break
+            if out_channels is not None:
+                layer["out_channels"] = out_channels
         elif opcode == "ConvTranspose":
             layer["type"] = "ConvTranspose"
             # Add in_channels/out_channels for test compatibility
@@ -603,7 +634,9 @@ def _compute_graph_to_layers(cg: Dict[str, Any]) -> List[Dict[str, Any]]:
             # Fallback: get out_channels from output shape
             out_shape = node.get("output_shape", {}).get("shape", [])
             if "out_channels" not in layer and out_shape and len(out_shape) >= 2:
-                layer["out_channels"] = int(out_shape[-1].replace("Known(", "").replace(")", ""))
+                out_channels = _known_dim(out_shape[-1])
+                if out_channels is not None:
+                    layer["out_channels"] = out_channels
         elif opcode == "Gemm":
             # Gemm remains a single executable ONNX op; expose it as a Linear
             # layer only in this compatibility summary.
@@ -634,7 +667,9 @@ def _compute_graph_to_layers(cg: Dict[str, Any]) -> List[Dict[str, Any]]:
                     # Get out_features from output shape
                     out_shape = node.get("output_shape", {}).get("shape", [])
                     if out_shape and len(out_shape) >= 2:
-                        layer["out_features"] = int(out_shape[-1].replace("Known(", "").replace(")", ""))
+                        out_features = _known_dim(out_shape[-1])
+                        if out_features is not None:
+                            layer["out_features"] = out_features
                     # Get in_features from input shape - map tensor names to producer node IDs or params
                     inputs = node.get("inputs", [])
                     if inputs and "out_to_nid" in cg:
@@ -646,7 +681,9 @@ def _compute_graph_to_layers(cg: Dict[str, Any]) -> List[Dict[str, Any]]:
                                 if producer:
                                     prod_out_shape = producer.get("output_shape", {}).get("shape", [])
                                     if prod_out_shape and len(prod_out_shape) >= 2:
-                                        layer["in_features"] = int(prod_out_shape[-1].replace("Known(", "").replace(")", ""))
+                                        in_features = _known_dim(prod_out_shape[-1])
+                                        if in_features is not None:
+                                            layer["in_features"] = in_features
                                         break
                             # Also check if it's an initializer (weight parameter)
                             elif inp_name in params:
