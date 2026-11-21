@@ -436,12 +436,65 @@ impl Drop for CpuBuffer {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .retain(|(pointer, _, _, _), _| *pointer < start || *pointer >= end);
         }
+        // Hand the pages back to this thread's arena pool. An eager model
+        // allocates and frees an arena of the same size on every call, and a
+        // fresh allocation means the kernel faults in every page again.
+        let buffer = std::mem::replace(data, AlignedVec::new_zeroed(0));
+        pool_arena(buffer);
     }
+}
+
+// Arena buffers retained for reuse, largest last.
+thread_local! {
+    static ARENA_POOL: std::cell::RefCell<Vec<AlignedVec>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Cap on arena bytes retained per thread. An eager model alternates between a
+/// handful of tensor sizes, so a few buffers cover the common shapes without
+/// hoarding memory that the process needs elsewhere.
+const ARENA_POOL_MAX_BYTES: usize = 128 << 20;
+const ARENA_POOL_MAX_ENTRIES: usize = 4;
+
+/// Take the smallest retained buffer that can hold `total_bytes`.
+fn take_pooled_arena(total_bytes: usize) -> Option<AlignedVec> {
+    ARENA_POOL.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        let best = pool
+            .iter()
+            .enumerate()
+            .filter(|(_, buffer)| buffer.len() >= total_bytes)
+            .min_by_key(|(_, buffer)| buffer.len())
+            .map(|(index, _)| index)?;
+        Some(pool.swap_remove(best))
+    })
+}
+
+/// Retain `buffer` for the next arena allocation on this thread.
+fn pool_arena(buffer: AlignedVec) {
+    if buffer.is_empty() || buffer.len() > ARENA_POOL_MAX_BYTES {
+        return;
+    }
+    ARENA_POOL.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        if pool.len() >= ARENA_POOL_MAX_ENTRIES {
+            return;
+        }
+        if pool.iter().any(|entry| entry.len() == buffer.len()) {
+            return;
+        }
+        pool.push(buffer);
+    });
 }
 
 impl CpuBuffer {
     pub fn new(data: Vec<u8>) -> Self {
         CpuBuffer(UnsafeCell::new(AlignedVec::from_vec(data)))
+    }
+
+    /// Wrap an already 64-byte aligned allocation, e.g. a pooled arena.
+    fn from_aligned(data: AlignedVec) -> Self {
+        CpuBuffer(UnsafeCell::new(data))
     }
 
     /// Get a mutable slice to the arena data.
@@ -622,6 +675,19 @@ impl Backend for CpuBackend {
     }
 
     fn try_allocate_arena(&self, total_bytes: usize) -> Result<CpuBuffer, BackendError> {
+        if let Some(mut buffer) = take_pooled_arena(total_bytes) {
+            // The pages are warm, so this is a plain memset instead of the
+            // allocator handing back cold anonymous pages that the kernel has
+            // to fault in and zero one at a time. `total_bytes` is zeroed even
+            // when the pooled buffer is larger, preserving the determinism the
+            // fresh-allocation path documents.
+            // SAFETY: the pooled buffer owns at least `total_bytes` bytes and
+            // is exclusively owned here.
+            unsafe {
+                std::ptr::write_bytes(buffer.as_mut_ptr(), 0, total_bytes);
+            }
+            return Ok(CpuBuffer::from_aligned(buffer));
+        }
         let mut buf = Vec::new();
         buf.try_reserve_exact(total_bytes).map_err(|error| {
             BackendError::Dispatch(format!(
