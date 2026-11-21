@@ -1075,19 +1075,31 @@ impl Tensor {
 
         let graph_outputs = build_graph(&g, &graph_inputs);
 
-        let materialized_inputs: Vec<Tensor> = inputs
+        // A contiguous input is already in the layout the plan expects, and
+        // `inputs` outlives the whole call, so borrow it instead of cloning.
+        // The clone used to cost one full-size allocation and copy per input on
+        // every eager module call, which at CNN feature-map sizes dominated the
+        // kernel it was feeding. Only a strided input needs a materialized
+        // contiguous copy.
+        let materialized_inputs: Vec<Option<Tensor>> = inputs
             .iter()
             .map(|tensor| {
                 if tensor.is_contiguous() {
-                    Ok((*tensor).clone())
+                    Ok(None)
                 } else {
                     tensor
                         .try_contiguous()
+                        .map(Some)
                         .map_err(|error| BackendError::Dispatch(error.to_string()))
                 }
             })
             .collect::<Result<Vec<_>, BackendError>>()?;
-        let input_bytes: Vec<&[u8]> = materialized_inputs
+        let input_sources: Vec<&Tensor> = inputs
+            .iter()
+            .zip(materialized_inputs.iter())
+            .map(|(original, contiguous)| contiguous.as_ref().unwrap_or(original))
+            .collect();
+        let input_bytes: Vec<&[u8]> = input_sources
             .iter()
             .map(|tensor| {
                 tensor
@@ -1129,8 +1141,7 @@ impl Tensor {
                      This is likely a shape-inference bug in the compiler pass.",
                     shape, dt, num_bytes, expected_bytes, numel
                 );
-                let data = bytes.to_vec();
-                let storage = Storage::Cpu(crate::storage::CpuStorage::from_vec(data, num_bytes));
+                let storage = Storage::Cpu(crate::storage::CpuStorage::from_vec(bytes, num_bytes));
                 Ok(Tensor::new(TensorImpl::new(Arc::new(storage), shape, dt)))
             })
             .collect::<Result<Vec<_>, _>>()

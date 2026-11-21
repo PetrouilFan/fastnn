@@ -1,4 +1,4 @@
-use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
+use std::alloc::{alloc, alloc_zeroed, dealloc, handle_alloc_error, Layout};
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -51,9 +51,33 @@ impl AlignedVec {
             drop(vec);
             return AlignedVec::new_zeroed(0);
         }
-        let mut buf = AlignedVec::new_zeroed(nbytes);
-        buf.copy_from_slice(&vec);
+        let buf = AlignedVec::new_uninitialized(nbytes);
+        // SAFETY: `buf` owns `nbytes` bytes of allocated memory, and
+        // `copy_nonoverlapping` writes exactly those `nbytes` bytes from a
+        // distinct `Vec` allocation before any read of `buf`.
+        unsafe {
+            std::ptr::copy_nonoverlapping(vec.as_ptr(), buf.ptr, nbytes);
+        }
         buf
+    }
+
+    /// Allocate an uninitialized buffer whose start address is 64-byte aligned.
+    ///
+    /// The contents are arbitrary until written; callers must initialize all
+    /// `nbytes` bytes before reading. Used where the caller copies a full
+    /// buffer in immediately, which would otherwise pay for `alloc_zeroed`'s
+    /// memset on top of its own write.
+    fn new_uninitialized(nbytes: usize) -> Self {
+        debug_assert_ne!(nbytes, 0);
+        let layout = Layout::from_size_align(nbytes, CACHE_LINE_ALIGN).expect("AlignedVec layout");
+        // SAFETY: `layout` has non-zero size and valid 64-byte alignment. The
+        // returned allocation is owned exclusively by this `AlignedVec` and is
+        // deallocated with the identical layout in `Drop`.
+        let ptr = unsafe { alloc(layout) };
+        if ptr.is_null() {
+            handle_alloc_error(layout);
+        }
+        AlignedVec { ptr, len: nbytes }
     }
 
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
