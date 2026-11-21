@@ -44,7 +44,7 @@ kernel expansion. CPU low-bit storage/compute-family policy is evaluated in
 |---|---|---|---|
 | Rust crate modules and root re-exports | `src/lib.rs` | Replace paths if a clean module boundary requires it; update internal callers together. | Rust integration tests. |
 | Graph API | `src/ir/builder.rs`, `src/ir/node.rs` | Rework types and paths when it clarifies ownership. | IR, shape-inference, quantized-pipeline tests. |
-| Tensor/eager API | `src/tensor/`, `src/nn/`, `src/optim/` | Change signatures only as part of an explicit redesign. | Rust library and Python API tests. |
+| Tensor/eager API | `src/tensor/`, `src/nn/` | Change signatures only as part of an explicit redesign. | Rust library and Python API tests. |
 | Python extension module | `src/python/mod.rs`, `pyproject.toml` | Registration and names may change with a deliberate binding redesign. | Build/install plus Python modular API smoke tests. |
 | Python facade | `fastnn/__init__.py` | Remove or rename façade aliases when a cleaner API warrants it. | Python import/API tests. |
 | CLI | `src/bin/fastnn-infer.rs`, `Cargo.toml` | 3.0 decoder CLI; the 2.x standalone target is retired. | `fn3_cli` smoke tests. |

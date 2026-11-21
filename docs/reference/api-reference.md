@@ -125,15 +125,15 @@ fnn.fused_conv_bn_silu(conv, bn, x)       # Conv + BN + SiLU
 | `fnn.Flatten(start, end)` | Flatten layer |
 | `fnn.ResidualBlock(...)` | ResNet BasicBlock |
 | `fnn.FusedConvBn(conv, bn)` | Fused Conv + BN (inference) |
-| `fnn.RNN(input_size, hidden_size, ...)` | RNN layer |
-| `fnn.LSTM(input_size, hidden_size, ...)` | LSTM layer |
-| `fnn.GRU(input_size, hidden_size, ...)` | GRU layer |
 | `fnn.Sequential([...])` | Sequential container |
 | `fnn.ModuleList([...])` | Module list container |
 
 **Activation layer classes:** `fnn.ReLU()`, `fnn.GELU()`, `fnn.Sigmoid()`, `fnn.Tanh()`, `fnn.SiLU()` (Swish), `fnn.LeakyReLU(negative_slope)`, `fnn.Softplus(beta, threshold)`, `fnn.Hardswish()`, `fnn.Elu(alpha)`, `fnn.Mish()`, `fnn.PReLU()`
 
-**Recurrent layers:** `fnn.RNN(input_size, hidden_size, num_layers, ...)`, `fnn.LSTM(...)`, `fnn.GRU(...)` all support `batch_first`, `dropout`, `bidirectional`, and return `(output, hidden)` tuples.
+**Recurrent graphs:** there is no Python layer class for RNN, LSTM or GRU.
+ONNX models containing `LSTM` or `GRU` nodes do import and execute through
+`src/onnx/converter.rs` and `fastnn/io/onnx.py`; build those graphs from ONNX
+rather than from the Python layer classes.
 
 ## Model I/O
 
