@@ -12,6 +12,24 @@ fn activation_fused_name(opcode: Opcode) -> Option<&'static str> {
     }
 }
 
+/// Whether the producer's kernel actually applies a fused activation.
+///
+/// The fusion is only a marker in `attrs["fused_op"]`: the producer keeps its
+/// own opcode and the backend has to translate the marker into a fused kernel
+/// name. Only the convolution, matmul and the arithmetic binary kernels do
+/// that. Fusing into anything else (concat, softmax, transpose, slice, pad,
+/// resize, a broadcast, ...) *deletes* the activation and silently changes the
+/// result, so the marker must not be written for those at all.
+///
+/// `Maximum`/`Minimum` are excluded on purpose: their dispatch arm rejects a
+/// `fused_op` marker, so tagging them would be an error rather than a fast path.
+fn supports_fused_activation(opcode: &Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::Conv2d | Opcode::MatMul | Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div
+    )
+}
+
 pub struct OpRelu;
 
 impl FusionPass for OpRelu {
@@ -42,6 +60,9 @@ impl FusionPass for OpRelu {
                 _ => {}
             }
             if op_node.attrs.contains_key("fused_op") {
+                continue;
+            }
+            if !supports_fused_activation(&op_node.opcode) {
                 continue;
             }
 
@@ -96,5 +117,82 @@ impl FusionPass for OpRelu {
         }
 
         Ok(fused)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{DimExpr, IrDType, TensorType};
+
+    fn shape() -> TensorType {
+        TensorType::new(
+            vec![
+                DimExpr::Known(1),
+                DimExpr::Known(4),
+                DimExpr::Known(8),
+                DimExpr::Known(8),
+            ],
+            IrDType::F32,
+        )
+    }
+
+    /// `x -> producer -> Relu -> consumer`, returning the producer and consumer
+    /// ids so a test can check whether the Relu survived.
+    fn build_chain(producer: Opcode) -> (ComputeGraph, NodeId, NodeId, NodeId) {
+        let mut graph = ComputeGraph::new();
+        let ty = shape();
+        let x = graph.add_node(Opcode::Input, vec![], ty.clone());
+        let y = graph.add_node(Opcode::Input, vec![], ty.clone());
+        let op = graph.add_node(producer, vec![x, y], ty.clone());
+        let relu = graph.add_node(Opcode::Relu, vec![op], ty.clone());
+        let consumer = graph.add_node(Opcode::Reshape, vec![relu], ty);
+        (graph, op, relu, consumer)
+    }
+
+    #[test]
+    fn fuses_into_the_operators_whose_kernels_apply_an_activation() {
+        for producer in [
+            Opcode::Add,
+            Opcode::Sub,
+            Opcode::Mul,
+            Opcode::Div,
+            Opcode::MatMul,
+        ] {
+            let (mut graph, op, relu, consumer) = build_chain(producer.clone());
+            assert!(
+                OpRelu::fuse(&mut graph).unwrap(),
+                "{producer:?} should fuse"
+            );
+            let node = graph.get_node(op).expect("producer survives");
+            assert_eq!(
+                node.attrs.get("fused_op").map(String::as_str),
+                Some("OpRelu")
+            );
+            assert!(graph.get_node(relu).is_none(), "{producer:?}: relu removed");
+            assert_eq!(graph.get_node(consumer).unwrap().inputs, vec![op]);
+        }
+    }
+
+    #[test]
+    fn keeps_the_activation_when_the_producer_cannot_apply_it() {
+        // Concat, Softmax, Transpose and friends ignore `fused_op`, so tagging
+        // them would silently drop the activation: the node has to stay.
+        for producer in [
+            Opcode::Concat,
+            Opcode::Softmax,
+            Opcode::Transpose,
+            Opcode::Maximum,
+        ] {
+            let (mut graph, op, relu, consumer) = build_chain(producer.clone());
+            assert!(
+                !OpRelu::fuse(&mut graph).unwrap(),
+                "{producer:?} must not fuse"
+            );
+            let node = graph.get_node(op).expect("producer survives");
+            assert!(!node.attrs.contains_key("fused_op"), "{producer:?}");
+            assert!(graph.get_node(relu).is_some(), "{producer:?}: relu kept");
+            assert_eq!(graph.get_node(consumer).unwrap().inputs, vec![relu]);
+        }
     }
 }
