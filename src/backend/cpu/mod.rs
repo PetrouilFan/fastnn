@@ -598,6 +598,152 @@ mod cpu_buffer_tests {
 /// CPU execution context. Zero allocation during dispatch.
 #[derive(Clone)]
 pub struct CpuBackend;
+/// Shape of the equivalent blocked 2-D transpose, when a rank-N permutation is
+/// the identity followed by a swap of two adjacent ascending axis groups, with
+/// an optional untouched tail of the same axes.
+///
+/// The result describes
+///
+/// ```text
+/// dst[((column * rows + row) * inner) + offset] = src[((row * columns + column) * inner) + offset]
+/// ```
+///
+/// per outer slab. Every `Transpose` a CNN graph asks for reduces to it:
+/// `(0,2,1)` on `[16,49,49]` is `outer=16, rows=49, columns=49, inner=1`;
+/// `(0,2,3,1)` on `[1,192,11,14]` is `outer=1, rows=192, columns=154, inner=1`;
+/// and an attention reshape `(0,1,3,2,4,5)` on `[1,2,7,2,7,192]` keeps its
+/// contiguous tail, so `outer=2, rows=7, columns=2, inner=1344`. Recognising
+/// those turns a per-element gather with one division per axis into a blocked
+/// copy that runs at memory speed.
+fn transpose_2d_shape(dims: &[usize], perm: &[usize]) -> Option<(usize, usize, usize, usize)> {
+    let rank = dims.len();
+    if rank == 0 || perm.len() != rank {
+        return None;
+    }
+    let product = |range: &[usize]| {
+        range
+            .iter()
+            .try_fold(1usize, |count, &dimension| count.checked_mul(dimension))
+    };
+    // Prefer the longest untouched tail: it becomes one contiguous block per
+    // `(row, column)` pair, which is both faster and the only decomposition the
+    // middle-swap permutations admit.
+    for tail in (0..=rank).rev() {
+        if perm[rank - tail..]
+            .iter()
+            .enumerate()
+            .any(|(offset, &moved)| moved != rank - tail + offset)
+        {
+            continue;
+        }
+        let reduced = rank - tail;
+        for split in 0..reduced.saturating_sub(1) {
+            if perm[..split]
+                .iter()
+                .enumerate()
+                .any(|(axis, &moved)| moved != axis)
+            {
+                continue;
+            }
+            for block in split + 1..reduced {
+                let leading = reduced - block;
+                let matches = perm[split..reduced]
+                    .iter()
+                    .enumerate()
+                    .all(|(offset, &moved)| {
+                        let want = if offset < leading {
+                            block + offset
+                        } else {
+                            split + (offset - leading)
+                        };
+                        moved == want
+                    });
+                if !matches {
+                    continue;
+                }
+                if let (Some(outer), Some(rows), Some(columns), Some(inner)) = (
+                    product(&dims[..split]),
+                    product(&dims[split..block]),
+                    product(&dims[block..reduced]),
+                    product(&dims[reduced..]),
+                ) {
+                    if outer > 0 && rows > 0 && columns > 0 && inner > 0 {
+                        return Some((outer, rows, columns, inner));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Apply the blocked transpose `transpose_2d_shape` returns.
+fn transpose_blocks_into(
+    input: &[f32],
+    output: &mut [f32],
+    outer: usize,
+    rows: usize,
+    columns: usize,
+    inner: usize,
+) {
+    if inner == 1 {
+        let slab = rows * columns;
+        for index in 0..outer {
+            transpose_2d_into(
+                &input[index * slab..(index + 1) * slab],
+                &mut output[index * slab..(index + 1) * slab],
+                rows,
+                columns,
+            );
+        }
+        return;
+    }
+    let slab = rows * columns * inner;
+    for index in 0..outer {
+        let source = &input[index * slab..(index + 1) * slab];
+        let destination = &mut output[index * slab..(index + 1) * slab];
+        for row in 0..rows {
+            for column in 0..columns {
+                let from = (row * columns + column) * inner;
+                let to = (column * rows + row) * inner;
+                destination[to..to + inner].copy_from_slice(&source[from..from + inner]);
+            }
+        }
+    }
+}
+
+/// `dst[column, row] = src[row, column]` for a `rows x columns` slab.
+fn transpose_2d_into(input: &[f32], output: &mut [f32], rows: usize, columns: usize) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() {
+        // SAFETY: the caller guarantees both slices hold `rows * columns`
+        // elements and that they do not overlap; the kernel writes every
+        // destination element exactly once, including the edge tiles.
+        unsafe {
+            microkernels::transpose_f32_avx2(input, output, rows, columns);
+        }
+        return;
+    }
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        output
+            .par_chunks_mut(rows)
+            .enumerate()
+            .for_each(|(column, part)| {
+                for (row, value) in part.iter_mut().enumerate() {
+                    *value = input[row * columns + column];
+                }
+            });
+    }
+    #[cfg(not(feature = "parallel"))]
+    for row in 0..rows {
+        let source = &input[row * columns..(row + 1) * columns];
+        for (column, &value) in source.iter().enumerate() {
+            output[column * rows + row] = value;
+        }
+    }
+}
 
 fn try_filled_vec<T: Clone>(len: usize, value: T, context: &str) -> Result<Vec<T>, BackendError> {
     let mut vector = Vec::new();
@@ -5125,12 +5271,19 @@ impl Backend for CpuBackend {
                                         )
                                     })?;
                             }
+                            let flat_transpose = transpose_2d_shape(dims, perm);
                             try_with_unary_f32_slices(
                                 arena,
                                 input_slice,
                                 output_slice,
                                 "transpose_perm_f32 input",
                                 |input, output| {
+                                    if let Some((outer, rows, columns, inner)) = flat_transpose {
+                                        transpose_blocks_into(
+                                            input, output, outer, rows, columns, inner,
+                                        );
+                                        return;
+                                    }
                                     for (output_index, value) in output.iter_mut().enumerate() {
                                         let mut remaining = output_index;
                                         let mut input_index = 0usize;
@@ -12099,4 +12252,82 @@ fn dispatch_matmul_fp32_with_view(
         out_f32[index] = act(x);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod transpose_2d_tests {
+    use super::*;
+
+    #[test]
+    fn the_permutations_a_cnn_graph_uses_reduce_to_a_blocked_transpose() {
+        // Attn: (0,2,1) on [16,49,49] — a plain 2-D transpose per head.
+        assert_eq!(
+            transpose_2d_shape(&[16, 49, 49], &[0, 2, 1]),
+            Some((16, 49, 49, 1))
+        );
+        // Channel-last: (0,2,3,1) on [1,192,11,14].
+        assert_eq!(
+            transpose_2d_shape(&[1, 192, 11, 14], &[0, 2, 3, 1]),
+            Some((1, 192, 154, 1))
+        );
+        // Overlapping windows: (0,3,1,2) on [4,7,7,192].
+        assert_eq!(
+            transpose_2d_shape(&[4, 7, 7, 192], &[0, 3, 1, 2]),
+            Some((4, 49, 192, 1))
+        );
+        // A middle swap keeps the contiguous tail: (0,1,3,2,4,5).
+        assert_eq!(
+            transpose_2d_shape(&[1, 2, 7, 2, 7, 192], &[0, 1, 3, 2, 4, 5]),
+            Some((2, 7, 2, 1344))
+        );
+        // A rank-two swap.
+        assert_eq!(transpose_2d_shape(&[3, 5], &[1, 0]), Some((1, 3, 5, 1)));
+        assert_eq!(
+            transpose_2d_shape(&[2, 3, 4], &[1, 0, 2]),
+            Some((1, 2, 3, 4))
+        );
+        // A full reversal, and two separate swaps, are not of this form.
+        assert_eq!(transpose_2d_shape(&[2, 3, 4], &[2, 1, 0]), None);
+        assert_eq!(transpose_2d_shape(&[2, 3, 4, 5], &[1, 0, 3, 2]), None);
+    }
+
+    #[test]
+    fn the_blocked_transpose_matches_a_naive_one() {
+        for &(outer, rows, columns, inner) in &[
+            (1usize, 1usize, 9usize, 1usize),
+            (1, 9, 1, 1),
+            (1, 5, 7, 1),
+            (2, 13, 9, 1),
+            (1, 8, 8, 1),
+            (3, 33, 17, 1),
+            (2, 7, 2, 5),
+            (1, 3, 4, 8),
+            (2, 1, 1, 16),
+        ] {
+            let total = outer * rows * columns * inner;
+            let input: Vec<f32> = (0..total).map(|index| index as f32 * 0.5).collect();
+            let mut expected = vec![0.0f32; total];
+            for slab in 0..outer {
+                for row in 0..rows {
+                    for column in 0..columns {
+                        for offset in 0..inner {
+                            let from = slab * rows * columns * inner
+                                + (row * columns + column) * inner
+                                + offset;
+                            let to = slab * rows * columns * inner
+                                + (column * rows + row) * inner
+                                + offset;
+                            expected[to] = input[from];
+                        }
+                    }
+                }
+            }
+            let mut actual = vec![0.0f32; total];
+            transpose_blocks_into(&input, &mut actual, outer, rows, columns, inner);
+            assert_eq!(
+                actual, expected,
+                "outer={outer}, rows={rows}, columns={columns}, inner={inner}"
+            );
+        }
+    }
 }
