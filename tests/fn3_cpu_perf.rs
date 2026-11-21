@@ -1359,6 +1359,26 @@ fn cases() -> Vec<KernelCase> {
             out: vec![10, 128],
             params: OpParams::default().with_epsilon(1e-5),
         },
+        // A broadcast where neither operand has the output length: this is the
+        // general path, which used to decode a coordinate per element. The
+        // per-channel scale `[1,128,1,1]` is the shape a LayerNorm or a
+        // quantised rescale actually produces.
+        KernelCase {
+            name: "add_broadcast_1x128x22x28",
+            op: OpId::Add,
+            lhs: vec![1, 128, 22, 28],
+            rhs: Some(vec![1, 128, 1, 1]),
+            out: vec![1, 128, 22, 28],
+            params: OpParams::default(),
+        },
+        KernelCase {
+            name: "add_broadcast_rows_1x128x22x28",
+            op: OpId::Add,
+            lhs: vec![1, 128, 22, 28],
+            rhs: Some(vec![1, 1, 22, 28]),
+            out: vec![1, 128, 22, 28],
+            params: OpParams::default(),
+        },
         KernelCase {
             name: "gelu_10x512",
             op: OpId::Gelu,
