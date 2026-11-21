@@ -339,9 +339,15 @@ pub fn direct_depthwise_conv3x3_f32(
     );
     let hw = h * w;
 
+    // The AVX2 flag is read by the dispatch below and, when the canary is on,
+    // by the trace that reports which path ran. Without `simd` there is no AVX2
+    // path to select, so the flag would be written and never read.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     let avx2 = padding == 1 && stride == 1 && is_x86_feature_detected!("avx2");
-    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    #[cfg(all(
+        not(all(feature = "simd", target_arch = "x86_64")),
+        feature = "debug_canary"
+    ))]
     let avx2 = false;
 
     #[cfg(feature = "debug_canary")]
