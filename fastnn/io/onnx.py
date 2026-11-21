@@ -60,11 +60,11 @@ def get_pooling_config(node, default_kernel=(2, 2)):
     kernel = _get_attr(node, "kernel_shape", list(default_kernel))
     stride = _get_attr(node, "strides", kernel)
     padding = _get_attr(node, "pads", [0, 0, 0, 0])
-    return {
-        "kernel_size": kernel[0] if isinstance(kernel, list) else kernel,
-        "stride": stride[0] if isinstance(stride, list) else stride,
-        "padding": padding[0] if isinstance(padding, list) else padding,
-    }
+    # Keep the per-axis lists intact. The Rust converter validates that every
+    # axis agrees and rejects a rectangular or asymmetric operator; collapsing
+    # to the first entry here is what silently turned a 2x3 pool into a 2x2 one
+    # and `pads=[0,0,1,1]` into no padding at all.
+    return {"kernel_size": kernel, "stride": stride, "padding": padding}
 
 
 def _get_attr(node: "onnx.NodeProto", name: str, default=None):
@@ -296,17 +296,15 @@ def _extract_attrs(onnx_node) -> Dict[str, Any]:
         attrs["padding"] = cfg["padding"]
         for k in ("kernel_shape", "strides", "pads"):
             attrs.pop(k, None)
-    if op == "Conv":
+    if op in ("Conv", "ConvTranspose"):
+        # Rename only. The per-axis lists stay whole so the Rust converter can
+        # check them: it takes one value per attribute and rejects a list whose
+        # entries differ, instead of silently using the first entry as padding,
+        # stride or dilation.
         for rename in (("strides", "stride"), ("pads", "padding"), ("dilations", "dilation")):
             if rename[0] in attrs:
-                v = attrs.pop(rename[0])
-                attrs[rename[1]] = v[0] if isinstance(v, list) else v
-    if op == "ConvTranspose":
-        for rename in (("strides", "stride"), ("pads", "padding"), ("dilations", "dilation")):
-            if rename[0] in attrs:
-                v = attrs.pop(rename[0])
-                attrs[rename[1]] = v[0] if isinstance(v, list) else v
-        if "output_padding" in attrs:
+                attrs[rename[1]] = attrs.pop(rename[0])
+        if op == "ConvTranspose" and "output_padding" in attrs:
             v = attrs["output_padding"]
             attrs["output_padding"] = v[0] if isinstance(v, list) else v
     if op == "Constant" and "value" in attrs:

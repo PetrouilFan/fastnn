@@ -427,24 +427,24 @@ impl<'a> OnnxConverter<'a> {
                 // "pads" → "padding", "dilations" → "dilation", and takes
                 // the first element for symmetric padding.
                 // Try both the Python-renamed name and the ONNX name.
-                let stride: usize = node
-                    .attrs
-                    .get("stride")
-                    .or_else(|| node.attrs.get("strides"))
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(1);
-                let padding: usize = node
-                    .attrs
-                    .get("padding")
-                    .or_else(|| node.attrs.get("pads"))
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
-                let dilation: usize = node
-                    .attrs
-                    .get("dilation")
-                    .or_else(|| node.attrs.get("dilations"))
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(1);
+                let stride = spatial_attr(
+                    &node.attrs,
+                    &["stride", "strides"],
+                    1,
+                    &format!("Conv '{}' strides", node.name),
+                )?;
+                let padding = pads_attr(
+                    &node.attrs,
+                    &["padding", "pads"],
+                    0,
+                    &format!("Conv '{}' pads", node.name),
+                )?;
+                let dilation = spatial_attr(
+                    &node.attrs,
+                    &["dilation", "dilations"],
+                    1,
+                    &format!("Conv '{}' dilations", node.name),
+                )?;
                 let group: usize = node
                     .attrs
                     .get("group")
@@ -467,21 +467,24 @@ impl<'a> OnnxConverter<'a> {
                 self.out(node, r);
             }
             "ConvTranspose" => {
-                let stride: usize = node
-                    .attrs
-                    .get("strides")
-                    .and_then(|s| s.split(',').next().and_then(|v| v.trim().parse().ok()))
-                    .unwrap_or(1);
-                let padding: usize = node
-                    .attrs
-                    .get("pads")
-                    .and_then(|s| s.split(',').next().and_then(|v| v.trim().parse().ok()))
-                    .unwrap_or(0);
-                let dilation: usize = node
-                    .attrs
-                    .get("dilations")
-                    .and_then(|s| s.split(',').next().and_then(|v| v.trim().parse().ok()))
-                    .unwrap_or(1);
+                let stride = spatial_attr(
+                    &node.attrs,
+                    &["stride", "strides"],
+                    1,
+                    &format!("ConvTranspose '{}' strides", node.name),
+                )?;
+                let padding = pads_attr(
+                    &node.attrs,
+                    &["padding", "pads"],
+                    0,
+                    &format!("ConvTranspose '{}' pads", node.name),
+                )?;
+                let dilation = spatial_attr(
+                    &node.attrs,
+                    &["dilation", "dilations"],
+                    1,
+                    &format!("ConvTranspose '{}' dilations", node.name),
+                )?;
                 let _groups: usize = node
                     .attrs
                     .get("group")
@@ -499,24 +502,24 @@ impl<'a> OnnxConverter<'a> {
             // Note: Python _extract_attrs renames "kernel_shape" → "kernel_size",
             // "strides" → "stride" for pooling ops. Try both.
             "MaxPool" => {
-                let k: usize = node
-                    .attrs
-                    .get("kernel_size")
-                    .or_else(|| node.attrs.get("kernel_shape"))
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(2);
-                let s: usize = node
-                    .attrs
-                    .get("stride")
-                    .or_else(|| node.attrs.get("strides"))
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(k);
-                let p: usize = node
-                    .attrs
-                    .get("padding")
-                    .or_else(|| node.attrs.get("pads"))
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0);
+                let k = spatial_attr(
+                    &node.attrs,
+                    &["kernel_size", "kernel_shape"],
+                    2,
+                    &format!("MaxPool '{}' kernel_shape", node.name),
+                )?;
+                let s = spatial_attr(
+                    &node.attrs,
+                    &["stride", "strides"],
+                    k,
+                    &format!("MaxPool '{}' strides", node.name),
+                )?;
+                let p = pads_attr(
+                    &node.attrs,
+                    &["padding", "pads"],
+                    0,
+                    &format!("MaxPool '{}' pads", node.name),
+                )?;
                 let (_values, indices) = self.graph.max_pool2d(&ins[0], k, s, p);
                 self.out(node, _values);
                 if let Some(idx_out) = node.outputs.get(1) {
@@ -524,24 +527,24 @@ impl<'a> OnnxConverter<'a> {
                 }
             }
             "AveragePool" => {
-                let k: usize = node
-                    .attrs
-                    .get("kernel_size")
-                    .or_else(|| node.attrs.get("kernel_shape"))
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(2);
-                let s: usize = node
-                    .attrs
-                    .get("stride")
-                    .or_else(|| node.attrs.get("strides"))
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(k);
-                let p: usize = node
-                    .attrs
-                    .get("padding")
-                    .or_else(|| node.attrs.get("pads"))
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0);
+                let k = spatial_attr(
+                    &node.attrs,
+                    &["kernel_size", "kernel_shape"],
+                    2,
+                    &format!("AveragePool '{}' kernel_shape", node.name),
+                )?;
+                let s = spatial_attr(
+                    &node.attrs,
+                    &["stride", "strides"],
+                    k,
+                    &format!("AveragePool '{}' strides", node.name),
+                )?;
+                let p = pads_attr(
+                    &node.attrs,
+                    &["padding", "pads"],
+                    0,
+                    &format!("AveragePool '{}' pads", node.name),
+                )?;
                 self.out(node, self.graph.avg_pool2d(&ins[0], k, s, p));
             }
             "GlobalAveragePool" => {
@@ -2076,6 +2079,81 @@ fn parse_ints_i64(attrs: &HashMap<String, String>, key: &str, default: &[i64]) -
         .unwrap_or_else(|| default.to_vec())
 }
 
+/// Split an ONNX spatial attribute into its integer entries.
+fn spatial_values(raw: &str, what: &str) -> Result<Vec<isize>, String> {
+    let mut values = Vec::new();
+    for part in raw.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        values.push(
+            part.parse::<isize>()
+                .map_err(|_| format!("{what} '{raw}' is not a list of integers"))?,
+        );
+    }
+    Ok(values)
+}
+
+/// Read a spatial attribute ONNX stores once per axis.
+///
+/// `strides`, `dilations` and `kernel_shape` carry one entry per spatial axis,
+/// while the 2.x conv and pooling operators apply a single value to both axes.
+/// A rectangular attribute is therefore rejected: taking its first entry
+/// silently computed a differently shaped operator (a 2x3 pool became 2x2, and
+/// a 2x1 stride became 2x2) with no diagnostic anywhere.
+fn spatial_attr(
+    attrs: &HashMap<String, String>,
+    keys: &[&str],
+    default: usize,
+    what: &str,
+) -> Result<usize, String> {
+    let Some(raw) = keys.iter().find_map(|key| attrs.get(*key)) else {
+        return Ok(default);
+    };
+    let values = spatial_values(raw, what)?;
+    let Some(&first) = values.first() else {
+        return Ok(default);
+    };
+    if values.iter().any(|value| *value != first) {
+        return Err(format!(
+            "{what} '{raw}' differs per axis; these operators take one value for every axis"
+        ));
+    }
+    usize::try_from(first).map_err(|_| format!("{what} '{raw}' is negative"))
+}
+
+/// Read `pads`, which ONNX stores as (begin, end) per spatial axis.
+///
+/// The 2.x operators express symmetric padding only, so every entry has to be
+/// the same number. Collapsing `pads=[0,0,1,1]` to its first entry turned a
+/// bottom/right pad into no padding at all, which changed the output shape.
+fn pads_attr(
+    attrs: &HashMap<String, String>,
+    keys: &[&str],
+    default: usize,
+    what: &str,
+) -> Result<usize, String> {
+    let Some(raw) = keys.iter().find_map(|key| attrs.get(*key)) else {
+        return Ok(default);
+    };
+    let values = spatial_values(raw, what)?;
+    let Some(&first) = values.first() else {
+        return Ok(default);
+    };
+    if values.len() % 2 != 0 {
+        return Err(format!(
+            "{what} '{raw}' is not a (begin, end) pair per axis"
+        ));
+    }
+    if values.iter().any(|value| *value != first) {
+        return Err(format!(
+            "{what} '{raw}' is asymmetric or differs per axis; the 2.x operators express symmetric padding only"
+        ));
+    }
+    usize::try_from(first).map_err(|_| format!("{what} '{raw}' is negative"))
+}
+
 /// Parse an ONNX axes attribute (CSV of i64) into a `Vec<usize>` of
 /// non-negative axis indices, normalizing negative axes against the rank
 /// of `input`. Returns `None` when the attribute is absent or empty so
@@ -2346,5 +2424,62 @@ mod tests {
             .expect_err("symbolic Split must fail until it has real lowering");
 
         assert!(error.contains("dynamic Split lowering is not yet supported"));
+    }
+    #[test]
+    fn a_spatial_attribute_must_agree_on_every_axis() {
+        let mut attrs = HashMap::new();
+        // What the Python importer sends for a symmetric conv.
+        attrs.insert("stride".to_string(), "2,2".to_string());
+        attrs.insert("dilation".to_string(), "1,1".to_string());
+        assert_eq!(
+            spatial_attr(&attrs, &["stride", "strides"], 1, "strides"),
+            Ok(2)
+        );
+        assert_eq!(spatial_attr(&attrs, &["dilation"], 1, "dilations"), Ok(1));
+        // A bare scalar is what a layer summary writes.
+        attrs.insert("stride".to_string(), "3".to_string());
+        assert_eq!(spatial_attr(&attrs, &["stride"], 1, "strides"), Ok(3));
+        // Absent means the default.
+        assert_eq!(spatial_attr(&attrs, &["absent"], 7, "strides"), Ok(7));
+
+        // Rectangular: taking the first entry silently changed the operator.
+        attrs.insert("stride".to_string(), "2,1".to_string());
+        let error = spatial_attr(&attrs, &["stride"], 1, "strides").expect_err("rectangular");
+        assert!(error.contains("differs per axis"), "{error}");
+
+        attrs.insert("stride".to_string(), "-2,-2".to_string());
+        let error = spatial_attr(&attrs, &["stride"], 1, "strides").expect_err("negative");
+        assert!(error.contains("negative"), "{error}");
+
+        attrs.insert("stride".to_string(), "two".to_string());
+        let error = spatial_attr(&attrs, &["stride"], 1, "strides").expect_err("not a number");
+        assert!(error.contains("not a list of integers"), "{error}");
+    }
+
+    #[test]
+    fn padding_must_be_symmetric() {
+        let mut attrs = HashMap::new();
+        attrs.insert("padding".to_string(), "1,1,1,1".to_string());
+        assert_eq!(pads_attr(&attrs, &["padding"], 0, "pads"), Ok(1));
+        attrs.insert("padding".to_string(), "0,0,0,0".to_string());
+        assert_eq!(pads_attr(&attrs, &["padding"], 0, "pads"), Ok(0));
+
+        // The case that used to become "no padding at all".
+        attrs.insert("padding".to_string(), "0,0,1,1".to_string());
+        let error = pads_attr(&attrs, &["padding"], 0, "pads").expect_err("asymmetric");
+        assert!(error.contains("asymmetric"), "{error}");
+
+        // A per-axis difference without being asymmetric in the usual sense.
+        attrs.insert("padding".to_string(), "1,1,2,2".to_string());
+        assert!(pads_attr(&attrs, &["padding"], 0, "pads").is_err());
+
+        // `pads` is two entries per axis.
+        attrs.insert("padding".to_string(), "1,1,1".to_string());
+        let error = pads_attr(&attrs, &["padding"], 0, "pads").expect_err("odd length");
+        assert!(error.contains("(begin, end) pair"), "{error}");
+
+        // Negative padding narrows the input; the operator cannot express it.
+        attrs.insert("padding".to_string(), "-1,-1,-1,-1".to_string());
+        assert!(pads_attr(&attrs, &["padding"], 0, "pads").is_err());
     }
 }
