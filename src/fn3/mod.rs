@@ -64,6 +64,7 @@ pub mod ir;
 pub mod model;
 pub mod ops;
 pub mod quant;
+pub mod runtime;
 pub mod shape;
 pub mod storage;
 pub mod tensor;
@@ -75,6 +76,10 @@ pub use dtype::DType;
 pub use error::{Fn3Error, Fn3Result};
 pub use model::{ExecutionPlan, Instruction, ModelWeights, PreparedModel, Session};
 pub use ops::OpId;
+pub use runtime::{
+    Arena as RuntimeArena, HostTensor, Plan as RuntimePlan, Segment, SegmentOp,
+    Session as RuntimeSession, SessionThreads, Slot, SlotId, SlotSource, Threading,
+};
 pub use shape::{DimBound, LiveDims, Shape, ShapeEnvelope, Strides, Symbol};
 pub use storage::{AlignedBuffer, Storage};
 pub use tensor::{Tensor, TensorMeta, TensorMut, TensorView};

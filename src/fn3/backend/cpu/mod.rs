@@ -291,6 +291,250 @@ impl Backend for CpuBackend {
     }
 }
 
+/// Execute one op through the reference kernels, without a backend handle.
+///
+/// This is the one dispatch table for the 40 ops the alpha CPU reference has
+/// always executed, split out of [`CpuBackend::dispatch`] so the v3 segment
+/// executor ([`crate::inference::runtime`]) can call the *same* kernel functions
+/// over arena-backed views instead of keeping a second copy of the table. It
+/// never asks [`Support`]: the caller has already decided to execute.
+///
+/// `threads` is the per-call budget the legacy kernels use for `MatMul`; the v3
+/// executor passes `1`, so a legacy op runs on one thread and cannot reach
+/// Rayon's process-wide pool. The twelve CNN ids are not part of this table:
+/// they live in [`crate::inference::runtime::kernels`], and both callers route
+/// them there.
+pub(crate) fn dispatch_kernels(
+    op: OpId,
+    inputs: &[TensorView<'_>],
+    outputs: &mut [TensorMut<'_>],
+    params: &OpParams,
+    threads: usize,
+) -> Result<(), Fn3Error> {
+    use kernels::{elementwise, logic, matmul, norm, reduce, softmax, transform};
+
+    match op {
+        // -- linear algebra ------------------------------------------
+        OpId::MatMul => {
+            check_arity(op, inputs.len(), outputs.len(), 2, 1)?;
+            kernels::require_no_attributes(op, params)?;
+            matmul::matmul(op, &inputs[0], &inputs[1], &mut outputs[0], threads)
+        }
+
+        // -- elementwise arithmetic ----------------------------------
+        OpId::Add | OpId::Sub | OpId::Mul | OpId::Div | OpId::Pow => {
+            check_arity(op, inputs.len(), outputs.len(), 2, 1)?;
+            kernels::require_no_attributes(op, params)?;
+            // The importer preserves the `i64` shape arithmetic an exporter
+            // emits; the `f32` kernel is the numerical reference and stays
+            // `f32`-only, so integer operands go to the integer sibling.
+            if inputs[0].dtype() == DType::I64 || inputs[1].dtype() == DType::I64 {
+                return crate::inference::runtime::kernels::int::run(op, inputs, outputs);
+            }
+            match op {
+                OpId::Add => elementwise::add(op, &inputs[0], &inputs[1], &mut outputs[0]),
+                OpId::Sub => elementwise::sub(op, &inputs[0], &inputs[1], &mut outputs[0]),
+                OpId::Mul => elementwise::mul(op, &inputs[0], &inputs[1], &mut outputs[0]),
+                OpId::Div => elementwise::div(op, &inputs[0], &inputs[1], &mut outputs[0]),
+                OpId::Pow => elementwise::pow(op, &inputs[0], &inputs[1], &mut outputs[0]),
+                other => unreachable!("matched a binary op: {other}"),
+            }
+        }
+        OpId::Neg
+        | OpId::Sqrt
+        | OpId::Erf
+        | OpId::Tanh
+        | OpId::Gelu
+        | OpId::Relu
+        | OpId::Sin
+        | OpId::Cos => {
+            check_arity(op, inputs.len(), outputs.len(), 1, 1)?;
+            kernels::require_no_attributes(op, params)?;
+            if op == OpId::Neg && inputs[0].dtype() == DType::I64 {
+                return crate::inference::runtime::kernels::int::run(op, inputs, outputs);
+            }
+            match op {
+                OpId::Neg => elementwise::neg(op, &inputs[0], &mut outputs[0]),
+                OpId::Sqrt => elementwise::sqrt(op, &inputs[0], &mut outputs[0]),
+                OpId::Erf => elementwise::erf(op, &inputs[0], &mut outputs[0]),
+                OpId::Tanh => elementwise::tanh(op, &inputs[0], &mut outputs[0]),
+                OpId::Gelu => elementwise::gelu(op, &inputs[0], &mut outputs[0]),
+                OpId::Relu => elementwise::relu(op, &inputs[0], &mut outputs[0]),
+                OpId::Sin => elementwise::sin(op, &inputs[0], &mut outputs[0]),
+                OpId::Cos => elementwise::cos(op, &inputs[0], &mut outputs[0]),
+                other => unreachable!("matched a unary op: {other}"),
+            }
+        }
+
+        // -- normalization and reduction ------------------------------
+        OpId::Softmax => {
+            check_arity(op, inputs.len(), outputs.len(), 1, 1)?;
+            kernels::require_only_axes(op, params)?;
+            softmax::softmax(op, &inputs[0], &mut outputs[0], params)
+        }
+        OpId::LayerNorm => {
+            check_arity(op, inputs.len(), outputs.len(), 3, 1)?;
+            kernels::require_axes_and_epsilon(op, params)?;
+            norm::layer_norm(
+                op,
+                &inputs[0],
+                &inputs[1],
+                &inputs[2],
+                &mut outputs[0],
+                params,
+            )
+        }
+        OpId::ReduceMean | OpId::ReduceSum => {
+            check_arity(op, inputs.len(), outputs.len(), 1, 1)?;
+            kernels::require_axes_and_keep_dims(op, params)?;
+            reduce::reduce(
+                op,
+                &inputs[0],
+                &mut outputs[0],
+                params,
+                op == OpId::ReduceMean,
+            )
+        }
+        OpId::ArgMax => {
+            check_arity(op, inputs.len(), outputs.len(), 1, 1)?;
+            kernels::require_axes_and_keep_dims(op, params)?;
+            reduce::argmax(op, &inputs[0], &mut outputs[0], params)
+        }
+
+        // -- data movement --------------------------------------------
+        OpId::Gather => {
+            check_arity(op, inputs.len(), outputs.len(), 2, 1)?;
+            kernels::require_only_axes(op, params)?;
+            transform::gather(op, &inputs[0], &inputs[1], &mut outputs[0], params)
+        }
+        OpId::Transpose => {
+            check_arity(op, inputs.len(), outputs.len(), 1, 1)?;
+            kernels::require_only_axes(op, params)?;
+            transform::transpose(op, &inputs[0], &mut outputs[0], params)
+        }
+        // The typed IR folds the target shape into `OpParams::axes`, so the
+        // adapter in `runtime::kernels::data` accepts either form.
+        OpId::Reshape => crate::inference::runtime::kernels::data::run(op, inputs, outputs, params),
+        OpId::Flatten => {
+            check_arity(op, inputs.len(), outputs.len(), 1, 1)?;
+            kernels::require_only_axes(op, params)?;
+            transform::flatten(op, &inputs[0], &mut outputs[0], params)
+        }
+        OpId::Squeeze | OpId::Unsqueeze => {
+            check_flexible_arity(op, inputs.len(), outputs.len(), &[1, 2], 1)?;
+            kernels::require_only_axes(op, params)?;
+            let axes_input = inputs.get(1);
+            if op == OpId::Squeeze {
+                transform::squeeze(op, &inputs[0], axes_input, &mut outputs[0], params)
+            } else {
+                transform::unsqueeze(op, &inputs[0], axes_input, &mut outputs[0], params)
+            }
+        }
+        OpId::Concat => {
+            if inputs.is_empty() || outputs.len() != 1 {
+                return Err(Fn3Error::ArityMismatch {
+                    op,
+                    expected_inputs: 1,
+                    actual_inputs: inputs.len(),
+                    expected_outputs: 1,
+                    actual_outputs: outputs.len(),
+                });
+            }
+            kernels::require_only_axes(op, params)?;
+            transform::concat(op, inputs, &mut outputs[0], params)
+        }
+        // Both accept the IR's folded constants (`slice_starts`/`split_sizes`)
+        // as well as the ONNX operand form.
+        OpId::Slice | OpId::Split => {
+            crate::inference::runtime::kernels::data::run(op, inputs, outputs, params)
+        }
+        OpId::Expand => {
+            check_arity(op, inputs.len(), outputs.len(), 2, 1)?;
+            kernels::require_no_attributes(op, params)?;
+            transform::expand(op, &inputs[0], &inputs[1], &mut outputs[0])
+        }
+
+        // -- shape ----------------------------------------------------
+        OpId::Shape => {
+            check_arity(op, inputs.len(), outputs.len(), 1, 1)?;
+            kernels::require_no_attributes(op, params)?;
+            transform::shape_of(op, &inputs[0], &mut outputs[0])
+        }
+        OpId::ConstantOfShape => {
+            check_arity(op, inputs.len(), outputs.len(), 2, 1)?;
+            kernels::require_no_attributes(op, params)?;
+            transform::constant_of_shape(op, &inputs[0], &inputs[1], &mut outputs[0])
+        }
+        OpId::Range => {
+            check_arity(op, inputs.len(), outputs.len(), 3, 1)?;
+            kernels::require_no_attributes(op, params)?;
+            transform::range(op, &inputs[0], &inputs[1], &inputs[2], &mut outputs[0])
+        }
+
+        // -- conversion and comparison --------------------------------
+        OpId::Cast => {
+            check_arity(op, inputs.len(), outputs.len(), 1, 1)?;
+            kernels::require_no_attributes(op, params)?;
+            elementwise::cast(op, &inputs[0], &mut outputs[0])
+        }
+        OpId::Equal | OpId::Less | OpId::Greater => {
+            check_arity(op, inputs.len(), outputs.len(), 2, 1)?;
+            kernels::require_no_attributes(op, params)?;
+            let comparison = match op {
+                OpId::Equal => logic::Comparison::Equal,
+                OpId::Less => logic::Comparison::Less,
+                _ => logic::Comparison::Greater,
+            };
+            logic::compare(op, comparison, &inputs[0], &inputs[1], &mut outputs[0])
+        }
+        OpId::Where => {
+            check_arity(op, inputs.len(), outputs.len(), 3, 1)?;
+            kernels::require_no_attributes(op, params)?;
+            logic::where_select(op, &inputs[0], &inputs[1], &inputs[2], &mut outputs[0])
+        }
+        OpId::Trilu => {
+            check_flexible_arity(op, inputs.len(), outputs.len(), &[1, 2], 1)?;
+            kernels::require_only_axes(op, params)?;
+            logic::trilu(op, &inputs[0], inputs.get(1), &mut outputs[0], params)
+        }
+        OpId::ScatterND => {
+            check_arity(op, inputs.len(), outputs.len(), 3, 1)?;
+            kernels::require_no_attributes(op, params)?;
+            logic::scatter_nd(op, &inputs[0], &inputs[1], &inputs[2], &mut outputs[0])
+        }
+
+        // -- the twelve CNN ids (owned by the v3 segment kernels) ------
+        OpId::Conv
+        | OpId::MaxPool
+        | OpId::AveragePool
+        | OpId::GlobalAveragePool
+        | OpId::BatchNorm
+        | OpId::Resize
+        | OpId::Pad
+        | OpId::Clip
+        | OpId::Sigmoid
+        | OpId::Maximum
+        | OpId::Minimum
+        | OpId::TopK => {
+            crate::inference::runtime::kernels::dispatch(op, inputs, outputs, params, None)
+        }
+
+        // -- reserved fused id ---------------------------------------
+        OpId::MaskedAttention => {
+            // `preflight` already rejected this id; it is matched so that a
+            // future capability change cannot silently fall through.
+            Err(Fn3Error::UnsupportedOp {
+                op,
+                backend: CPU_BACKEND_NAME,
+                reason: "the fused attention id belongs to FN3-15 (#61); the CPU backend \
+                         computes attention by decomposition and does not approximate the \
+                         fused op"
+                    .to_string(),
+            })
+        }
+    }
+}
+
 impl CpuBackend {
     fn dispatch(
         &self,
@@ -299,253 +543,18 @@ impl CpuBackend {
         outputs: &mut [TensorMut<'_>],
         params: &OpParams,
     ) -> Result<(), Fn3Error> {
-        use kernels::{elementwise, logic, matmul, norm, reduce, softmax, transform};
-
-        match op {
-            // -- linear algebra ------------------------------------------
-            OpId::MatMul => {
-                check_arity(op, inputs.len(), outputs.len(), 2, 1)?;
-                kernels::require_no_attributes(op, params)?;
-                let threads = self.threads();
-                // One output row is the shape of every one-token projection; the
-                // MAC count decides whether that projection could use threads at
-                // all, which is what the narrowing rule keys on.
-                let dims = outputs[0].shape().dims();
-                if dims.len() >= 2 && dims[dims.len() - 2] == 1 {
-                    let columns = dims[dims.len() - 1];
-                    let inner = inputs[0].shape().dims()[inputs[0].shape().rank() - 1];
-                    self.note_decode_shaped(inner.saturating_mul(columns));
-                }
-                matmul::matmul(op, &inputs[0], &inputs[1], &mut outputs[0], threads)
-            }
-
-            // -- elementwise arithmetic ----------------------------------
-            OpId::Add | OpId::Sub | OpId::Mul | OpId::Div | OpId::Pow => {
-                check_arity(op, inputs.len(), outputs.len(), 2, 1)?;
-                kernels::require_no_attributes(op, params)?;
-                match op {
-                    OpId::Add => elementwise::add(op, &inputs[0], &inputs[1], &mut outputs[0]),
-                    OpId::Sub => elementwise::sub(op, &inputs[0], &inputs[1], &mut outputs[0]),
-                    OpId::Mul => elementwise::mul(op, &inputs[0], &inputs[1], &mut outputs[0]),
-                    OpId::Div => elementwise::div(op, &inputs[0], &inputs[1], &mut outputs[0]),
-                    OpId::Pow => elementwise::pow(op, &inputs[0], &inputs[1], &mut outputs[0]),
-                    other => unreachable!("matched a binary op: {other}"),
-                }
-            }
-            OpId::Neg
-            | OpId::Sqrt
-            | OpId::Erf
-            | OpId::Tanh
-            | OpId::Gelu
-            | OpId::Relu
-            | OpId::Sin
-            | OpId::Cos => {
-                check_arity(op, inputs.len(), outputs.len(), 1, 1)?;
-                kernels::require_no_attributes(op, params)?;
-                match op {
-                    OpId::Neg => elementwise::neg(op, &inputs[0], &mut outputs[0]),
-                    OpId::Sqrt => elementwise::sqrt(op, &inputs[0], &mut outputs[0]),
-                    OpId::Erf => elementwise::erf(op, &inputs[0], &mut outputs[0]),
-                    OpId::Tanh => elementwise::tanh(op, &inputs[0], &mut outputs[0]),
-                    OpId::Gelu => elementwise::gelu(op, &inputs[0], &mut outputs[0]),
-                    OpId::Relu => elementwise::relu(op, &inputs[0], &mut outputs[0]),
-                    OpId::Sin => elementwise::sin(op, &inputs[0], &mut outputs[0]),
-                    OpId::Cos => elementwise::cos(op, &inputs[0], &mut outputs[0]),
-                    other => unreachable!("matched a unary op: {other}"),
-                }
-            }
-
-            // -- normalization and reduction ------------------------------
-            OpId::Softmax => {
-                check_arity(op, inputs.len(), outputs.len(), 1, 1)?;
-                kernels::require_only_axes(op, params)?;
-                softmax::softmax(op, &inputs[0], &mut outputs[0], params)
-            }
-            OpId::LayerNorm => {
-                check_arity(op, inputs.len(), outputs.len(), 3, 1)?;
-                kernels::require_axes_and_epsilon(op, params)?;
-                norm::layer_norm(
-                    op,
-                    &inputs[0],
-                    &inputs[1],
-                    &inputs[2],
-                    &mut outputs[0],
-                    params,
-                )
-            }
-            OpId::ReduceMean | OpId::ReduceSum => {
-                check_arity(op, inputs.len(), outputs.len(), 1, 1)?;
-                kernels::require_axes_and_keep_dims(op, params)?;
-                reduce::reduce(
-                    op,
-                    &inputs[0],
-                    &mut outputs[0],
-                    params,
-                    op == OpId::ReduceMean,
-                )
-            }
-            OpId::ArgMax => {
-                check_arity(op, inputs.len(), outputs.len(), 1, 1)?;
-                kernels::require_axes_and_keep_dims(op, params)?;
-                reduce::argmax(op, &inputs[0], &mut outputs[0], params)
-            }
-
-            // -- data movement --------------------------------------------
-            OpId::Gather => {
-                check_arity(op, inputs.len(), outputs.len(), 2, 1)?;
-                kernels::require_only_axes(op, params)?;
-                transform::gather(op, &inputs[0], &inputs[1], &mut outputs[0], params)
-            }
-            OpId::Transpose => {
-                check_arity(op, inputs.len(), outputs.len(), 1, 1)?;
-                kernels::require_only_axes(op, params)?;
-                transform::transpose(op, &inputs[0], &mut outputs[0], params)
-            }
-            OpId::Reshape => {
-                check_arity(op, inputs.len(), outputs.len(), 2, 1)?;
-                kernels::require_no_attributes(op, params)?;
-                transform::reshape(op, &inputs[0], &inputs[1], &mut outputs[0])
-            }
-            OpId::Flatten => {
-                check_arity(op, inputs.len(), outputs.len(), 1, 1)?;
-                kernels::require_only_axes(op, params)?;
-                transform::flatten(op, &inputs[0], &mut outputs[0], params)
-            }
-            OpId::Squeeze | OpId::Unsqueeze => {
-                check_flexible_arity(op, inputs.len(), outputs.len(), &[1, 2], 1)?;
-                kernels::require_only_axes(op, params)?;
-                let axes_input = inputs.get(1);
-                if op == OpId::Squeeze {
-                    transform::squeeze(op, &inputs[0], axes_input, &mut outputs[0], params)
-                } else {
-                    transform::unsqueeze(op, &inputs[0], axes_input, &mut outputs[0], params)
-                }
-            }
-            OpId::Concat => {
-                if inputs.is_empty() || outputs.len() != 1 {
-                    return Err(Fn3Error::ArityMismatch {
-                        op,
-                        expected_inputs: 1,
-                        actual_inputs: inputs.len(),
-                        expected_outputs: 1,
-                        actual_outputs: outputs.len(),
-                    });
-                }
-                kernels::require_only_axes(op, params)?;
-                transform::concat(op, inputs, &mut outputs[0], params)
-            }
-            OpId::Slice => {
-                check_flexible_arity(op, inputs.len(), outputs.len(), &[2, 3, 4, 5], 1)?;
-                kernels::require_no_attributes(op, params)?;
-                transform::slice(
-                    op,
-                    &inputs[0],
-                    &inputs[1],
-                    &inputs[2],
-                    inputs.get(3),
-                    inputs.get(4),
-                    &mut outputs[0],
-                )
-            }
-            OpId::Split => {
-                check_flexible_arity(op, inputs.len(), outputs.len(), &[1, 2], 1)?;
-                kernels::require_only_axes(op, params)?;
-                transform::split(op, &inputs[0], inputs.get(1), outputs, params)
-            }
-            OpId::Expand => {
-                check_arity(op, inputs.len(), outputs.len(), 2, 1)?;
-                kernels::require_no_attributes(op, params)?;
-                transform::expand(op, &inputs[0], &inputs[1], &mut outputs[0])
-            }
-
-            // -- shape ----------------------------------------------------
-            OpId::Shape => {
-                check_arity(op, inputs.len(), outputs.len(), 1, 1)?;
-                kernels::require_no_attributes(op, params)?;
-                transform::shape_of(op, &inputs[0], &mut outputs[0])
-            }
-            OpId::ConstantOfShape => {
-                check_arity(op, inputs.len(), outputs.len(), 2, 1)?;
-                kernels::require_no_attributes(op, params)?;
-                transform::constant_of_shape(op, &inputs[0], &inputs[1], &mut outputs[0])
-            }
-            OpId::Range => {
-                check_arity(op, inputs.len(), outputs.len(), 3, 1)?;
-                kernels::require_no_attributes(op, params)?;
-                transform::range(op, &inputs[0], &inputs[1], &inputs[2], &mut outputs[0])
-            }
-
-            // -- conversion and comparison --------------------------------
-            OpId::Cast => {
-                check_arity(op, inputs.len(), outputs.len(), 1, 1)?;
-                kernels::require_no_attributes(op, params)?;
-                elementwise::cast(op, &inputs[0], &mut outputs[0])
-            }
-            OpId::Equal | OpId::Less | OpId::Greater => {
-                check_arity(op, inputs.len(), outputs.len(), 2, 1)?;
-                kernels::require_no_attributes(op, params)?;
-                let comparison = match op {
-                    OpId::Equal => logic::Comparison::Equal,
-                    OpId::Less => logic::Comparison::Less,
-                    _ => logic::Comparison::Greater,
-                };
-                logic::compare(op, comparison, &inputs[0], &inputs[1], &mut outputs[0])
-            }
-            OpId::Where => {
-                check_arity(op, inputs.len(), outputs.len(), 3, 1)?;
-                kernels::require_no_attributes(op, params)?;
-                logic::where_select(op, &inputs[0], &inputs[1], &inputs[2], &mut outputs[0])
-            }
-            OpId::Trilu => {
-                check_flexible_arity(op, inputs.len(), outputs.len(), &[1, 2], 1)?;
-                kernels::require_only_axes(op, params)?;
-                logic::trilu(op, &inputs[0], inputs.get(1), &mut outputs[0], params)
-            }
-            OpId::ScatterND => {
-                check_arity(op, inputs.len(), outputs.len(), 3, 1)?;
-                kernels::require_no_attributes(op, params)?;
-                logic::scatter_nd(op, &inputs[0], &inputs[1], &inputs[2], &mut outputs[0])
-            }
-
-            // -- imported CNN ops without a kernel ------------------------
-            OpId::Conv
-            | OpId::MaxPool
-            | OpId::AveragePool
-            | OpId::GlobalAveragePool
-            | OpId::BatchNorm
-            | OpId::Resize
-            | OpId::Pad
-            | OpId::Clip
-            | OpId::Sigmoid
-            | OpId::Maximum
-            | OpId::Minimum
-            | OpId::TopK => {
-                // `preflight` already rejected these ids; the arm keeps the
-                // match exhaustive and the reason identical to `supports`.
-                Err(Fn3Error::UnsupportedOp {
-                    op,
-                    backend: CPU_BACKEND_NAME,
-                    reason: support::support(op)
-                        .reason()
-                        .unwrap_or("no execution kernel exists yet")
-                        .to_string(),
-                })
-            }
-
-            // -- reserved fused id ---------------------------------------
-            OpId::MaskedAttention => {
-                // `preflight` already rejected this id; it is matched so that a
-                // future capability change cannot silently fall through.
-                Err(Fn3Error::UnsupportedOp {
-                    op,
-                    backend: CPU_BACKEND_NAME,
-                    reason: "the fused attention id belongs to FN3-15 (#61); the CPU backend \
-                             computes attention by decomposition and does not approximate the \
-                             fused op"
-                        .to_string(),
-                })
+        // One output row is the shape of every one-token projection; the
+        // MAC count decides whether that projection could use threads at
+        // all, which is what the narrowing rule keys on.
+        if op == OpId::MatMul {
+            let dims = outputs[0].shape().dims();
+            if dims.len() >= 2 && dims[dims.len() - 2] == 1 {
+                let columns = dims[dims.len() - 1];
+                let inner = inputs[0].shape().dims()[inputs[0].shape().rank() - 1];
+                self.note_decode_shaped(inner.saturating_mul(columns));
             }
         }
+        dispatch_kernels(op, inputs, outputs, params, self.threads())
     }
 }
 
@@ -698,6 +707,25 @@ mod tests {
             .reason()
             .unwrap()
             .contains("#61"));
+    }
+
+    #[test]
+    fn the_cnn_ids_execute_through_execute_op() {
+        // `Support::Full` for the twelve CNN ids is backed by this call path:
+        // `execute_op` -> `dispatch_kernels` -> `runtime::kernels`. A 1x1
+        // convolution with weight 2 and bias 1 maps [1,2,3,4] to [3,5,7,9].
+        let input =
+            Tensor::from_f32(Shape::from_dims([1, 1, 2, 2]), &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let weight = Tensor::from_f32(Shape::from_dims([1, 1, 1, 1]), &[2.0]).unwrap();
+        let bias = Tensor::from_f32(Shape::from_dims([1]), &[1.0]).unwrap();
+        let mut out =
+            Tensor::zeros(Shape::from_dims([1, 1, 2, 2]), DType::F32, DeviceId::Cpu).unwrap();
+        let params = OpParams::new()
+            .with_kernel_shape([1, 1])
+            .with_strides([1, 1])
+            .with_group(1);
+        run(OpId::Conv, &[&input, &weight, &bias], &mut out, &params).unwrap();
+        assert_eq!(out.as_f32_slice().unwrap(), &[3.0, 5.0, 7.0, 9.0]);
     }
 
     #[test]

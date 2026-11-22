@@ -31,6 +31,8 @@
 use crate::inference::backend::OpParams;
 use crate::inference::error::Fn3Error;
 use crate::inference::ir::{infer_shapes, DimExpr, Graph, SourceLoc, TensorType, ValueId};
+#[cfg(test)]
+use crate::inference::ops::OpId;
 
 use super::error::{ImportError, ImportProblemKind};
 use super::graph::{
@@ -61,6 +63,58 @@ pub struct ImportedGraph {
 }
 
 impl ImportedGraph {
+    /// Build an in-memory model with no ONNX file.
+    ///
+    /// Crate-internal and test-only: the unit tests for the v3 runtime need a
+    /// typed graph plus a weight table, and synthesising an ONNX file for a
+    /// three-node graph would test the encoder instead of the runtime. The
+    /// summary is filled from the graph so a caller that asserts on it sees
+    /// consistent numbers.
+    #[cfg(test)]
+    pub(crate) fn for_tests(
+        graph: Graph,
+        weights: WeightSet,
+        inputs: Vec<ValueId>,
+        outputs: Vec<ValueId>,
+    ) -> Result<ImportedGraph, Fn3Error> {
+        let mut ops = Vec::new();
+        for node in graph.nodes() {
+            match ops
+                .iter_mut()
+                .find(|(op, _): &&mut (OpId, usize)| *op == node.op)
+            {
+                Some((_, count)) => *count += 1,
+                None => ops.push((node.op, 1usize)),
+            }
+        }
+        ops.sort_unstable_by_key(|(op, _)| op.code());
+        let summary = ImportSummary {
+            onnx_nodes: graph.node_count(),
+            fn3_nodes: graph.node_count(),
+            values: graph.value_count(),
+            initializers: weights.len(),
+            weight_bytes: weights.total_bytes(),
+            ops,
+            ..ImportSummary::default()
+        };
+        Ok(ImportedGraph {
+            graph,
+            weights,
+            summary,
+            warnings: Vec::new(),
+            inputs,
+            outputs,
+            ir_version: 7,
+            producer: "fastnn-tests".to_string(),
+            producer_version: "0".to_string(),
+            opset: OpsetImport {
+                domain: String::new(),
+                version: 12,
+            },
+            graph_name: "test".to_string(),
+        })
+    }
+
     /// The typed graph, with every value's type resolved by shape inference.
     pub fn graph(&self) -> &Graph {
         &self.graph

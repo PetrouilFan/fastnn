@@ -515,10 +515,12 @@ impl KvCacheState {
         match backend {
             Some(backend) if self.keys.is_device_resident() && keys.is_device_resident() => {
                 let head_dim = self.config.head_dim as usize;
+                let key_source = view_storage(keys)?;
+                let value_source = view_storage(values)?;
                 let regions = row_regions(&key_rows, head_dim);
-                backend.copy_resident_regions(self.keys.storage(), keys.storage(), &regions)?;
+                backend.copy_resident_regions(self.keys.storage(), key_source, &regions)?;
                 let regions = row_regions(&value_rows, head_dim);
-                backend.copy_resident_regions(self.values.storage(), values.storage(), &regions)?;
+                backend.copy_resident_regions(self.values.storage(), value_source, &regions)?;
             }
             _ => {
                 write_rows(&mut self.keys, keys, &key_rows)?;
@@ -710,6 +712,21 @@ impl KvCacheState {
 /// `vkCmdCopyBuffer` records; emitting one per run keeps the same bytes in a
 /// few hundred records. The merge is purely arithmetic over offsets that were
 /// already bounds-checked, so it cannot change which bytes are copied.
+/// The `Storage` a view addresses, or an error for a byte-window view.
+///
+/// The KV cache binds `Storage` handles (a resident copy is keyed by
+/// [`Storage::generation`]), so a view with no owning storage cannot be used as
+/// an append source. The segment runtime never appends to a KV cache, so this is
+/// a contract error rather than a hot path.
+fn view_storage<'a>(
+    view: &'a TensorView<'_>,
+) -> Result<&'a crate::inference::storage::Storage, Fn3Error> {
+    view.storage().ok_or(Fn3Error::NotImplemented {
+        what: "a KV append from a byte-window tensor view (the KV cache binds storage handles)",
+        owner: "v3 segment runtime",
+    })
+}
+
 fn row_regions(rows: &[(usize, usize)], head_dim: usize) -> Vec<(u64, u64, u64)> {
     let row_bytes = (head_dim * 4) as u64;
     let mut regions: Vec<(u64, u64, u64)> = Vec::with_capacity(rows.len());

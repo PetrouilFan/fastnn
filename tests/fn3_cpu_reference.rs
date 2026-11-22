@@ -1625,6 +1625,162 @@ fn every_supported_op_executes() {
     assert_eq!(out.as_f32_slice().unwrap(), &[0.0, 0.0, 9.0, 9.0, 0.0, 0.0]);
     executed.push(OpId::ScatterND);
 
+    // The twelve CNN ids. Their scalar kernels live in the v3 segment runtime
+    // (`runtime::kernels`); `CpuBackend::execute_op` routes them there, which is
+    // what makes the `Support::Full` verdict honest.
+    let image = f32_tensor(&[1, 1, 1, 4], &[1.0, 2.0, 3.0, 4.0]);
+    let unit = f32_tensor(&[1, 1, 1, 1], &[2.0]);
+    let bias = f32_tensor(&[1], &[1.0]);
+    let mut out = zeros_f32(&[1, 1, 1, 4]);
+    run_into(
+        OpId::Conv,
+        &[&image, &unit, &bias],
+        &mut out,
+        &OpParams::new()
+            .with_kernel_shape([1, 1])
+            .with_strides([1, 1])
+            .with_group(1),
+    )
+    .unwrap();
+    assert_eq!(out.as_f32_slice().unwrap(), &[3.0, 5.0, 7.0, 9.0], "conv");
+    executed.push(OpId::Conv);
+
+    let mut out = zeros_f32(&[1, 1, 1, 2]);
+    run_into(
+        OpId::MaxPool,
+        &[&image],
+        &mut out,
+        &OpParams::new()
+            .with_kernel_shape([1, 2])
+            .with_strides([1, 2]),
+    )
+    .unwrap();
+    assert_eq!(out.as_f32_slice().unwrap(), &[2.0, 4.0], "max_pool");
+    executed.push(OpId::MaxPool);
+
+    let mut out = zeros_f32(&[1, 1, 1, 2]);
+    run_into(
+        OpId::AveragePool,
+        &[&image],
+        &mut out,
+        &OpParams::new()
+            .with_kernel_shape([1, 2])
+            .with_strides([1, 2]),
+    )
+    .unwrap();
+    assert_eq!(out.as_f32_slice().unwrap(), &[1.5, 3.5], "average_pool");
+    executed.push(OpId::AveragePool);
+
+    let mut out = zeros_f32(&[1, 1, 1, 1]);
+    run_into(OpId::GlobalAveragePool, &[&image], &mut out, &params).unwrap();
+    assert_eq!(out.as_f32_slice().unwrap(), &[2.5], "global_average_pool");
+    executed.push(OpId::GlobalAveragePool);
+
+    let data = f32_tensor(&[1, 1, 2], &[3.0, 5.0]);
+    let scale = f32_tensor(&[1], &[2.0]);
+    let shift = f32_tensor(&[1], &[1.0]);
+    let mean = f32_tensor(&[1], &[4.0]);
+    let variance = f32_tensor(&[1], &[4.0]);
+    let mut out = zeros_f32(&[1, 1, 2]);
+    run_into(
+        OpId::BatchNorm,
+        &[&data, &scale, &shift, &mean, &variance],
+        &mut out,
+        &OpParams::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        out.as_f32_slice().unwrap(),
+        &[0.0, 2.0],
+        "batch_norm: (x - 4) / 2 * 2 + 1"
+    );
+    executed.push(OpId::BatchNorm);
+
+    let small = f32_tensor(&[1, 1, 1, 2], &[1.0, 2.0]);
+    let mut out = zeros_f32(&[1, 1, 1, 4]);
+    run_into(
+        OpId::Resize,
+        &[&small],
+        &mut out,
+        &OpParams::new()
+            .with_resize(
+                fastnn::inference::backend::ResizeMode::Nearest,
+                fastnn::inference::backend::CoordinateTransformationMode::Asymmetric,
+                fastnn::inference::backend::NearestMode::Floor,
+            )
+            .with_resize_scales([1.0, 1.0, 1.0, 2.0]),
+    )
+    .unwrap();
+    assert_eq!(out.as_f32_slice().unwrap(), &[1.0, 1.0, 2.0, 2.0], "resize");
+    executed.push(OpId::Resize);
+
+    let line = f32_tensor(&[3], &[1.0, 2.0, 3.0]);
+    let mut out = zeros_f32(&[5]);
+    run_into(
+        OpId::Pad,
+        &[&line],
+        &mut out,
+        &OpParams::new()
+            .with_pads([1, 1])
+            .with_pad(fastnn::inference::backend::PadMode::Constant, 0.0),
+    )
+    .unwrap();
+    assert_eq!(
+        out.as_f32_slice().unwrap(),
+        &[0.0, 1.0, 2.0, 3.0, 0.0],
+        "pad"
+    );
+    executed.push(OpId::Pad);
+
+    let values = f32_tensor(&[3], &[-1.0, 0.5, 2.0]);
+    let mut out = zeros_f32(&[3]);
+    run_into(
+        OpId::Clip,
+        &[&values],
+        &mut out,
+        &OpParams::new().with_clip(Some(0.0), Some(1.0)),
+    )
+    .unwrap();
+    assert_eq!(out.as_f32_slice().unwrap(), &[0.0, 0.5, 1.0], "clip");
+    executed.push(OpId::Clip);
+
+    let zero = f32_tensor(&[1], &[0.0]);
+    let mut out = zeros_f32(&[1]);
+    run_into(OpId::Sigmoid, &[&zero], &mut out, &params).unwrap();
+    assert_eq!(out.as_f32_slice().unwrap(), &[0.5], "sigmoid");
+    executed.push(OpId::Sigmoid);
+
+    let left = f32_tensor(&[2], &[1.0, 5.0]);
+    let right = f32_tensor(&[2], &[3.0, 3.0]);
+    let mut out = zeros_f32(&[2]);
+    run_into(OpId::Maximum, &[&left, &right], &mut out, &params).unwrap();
+    assert_eq!(out.as_f32_slice().unwrap(), &[3.0, 5.0], "maximum");
+    executed.push(OpId::Maximum);
+    let mut out = zeros_f32(&[2]);
+    run_into(OpId::Minimum, &[&left, &right], &mut out, &params).unwrap();
+    assert_eq!(out.as_f32_slice().unwrap(), &[1.0, 3.0], "minimum");
+    executed.push(OpId::Minimum);
+
+    let scores = f32_tensor(&[3], &[3.0, 1.0, 2.0]);
+    let mut values = zeros_f32(&[2]);
+    let mut indices = zeros_i64(&[2]);
+    {
+        let values_view = values.as_mut_view().unwrap();
+        let indices_view = indices.as_mut_view().unwrap();
+        let mut outputs = [values_view, indices_view];
+        backend
+            .execute_op(
+                OpId::TopK,
+                &[scores.as_view().unwrap()],
+                &mut outputs,
+                &OpParams::new().with_topk(0, 2, true, true),
+            )
+            .unwrap();
+    }
+    assert_eq!(values.as_f32_slice().unwrap(), &[3.0, 2.0], "top_k values");
+    assert_eq!(indices.as_i64_slice().unwrap(), &[0, 2], "top_k indices");
+    executed.push(OpId::TopK);
+
     // Every op id reported as Full must appear above.
     for op in OpId::ALL {
         let support = backend.supports(op);
@@ -1642,7 +1798,7 @@ fn every_supported_op_executes() {
     }
     assert_eq!(
         executed.len(),
-        39,
+        51,
         "the implemented op count changed; update support::IMPLEMENTED and this list together"
     );
     // The fixture suite is loaded here too, so a missing checkout fails this
@@ -1656,11 +1812,16 @@ fn every_supported_op_executes() {
 
 #[test]
 fn adversarial_wrong_dtype_is_rejected() {
+    // Integer `Add` is implemented (the importer preserves `i64` shape
+    // arithmetic and `runtime::kernels::int` executes it), so the rejection this
+    // test pins is a *mixed* pair: one operand is `i64` and the other `f32`, and
+    // `Cast` remains the only conversion.
     let integers = i64_tensor(&[2], &[1, 2]);
+    let floats = f32_tensor(&[2], &[1.0, 2.0]);
     let mut out = zeros_i64(&[2]);
     let error = run_into(
         OpId::Add,
-        &[&integers, &integers],
+        &[&integers, &floats],
         &mut out,
         &OpParams::default(),
     )
@@ -1669,11 +1830,21 @@ fn adversarial_wrong_dtype_is_rejected() {
         error,
         Fn3Error::DTypeMismatch {
             op: Some(OpId::Add),
-            expected: DType::F32,
-            actual: DType::I64
+            expected: DType::I64,
+            actual: DType::F32
         }
     ));
     assert!(error.to_string().contains("op add"), "{error}");
+    // The same-dtype integer case runs and keeps integer semantics.
+    let mut out = zeros_i64(&[2]);
+    run_into(
+        OpId::Add,
+        &[&integers, &integers],
+        &mut out,
+        &OpParams::default(),
+    )
+    .unwrap();
+    assert_eq!(out.as_i64_slice().unwrap(), &[2, 4]);
 
     // `Cast` is the only conversion; `Where` refuses to mix dtypes.
     let condition = mask_tensor(&[2], &[true, false]);
@@ -2016,22 +2187,9 @@ fn support_table_matches_the_documented_contract() {
     let cpu = backend();
     assert_eq!(cpu.name(), "cpu");
     assert_eq!(cpu.device(), DeviceId::Cpu);
-    // MaskedAttention is the reserved fused id; the twelve CNN ops are imported
-    // but have no kernel yet. Every other id must be Full.
-    let pending = [
-        OpId::Conv,
-        OpId::MaxPool,
-        OpId::AveragePool,
-        OpId::GlobalAveragePool,
-        OpId::BatchNorm,
-        OpId::Resize,
-        OpId::Pad,
-        OpId::Clip,
-        OpId::Sigmoid,
-        OpId::Maximum,
-        OpId::Minimum,
-        OpId::TopK,
-    ];
+    // MaskedAttention is the reserved fused id and stays Unsupported. The twelve
+    // CNN ids are Full as of the v3 segment runtime: their scalar kernels live in
+    // `runtime::kernels` and `execute_op` routes them there.
     for op in OpId::ALL {
         let support = cpu.supports(op);
         assert!(
@@ -2041,9 +2199,6 @@ fn support_table_matches_the_documented_contract() {
         if op == OpId::MaskedAttention {
             assert!(!support.is_supported());
             assert!(support.reason().unwrap().contains("#61"));
-        } else if pending.contains(&op) {
-            assert!(!support.is_supported(), "{op} reports {support}");
-            assert!(support.reason().unwrap().contains("#102"), "{op}");
         } else {
             assert!(support.is_full(), "{op} reports {support}");
         }
