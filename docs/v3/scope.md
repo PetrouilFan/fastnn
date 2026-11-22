@@ -85,10 +85,10 @@ The frontend is strict and Rust-native; Python is not in the import path (#104,
 |---|---|
 | Container | One self-contained model file. External tensor data, sparse initializers and local functions are rejected by name. |
 | IR version | 4 through 10 inclusive. |
-| Opset, default domain | 13 through 17 inclusive. Opset 13 moved the axes of `Squeeze`/`Unsqueeze`/`Split`/`Slice` from attributes to inputs; the importer implements that input form. `ReduceMean` is read in its attribute form, which is the form defined through opset 17. |
+| Opset, default domain | 12 through 17 inclusive. Opset 12 is the last revision whose `Split` carries its sizes in the `split` attribute; both that form and the opset-13 input form are implemented. Opset 13 moved the axes of `Squeeze`/`Unsqueeze`/`Split`/`Slice` from attributes to inputs; the importer implements that input form. `ReduceMean` is read in its attribute form, which is the form defined through opset 17. |
 | Domains | The default ONNX domain only. Any other domain is reported, not guessed. |
 | Dtypes | `f32` compute, `i64` indices/shapes, `i32` auxiliary integers, `bool` masks. `f16`, `bf16`, `f64`, quantized and string types are rejected. |
-| Architecture | One GPT-2-shaped decoder profile: token and learned position tables, per-layer projections, `past_key_values.{i}` inputs, `present.{i}` outputs and a `logits` output. |
+| Architecture | The decoder entry point requires one GPT-2-shaped profile: token and learned position tables, per-layer projections, `past_key_values.{i}` inputs, `present.{i}` outputs and a `logits` output. The typed-graph entry point has no architecture profile; any graph the operator table covers converts, with every extent proven or a node-named error. |
 
 Widening the opset range or adding an architecture profile is a deliberate
 change to this table, tested against a pinned export. It is not a side effect of
@@ -101,10 +101,11 @@ The IR names operations with a stable `OpId` and validates attributes, rank,
 dtype and shape before execution ([`src/fn3/ops/mod.rs`](../../src/fn3/ops/mod.rs)).
 The rules are (#94, #96):
 
-1. **One ONNX node maps to one `OpId`**, with two documented compositions:
+1. **One ONNX node maps to one `OpId`**, with three documented exceptions:
    `Gemm` becomes `MatMul` + `Add` and is accepted only in the identity form
    (`alpha = beta = 1`, `transA = transB = 0`); `ConstantOfShape` lifts its fill
-   value into a scalar constant input. Any other composition is an error, not an
+   value into a scalar constant input; `Constant` is folded into the weight
+   table and produces no runtime op. Any other composition is an error, not an
    approximation ([`src/fn3/import/graph.rs`](../../src/fn3/import/graph.rs)).
 2. **No fallback returns an input.** An unmapped ONNX operator, an unsupported
    attribute, a dtype mismatch or an unimplemented reserved op is an error that
@@ -121,9 +122,11 @@ The rules are (#94, #96):
    claims it, a test at each boundary, and an update to
    [SUPPORTED.md](../../SUPPORTED.md).
 
-The current operator table is in [SUPPORTED.md](../../SUPPORTED.md). It is short:
-there is no `Conv`, `MaxPool`/`AveragePool`, `BatchNormalization`, `Resize`,
-`Pad` or `TopK`, so no CNN family can import yet.
+The current operator table is in [SUPPORTED.md](../../SUPPORTED.md). The CNN
+operator set (`Conv`, the pool family, `BatchNormalization`, `Resize`, `Pad`,
+`Clip`, `Sigmoid`, `Max`, `Min`, `TopK`) imports into the typed IR but is not
+executed; executor work is phase 2. A family reaches `imports` only after its
+pinned zoo entry round-trips through an artifact, exactly as §2 requires.
 
 ## 6. Dynamic shapes
 

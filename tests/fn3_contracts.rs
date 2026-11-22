@@ -472,7 +472,19 @@ fn op_ids_are_stable_and_total() {
     assert_eq!(OpId::Add.code(), 3);
     assert_eq!(OpId::LayerNorm.code(), 15);
     assert_eq!(OpId::MaskedAttention.code(), 40);
-    assert_eq!(OpId::ALL.len(), 40);
+    assert_eq!(OpId::Conv.code(), 41);
+    assert_eq!(OpId::MaxPool.code(), 42);
+    assert_eq!(OpId::AveragePool.code(), 43);
+    assert_eq!(OpId::GlobalAveragePool.code(), 44);
+    assert_eq!(OpId::BatchNorm.code(), 45);
+    assert_eq!(OpId::Resize.code(), 46);
+    assert_eq!(OpId::Pad.code(), 47);
+    assert_eq!(OpId::Clip.code(), 48);
+    assert_eq!(OpId::Sigmoid.code(), 49);
+    assert_eq!(OpId::Maximum.code(), 50);
+    assert_eq!(OpId::Minimum.code(), 51);
+    assert_eq!(OpId::TopK.code(), 52);
+    assert_eq!(OpId::ALL.len(), 52);
 
     let mut names = std::collections::HashSet::new();
     for op in OpId::ALL {
@@ -482,7 +494,7 @@ fn op_ids_are_stable_and_total() {
         assert!(!op.metadata().description.is_empty());
     }
     assert_eq!(OpId::from_u16(0), None);
-    assert_eq!(OpId::from_u16(41), None);
+    assert_eq!(OpId::from_u16(53), None);
     assert!(OpId::is_reserved(*OpId::QUANTIZED_RANGE.start()));
     assert!(OpId::is_reserved(*OpId::STRUCTURAL_RANGE.end()));
     assert_eq!(OpId::from_u16(*OpId::QUANTIZED_RANGE.start()), None);

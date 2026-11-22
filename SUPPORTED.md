@@ -5,10 +5,14 @@ snapshot of what is implemented and proven, not a plan for what will be. The
 contract it measures against is [docs/v3/scope.md](docs/v3/scope.md); the
 architecture decision is [docs/v3/adr-0001-one-runtime.md](docs/v3/adr-0001-one-runtime.md).
 
-The headline is deliberately blunt: **the runtime supports the decoder operator
-set only.** There is no `Conv`, `MaxPool`/`AveragePool`, `BatchNormalization`,
-`Resize`, `Pad` or `TopK`, so no CNN or vision family can import, and there is no
-W8A8 execution path. Every CNN family below is `planned`.
+The headline is deliberately blunt: **the runtime executes the decoder operator
+set only.** The frontend now maps and shapes the CNN operator set (`Conv`, the
+pool family, `BatchNormalization`, `Resize`, `Pad`, `Clip`, `Sigmoid`, `Max`,
+`Min`, `TopK`) into the typed IR, so an Ultralytics YOLOv8 graph imports with
+every extent resolved; **no backend executes those ops yet**, and there is no
+W8A8 execution path. In the vocabulary of this file the twelve new ops are
+`imports`, not `runs`, and every CNN family stays `planned` until a pinned zoo
+entry and an executor exist.
 
 Legend:
 
@@ -27,13 +31,15 @@ Legend:
 |---|---|---|---|---|
 | GPT-2-style decoder | tiny GPT-2 (28 MB), trained GPT-2 (498 MB) | `runs` | Strict import (257/257 nodes), `.fnn3` prepare/load, CPU prefill and cached decode, KV parity against the pinned fixtures, session-local weight-only INT8; FP32 logits parity gate exists but requires the external trained graph | `gated`: commit the zoo entry and licence, run the accuracy gate in default CI, publish the metric |
 | Llama-style decoder | Llama-family export with RoPE and grouped-query attention | `planned` | IR has `Sin`, `Cos`, `Trilu`, `Gather`, `ScatterND` and a GQA-shaped KV interface; no architecture profile and no parity gate | `imports`: architecture profile and a pinned export in the 13–17 opset range; then `runs`: RoPE/KV parity; then `gated`: token and perplexity gate |
-| YOLO11/26 detection | YOLO11n, YOLO26n | `planned` | No `Conv`, `MaxPool`/`AveragePool`, `Resize`, `Pad` or `TopK` | `imports`: CNN frontend plus the documented detection adapter (#104); then `runs`: F32 detection parity; then `gated`: COCO 500-image mAP gate (#105) |
-| EfficientViT depth | EfficientViT | `planned` | No convolution, normalization or resize ops | `imports`: CNN frontend; then `runs`: F32 depth parity; then `gated`: abs-rel/RMSE/delta gate |
-| ResNet/MobileNet classification | ResNet50, MobileNetV4 | `planned` | No `Conv`, `BatchNormalization`, `MaxPool` or `GlobalAveragePool` | `imports`: CNN frontend; then `runs`: F32 top-1 parity; then `gated`: ImageNet-subset top-1/top-5 gate |
-| ViT classification | ViT | `planned` | No patch-embed `Conv`; an ONNX `LayerNorm` node is not mapped | `imports`: frontend coverage; then `runs`; then `gated` on ImageNet-subset top-1/top-5 |
+| YOLO11/26 detection | YOLO11n, YOLO26n | `planned` | Ultralytics YOLOv8n ([1,3,320,320] → [1,84,2100]) and YOLOv8s ([1,3,640,640] → [1,84,8400]) import into the typed IR: 262 source nodes, 240 typed nodes (22 `Constant` nodes folded into weights), 398 values, every value fully static, proven by `tests/fn3_cnn_import.rs` when the files are present. No execution kernel, no zoo entry/hash, no artifact round trip, so this is not yet `imports` | `imports`: commit the zoo entry (hash + licence) and round-trip the graph through an artifact; then `runs`: F32 detection parity; then `gated`: COCO 500-image mAP gate (#105) |
+| EfficientViT depth | EfficientViT | `planned` | The CNN ops import (`Conv`, `BatchNormalization`, `Resize`, `Pad`, pooling); no execution kernel | `imports`: a pinned export in the zoo and an artifact round trip; then `runs`: F32 depth parity; then `gated`: abs-rel/RMSE/delta gate |
+| ResNet/MobileNet classification | ResNet50, MobileNetV4 | `planned` | `Conv`, `BatchNormalization`, `MaxPool` and `GlobalAveragePool` import; no execution kernel | `imports`: a pinned export in the zoo and an artifact round trip; then `runs`: F32 top-1 parity; then `gated`: ImageNet-subset top-1/top-5 gate |
+| ViT classification | ViT | `planned` | Patch-embed `Conv` imports; an ONNX `LayerNorm` node is still not mapped (the pinned exports decompose it) | `imports`: frontend coverage; then `runs`; then `gated` on ImageNet-subset top-1/top-5 |
 
 No family is `gated` today. The only runnable path is a GPT-2-shaped decoder on
-CPU (and, with a `vulkan` build, on Vulkan for the registered op subset).
+CPU (and, with a `vulkan` build, on Vulkan for the registered op subset). The CNN
+ops are `imports`: the typed IR is the only consumer, and the CPU backend reports
+them `Unsupported` with the owner of the missing kernel.
 
 ## Operators
 
@@ -83,12 +89,28 @@ em-dash means the id exists in the IR but no ONNX node maps to it.
 | `Cos` | 38 | `Cos` | full | full | RoPE building block |
 | `ScatterND` | 39 | `ScatterND` | full | — | Indexed scatter into a copy |
 | `MaskedAttention` | 40 | — | — | full | Reserved fused id; CPU composes attention from primitives, Vulkan has the fused kernel. ONNX `Attention`, `MultiHeadAttention` and `GroupQueryAttention` are rejected, not mapped |
+| `Conv` | 41 | `Conv` | — | — | `imports`. N-dimensional NCHW/NCDHW, `group`, `dilations`, `strides`, `pads`, `auto_pad`; `kernel_shape` is required by the shape rule |
+| `MaxPool` | 42 | `MaxPool` | — | — | `imports`. `kernel_shape`, `strides`, `pads`, `dilations`, `auto_pad`, `ceil_mode`; the optional indices output is rejected |
+| `AveragePool` | 43 | `AveragePool` | — | — | `imports`. As `MaxPool`, plus `count_include_pad` |
+| `GlobalAveragePool` | 44 | `GlobalAveragePool` | — | — | `imports`. Spatial axes collapse to extent 1 |
+| `BatchNorm` | 45 | `BatchNormalization` | — | — | `imports`. Inference form only: one output, 1-D `scale`/`B`/`mean`/`var`, `epsilon`; `training_mode = 1` is rejected |
+| `Resize` | 46 | `Resize` | — | — | `imports`. 4-D nearest/linear, constant `scales` or `sizes`; the `roi` operand must be empty and `tf_crop_and_resize`/cubic are rejected |
+| `Pad` | 47 | `Pad` | — | — | `imports`. Constant/reflect/edge, attribute or constant input pads, negative pads crop; `wrap` is rejected |
+| `Clip` | 48 | `Clip` | — | — | `imports`. Attribute or constant min/max; a runtime bound is rejected |
+| `Sigmoid` | 49 | `Sigmoid` | — | — | `imports` |
+| `Maximum` | 50 | `Max` | — | — | `imports`. Two operands with broadcasting; the variadic ONNX form is rejected |
+| `Minimum` | 51 | `Min` | — | — | `imports`. As `Maximum` |
+| `TopK` | 52 | `TopK` | — | — | `imports`. Axis, `largest`/`sorted`, attribute or constant k; two outputs (values and i64 indices) |
 
 \* `Gemm` is not an op id. It is accepted only in the identity form
 (`alpha = beta = 1`, `transA = transB = 0`) and composed as `MatMul` + `Add`.
 
 Frontend restrictions that matter in practice:
 
+- The default-domain opset range is 12..=17. Opset 12 is the last revision with
+  the `split` attribute form of `Split`; both that and the opset-13 input form
+  are implemented.
+- `Constant` nodes are folded into the weight table, not executed.
 - `Gather` accepts `batch_dims = 0` only.
 - `Reshape` accepts `allowzero = 0` only.
 - `ArgMax` accepts `select_last_index = 0` only.
@@ -100,19 +122,18 @@ Frontend restrictions that matter in practice:
 
 The following ONNX operators have no mapping and are rejected by name, with the
 node index, node name and operator type. The list is not exhaustive; it is the
-set the target families need first: `Conv`, `ConvTranspose`, `MaxPool`,
-`AveragePool`, `GlobalAveragePool`, `BatchNormalization`, `Resize`, `Pad`,
-`TopK`, `GatherElements`, `Sigmoid`, `LeakyRelu`, `Exp`, `Log`, `Abs`, `Max`,
-`Min`, `Identity`, `Constant`, `Dropout`, `If`, `Loop`, `Scan`,
+set the target families need next: `ConvTranspose`, `GatherElements`,
+`LeakyRelu`, `Exp`, `Log`, `Abs`, `Identity`, `Dropout`, `If`, `Loop`, `Scan`,
 `QuantizeLinear`, `DequantizeLinear`.
 
 `If`, `Loop` and `Scan` are reported as control flow, not as generic unmapped
 operators. External tensor data, sparse initializers and local functions are
 rejected by name as well.
 
-The missing CNN operators, including `Conv`, the pool family,
-`BatchNormalization`, `Resize`, `Pad` and `TopK`, are planned under #102 and
-#104. None is implemented, and no row above claims otherwise.
+The CNN operators are mapped and shaped under #102/#104 but have no execution
+kernel: every CPU and Vulkan cell above is `—`, and `Backend::supports` returns
+`Unsupported` naming phase 2. Import is not execution, and no row above claims
+otherwise.
 
 ## Dtypes and execution modes
 
@@ -141,10 +162,18 @@ The rules behind the table:
 
 Capability gaps:
 
-- No CNN/vision frontend: `Conv`, `ConvTranspose`, `MaxPool`, `AveragePool`,
-  `BatchNormalization`, `Resize`, `Pad`, `TopK`, `GatherElements`, `Sigmoid` and
-  the other operators listed above are absent. YOLO11/26, EfficientViT,
-  ResNet/MobileNet and ViT cannot import, let alone run.
+- No CNN/vision executor: `Conv`, the pool family, `BatchNormalization`,
+  `Resize`, `Pad`, `Clip`, `Sigmoid`, `Max`, `Min` and `TopK` import into the
+  typed IR, but no backend has a kernel. YOLO, EfficientViT, ResNet/MobileNet and
+  ViT cannot run, and a family is not `imports` until its pinned zoo entry
+  round-trips through an artifact.
+- `ConvTranspose`, `GatherElements` and `LeakyRelu` remain unmapped.
+- The typed-IR import requires every extent to be provable. A model whose
+  intermediate shape depends on a runtime value is rejected by name; the
+  decoder-shaped `import_onnx_model` keeps its symbolic-path contract.
+- The 3.0 artifact format version 1 stores only `axes`, `keep_dims` and
+  `epsilon` from `OpParams`. A CNN graph cannot round-trip through it yet; that
+  is phase 2 work, so no CNN row claims `imports`.
 - The decoder profile is GPT-2-shaped only. It requires a learned position
   table and the `past_key_values.{i}` / `present.{i}` interface; Llama-style
   RoPE and other decoder interfaces are not detected.
@@ -157,8 +186,8 @@ Capability gaps:
   import is not implemented.
 - No fused-segment planner, no layout assignment and no precision assignment:
   the plan is a specialized instruction list executed per op (#98).
-- No CPU kernel provider: the CNN path does not exist at all; oneDNN/MLAS/
-  XNNPACK are planned (#101).
+- No CPU kernel provider: the CNN execution path does not exist at all; oneDNN/
+  MLAS/XNNPACK are planned (#101).
 
 Runtime and packaging gaps:
 
@@ -203,6 +232,7 @@ Every row is backed by code or a test in this tree:
   `src/fn3/backend/cpu/support.rs`, `src/fn3/backend/vulkan/kernels/`.
 - Frontend mapping and rejections: `src/fn3/import/graph.rs`,
   `src/fn3/import/error.rs`, `tests/fn3_import.rs`.
+- Typed IR and shape rules: `src/fn3/ir/`, `tests/fn3_cnn_import.rs`.
 - Decoder path: `tests/fn3_session.rs`, `tests/fn3_e2e.rs`,
   `tests/fn3_model_format.rs`, and `tests/fn3_trained_parity.rs` for the gate.
 - Weight-only INT8: `tests/fn3_trained_int8.rs`, `tests/fn3_quant_cpu.rs`,

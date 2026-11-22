@@ -120,8 +120,34 @@ pub(crate) const IMPLEMENTED: [OpId; 39] = [
     OpId::ScatterND,
 ];
 
+/// The CNN op ids the frontend now imports but no backend executes yet.
+///
+/// They are reported [`Support::Unsupported`] with the owner of the work, never
+/// `Partial`: there is no kernel, so there is no subset to name.
+pub(crate) const PENDING: [OpId; 12] = [
+    OpId::Conv,
+    OpId::MaxPool,
+    OpId::AveragePool,
+    OpId::GlobalAveragePool,
+    OpId::BatchNorm,
+    OpId::Resize,
+    OpId::Pad,
+    OpId::Clip,
+    OpId::Sigmoid,
+    OpId::Maximum,
+    OpId::Minimum,
+    OpId::TopK,
+];
+
 /// The support answer for `op`.
 pub(crate) fn support(op: OpId) -> Support {
+    if PENDING.contains(&op) {
+        return Support::Unsupported {
+            reason: "imported into the typed IR, but no execution kernel exists yet; the v3 CNN \
+                     executor owns it (phase 2, #102/#104)"
+                .to_string(),
+        };
+    }
     match op {
         OpId::MaskedAttention => Support::Unsupported {
             reason: "the fused attention id is reserved for the Vulkan attention kernels \
@@ -156,12 +182,19 @@ mod tests {
     }
 
     #[test]
-    fn only_masked_attention_is_unsupported() {
+    fn only_masked_attention_and_the_cnn_ops_are_unsupported() {
         for op in OpId::ALL {
             let support = support(op);
             if op == OpId::MaskedAttention {
                 assert!(matches!(support, Support::Unsupported { .. }));
                 assert!(support.reason().unwrap().contains("#61"));
+            } else if PENDING.contains(&op) {
+                assert!(matches!(support, Support::Unsupported { .. }), "{op}");
+                assert!(
+                    support.reason().unwrap().contains("#102"),
+                    "{op} does not name its owner"
+                );
+                assert!(!IMPLEMENTED.contains(&op), "{op} has no kernel");
             } else {
                 assert!(support.is_full(), "{op} reports {support}");
                 assert!(

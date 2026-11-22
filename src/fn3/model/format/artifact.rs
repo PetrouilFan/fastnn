@@ -1316,6 +1316,7 @@ fn decode_graph(values_section: &[u8], nodes_section: &[u8]) -> Result<PreparedG
                 axes,
                 keep_dims,
                 epsilon,
+                ..crate::inference::backend::OpParams::default()
             },
         });
     }
@@ -1573,6 +1574,7 @@ mod tests {
                     axes: vec![-1, 0, 3],
                     keep_dims: true,
                     epsilon: 1e-5,
+                    ..OpParams::default()
                 },
             }],
             vec![

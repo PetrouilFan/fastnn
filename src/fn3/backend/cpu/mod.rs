@@ -507,6 +507,31 @@ impl CpuBackend {
                 logic::scatter_nd(op, &inputs[0], &inputs[1], &inputs[2], &mut outputs[0])
             }
 
+            // -- imported CNN ops without a kernel ------------------------
+            OpId::Conv
+            | OpId::MaxPool
+            | OpId::AveragePool
+            | OpId::GlobalAveragePool
+            | OpId::BatchNorm
+            | OpId::Resize
+            | OpId::Pad
+            | OpId::Clip
+            | OpId::Sigmoid
+            | OpId::Maximum
+            | OpId::Minimum
+            | OpId::TopK => {
+                // `preflight` already rejected these ids; the arm keeps the
+                // match exhaustive and the reason identical to `supports`.
+                Err(Fn3Error::UnsupportedOp {
+                    op,
+                    backend: CPU_BACKEND_NAME,
+                    reason: support::support(op)
+                        .reason()
+                        .unwrap_or("no execution kernel exists yet")
+                        .to_string(),
+                })
+            }
+
             // -- reserved fused id ---------------------------------------
             OpId::MaskedAttention => {
                 // `preflight` already rejected this id; it is matched so that a

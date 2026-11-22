@@ -1232,7 +1232,7 @@ fn an_unsupported_opset_is_reported_with_its_range() {
         )),
         "{error}"
     );
-    assert!(error.to_string().contains("13..=17"), "{error}");
+    assert!(error.to_string().contains("12..=17"), "{error}");
 }
 
 #[test]

@@ -37,7 +37,9 @@
 //!
 //! [`OpParams`] is the crate's one attribute carrier. This module does not
 //! invent a parallel attribute system; an op's meaning is a documented reading
-//! of those three fields, exactly as the planner already encodes them:
+//! of those fields, and
+//! [`infer`] rejects any field the op does not
+//! define. The fields the starter set reads:
 //!
 //! | Attribute | Ops |
 //! |---|---|
@@ -48,12 +50,22 @@
 //! | `axes` = `[]`/single axis | [`OpId::Concat`], [`OpId::Softmax`], [`OpId::Gather`] |
 //! | `axes` + `keep_dims` | [`OpId::ReduceMean`], [`OpId::ReduceSum`] |
 //! | `axes` + `epsilon` | [`OpId::LayerNorm`] |
+//! | `kernel_shape` + `strides` + `pads` + `dilations` + `group` + `auto_pad` | [`OpId::Conv`] |
+//! | the same window fields + `ceil_mode`/`count_include_pad` | [`OpId::MaxPool`], [`OpId::AveragePool`] |
+//! | `epsilon` | [`OpId::BatchNorm`] |
+//! | `resize_mode` + `coordinate_transformation_mode` + `nearest_mode` + `resize_scales`/`resize_sizes` | [`OpId::Resize`] |
+//! | `pads` + `pad_mode` + `pad_value` | [`OpId::Pad`] |
+//! | `clip_min` + `clip_max` | [`OpId::Clip`] |
+//! | `topk_axis` + `topk_k` + `largest` + `sorted` | [`OpId::TopK`] |
+//! | `axes` + `split_sizes` | [`OpId::Split`] |
+//! | `axes` + `slice_starts`/`slice_ends`/`slice_steps` | [`OpId::Slice`] |
 //!
-//! [`OpId::Reshape`] is the one op whose kernel reads its target shape from a
-//! second *input*. The IR has no constant payload, so the constant form is
-//! carried in `axes` (one `i64` per target extent, `0` = copy the input extent,
-//! `-1` = infer) and a runtime shape input is rejected by shape inference
-//! rather than guessed. That is the "constant target shapes only" subset.
+//! [`OpId::Reshape`], `Resize`, `Pad`, `Clip`, `TopK`, `Split` and `Slice` are
+//! the ops whose ONNX kernel reads a *second input*. The IR has no constant
+//! payload, so the importer folds that input into the fields above and a shape
+//! rule that finds the operand without the folded value reports the node rather
+//! than guessing. A runtime shape input is therefore rejected by shape
+//! inference instead of being passed through as an unchecked extent.
 //!
 //! # Determinism
 //!
@@ -470,8 +482,10 @@ fn op_arity(op: OpId) -> Option<Arity> {
             min_outputs: 1,
             max_outputs: 1,
         }),
+        // The typed IR may carry the constant bounds in `OpParams` instead
+        // of the starts/ends/axes/steps operands, so one input is legal.
         OpId::Slice => Some(Arity {
-            min_inputs: 2,
+            min_inputs: 1,
             max_inputs: 5,
             min_outputs: 1,
             max_outputs: 1,
@@ -493,6 +507,39 @@ fn op_arity(op: OpId) -> Option<Arity> {
             max_inputs: 2,
             min_outputs: 1,
             max_outputs: 1,
+        }),
+        // CNN ops. A `Resize` may carry the ONNX roi, scales and sizes inputs,
+        // a `Pad` its pads and fill value, and a `Clip` its min and max; the
+        // importer folds the constant payloads into `OpParams`, but the
+        // operands stay in the graph so the node mirrors its source.
+        OpId::Conv => Some(Arity {
+            min_inputs: 2,
+            max_inputs: 3,
+            min_outputs: 1,
+            max_outputs: 1,
+        }),
+        OpId::MaxPool | OpId::AveragePool | OpId::GlobalAveragePool => Some(Arity::fixed(1, 1)),
+        OpId::BatchNorm => Some(Arity::fixed(5, 1)),
+        OpId::Resize => Some(Arity {
+            min_inputs: 1,
+            max_inputs: 4,
+            min_outputs: 1,
+            max_outputs: 1,
+        }),
+        OpId::Pad | OpId::Clip => Some(Arity {
+            min_inputs: 1,
+            max_inputs: 3,
+            min_outputs: 1,
+            max_outputs: 1,
+        }),
+        OpId::Sigmoid => Some(Arity::fixed(1, 1)),
+        OpId::Maximum | OpId::Minimum => Some(Arity::fixed(2, 1)),
+        // TopK writes both values and i64 indices.
+        OpId::TopK => Some(Arity {
+            min_inputs: 1,
+            max_inputs: 2,
+            min_outputs: 2,
+            max_outputs: 2,
         }),
         // Reserved for a fused backend and always rejected at execution; an
         // arity would be a guess about a contract that does not exist yet.

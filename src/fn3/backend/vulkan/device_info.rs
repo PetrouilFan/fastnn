@@ -475,6 +475,18 @@ pub fn enumerate(instance: &ash::Instance) -> Result<Vec<AdapterInfo>> {
 /// "unsupported" messages naming the issue that will implement the kernel.
 pub fn op_owner(op: OpId) -> &'static str {
     match op {
+        OpId::Conv
+        | OpId::MaxPool
+        | OpId::AveragePool
+        | OpId::GlobalAveragePool
+        | OpId::BatchNorm
+        | OpId::Resize
+        | OpId::Pad
+        | OpId::Clip
+        | OpId::Sigmoid
+        | OpId::Maximum
+        | OpId::Minimum
+        | OpId::TopK => "phase 2 CNN executor (#102/#104)",
         OpId::MatMul => "FN3-14 (#60)",
         OpId::Softmax
         | OpId::LayerNorm

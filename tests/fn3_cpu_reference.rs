@@ -2013,12 +2013,27 @@ fn output_aliasing_an_input_is_rejected() {
 
 #[test]
 fn support_table_matches_the_documented_contract() {
-    let backend = backend();
-    assert_eq!(backend.name(), "cpu");
-    assert_eq!(backend.device(), DeviceId::Cpu);
-    // MaskedAttention is the only gap, and it names its owner.
+    let cpu = backend();
+    assert_eq!(cpu.name(), "cpu");
+    assert_eq!(cpu.device(), DeviceId::Cpu);
+    // MaskedAttention is the reserved fused id; the twelve CNN ops are imported
+    // but have no kernel yet. Every other id must be Full.
+    let pending = [
+        OpId::Conv,
+        OpId::MaxPool,
+        OpId::AveragePool,
+        OpId::GlobalAveragePool,
+        OpId::BatchNorm,
+        OpId::Resize,
+        OpId::Pad,
+        OpId::Clip,
+        OpId::Sigmoid,
+        OpId::Maximum,
+        OpId::Minimum,
+        OpId::TopK,
+    ];
     for op in OpId::ALL {
-        let support = backend.supports(op);
+        let support = cpu.supports(op);
         assert!(
             !matches!(support, fastnn::inference::Support::Partial { .. }),
             "{op} must not hide a gap behind Partial"
@@ -2026,6 +2041,9 @@ fn support_table_matches_the_documented_contract() {
         if op == OpId::MaskedAttention {
             assert!(!support.is_supported());
             assert!(support.reason().unwrap().contains("#61"));
+        } else if pending.contains(&op) {
+            assert!(!support.is_supported(), "{op} reports {support}");
+            assert!(support.reason().unwrap().contains("#102"), "{op}");
         } else {
             assert!(support.is_full(), "{op} reports {support}");
         }
@@ -2063,9 +2081,9 @@ fn support_table_matches_the_documented_contract() {
     ];
     for op in pinned_graph_surface {
         assert!(
-            backend.supports(op).is_full(),
+            cpu.supports(op).is_full(),
             "the pinned GPT-2 graph needs {op}, which reports {}",
-            backend.supports(op)
+            cpu.supports(op)
         );
     }
 }

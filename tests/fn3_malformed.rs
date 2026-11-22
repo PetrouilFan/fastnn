@@ -316,6 +316,7 @@ fn tiny_graph() -> PreparedGraph {
                 axes: vec![-1, 0],
                 keep_dims: true,
                 epsilon: 1e-5,
+                ..OpParams::default()
             },
         }],
         vec![

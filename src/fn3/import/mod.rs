@@ -10,8 +10,15 @@
 //! bytes ──► proto   (bounds-checked protobuf wire reader, no dependency)
 //!       ──► graph   (op mapping, attributes, static dtype/shape inference)
 //!       ──► weights (name + dtype + shape + exact payload bytes)
-//!       ──► ModelImport { graph, weights, geometry, summary }
+//!       ──► ModelImport   { graph, weights, decoder geometry, summary }
+//!       ──► ImportedGraph { typed ir::Graph, weights, summary }
 //! ```
+//!
+//! The two results share one decode and differ only after it:
+//! [`import_onnx_model`] adds the GPT-2-shaped decoder profile, while
+//! [`import_onnx_graph`] converts the decoded graph into
+//! [`crate::inference::ir`] and runs its shape pass, so a CNN imports without
+//! being required to look like a decoder.
 //!
 //! # What it deliberately does not do
 //!
@@ -26,6 +33,8 @@
 //! - It does not require Python, `protoc` or any crate outside `core`/`alloc`.
 //!
 //! # Entry points
+//!
+//! The decoder profile:
 //!
 //! ```no_run
 //! # fn main() -> Result<(), fastnn::inference::import::ImportError> {
@@ -42,6 +51,20 @@
 //! assert!(geometry.layers > 0);
 //! let (graph, weights) = imported.into_parts();
 //! # let _ = (graph, weights);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! The typed graph (no decoder profile):
+//!
+//! ```no_run
+//! # fn main() -> Result<(), fastnn::inference::import::ImportError> {
+//! let bytes = std::fs::read("yolov8n.onnx").unwrap();
+//! let imported = fastnn::inference::import::import_onnx_graph(&bytes)?;
+//! let output = imported.lookup("output0").expect("the model names its output");
+//! let ty = &imported.graph().value(output).unwrap().ty;
+//! assert!(ty.is_static());
+//! # let _ = ty;
 //! # Ok(())
 //! # }
 //! ```
@@ -67,10 +90,14 @@
 //! |---|---|
 //! | Container | one self-contained model file; external data and sparse initializers are rejected by name |
 //! | IR version | 4..=10 |
-//! | Opset (default domain) | 13..=17, the input form of `Squeeze`/`Unsqueeze`/`Split`/`Slice` and the attribute form of `ReduceMean.axes` |
+//! | Opset (default domain) | 12..=17; the opset-12 `Split` attribute form and the opset-13 input form of `Squeeze`/`Unsqueeze`/`Split`/`Slice`; the attribute form of `ReduceMean.axes` |
 //! | Domains | the default ONNX domain only |
 //! | Dtypes | `f32` compute, `i64` indices/shapes, `i32` auxiliary, `bool` masks |
-//! | Architecture | a GPT-2-shaped decoder: token + learned position table, per-layer `c_attn`/`c_proj`/`c_fc`/`mlp c_proj`, `past_key_values.{i}` inputs, `present.{i}` outputs, `logits` |
+//! | Architecture | [`import_onnx_model`] requires a GPT-2-shaped decoder (token + learned position table, per-layer projections, `past_key_values.{i}` inputs, `present.{i}` outputs, `logits`); [`import_onnx_graph`] has no architecture profile |
+//!
+//! `Constant` nodes are folded into the weight table rather than executed: an
+//! ONNX `Constant` is data the file already fixed, so it becomes an
+//! initializer-like value and never reaches a plan.
 //!
 //! # Dtypes: reject, preserve, never cast
 //!
@@ -94,6 +121,7 @@ pub mod budget;
 pub mod error;
 mod graph;
 mod proto;
+mod typed;
 
 /// The weight table is typed weight data, not import logic, so it lives in
 /// `model/` (ADR §5 reserves `src/fn3/model/weights.rs` for this issue) and is
@@ -109,6 +137,23 @@ pub use graph::{
     KvInterface, ModelImport, ModelProvenance, OpsetImport, PositionEmbedding, ValueId, ValueInfo,
     ValueOrigin, ValueShape, MAX_IR_VERSION, MAX_OPSET, MIN_IR_VERSION, MIN_OPSET,
 };
+pub use typed::ImportedGraph;
+
+/// Import an ONNX model into the typed v3 graph.
+///
+/// Unlike [`import_onnx_model`], this stops before the decoder architecture
+/// profile: it validates every node, resolves every value's dtype and shape, and
+/// runs [`crate::inference::ir::infer_shapes`], so a CNN (or any graph the
+/// operator table covers) imports without pretending to be a GPT-2 decoder.
+/// The typed IR has no unknown extent, so a value the importer could not prove
+/// is a node-named error here rather than an unchecked shape.
+///
+/// [`ImportedGraph`] carries the typed graph, the weights and the import
+/// summary. The decoder path remains [`import_onnx_model`], which additionally
+/// requires the `past_key_values`/`present` interface.
+pub fn import_onnx_graph(bytes: &[u8]) -> Result<ImportedGraph, ImportError> {
+    typed::build(graph::build_graph_parts(bytes)?)
+}
 
 /// Import an ONNX model from bytes.
 ///

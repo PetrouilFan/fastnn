@@ -9,11 +9,17 @@ authority is `docs/archive/roadmap/fn3-architecture.md`.
   type depends on the first three only and none imports another core module.
 - `shape.rs`, `storage.rs`, `tensor.rs`: shape/stride/bound algebra, the aligned
   buffer, and tensor metadata/views.
+- `ir/`: the typed v3 graph (`DimExpr`, `TensorType`, `SourceLoc`, `Graph`) and
+  `infer.rs`, the one shape pass. It owns the reading of `OpParams` for shape
+  rules; a rule that needs a constant reads it from `OpParams`, never from a
+  tensor payload. `import/typed.rs` is the only converter into it.
 - `backend/mod.rs`: `Backend`, `Capabilities`, `Support`, `OpParams`.
   `backend/cpu/` is the portable reference backend; `backend/vulkan/` holds the
   platform and kernel families, where `resident.rs` owns device-resident
   storage, the persistent table and the residency counters (FN3-26 / #72).
-- `import/`: strict ONNX reader and graph construction.
+- `import/`: strict ONNX reader and graph construction. `import_onnx_model` adds
+  the decoder geometry profile; `import_onnx_graph` stops at the typed graph, so
+  a CNN imports without being forced through that profile.
 - `model/mod.rs`: `ExecutionPlan`, `ModelWeights`, `PreparedModel`.
 - `model/kv.rs`: bounded per-layer KV buffers, the live extent, two-phase
   append.
@@ -94,6 +100,7 @@ cargo build --no-default-features
 cargo test --lib inference
 cargo test --test fn3_contracts
 cargo test --test fn3_cpu_reference
+cargo test --test fn3_cnn_import
 ```
 
 `cargo test --lib` must also pass: it proves the 2.x tree still compiles beside
