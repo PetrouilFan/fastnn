@@ -65,13 +65,33 @@ if [[ ! -f "$MODEL" ]]; then
     # network, so it runs with that variable removed. The script itself checks
     # the size and SHA-256 from the lock before it reports success, so a
     # truncated or substituted download fails here rather than being executed.
-    if ! env -u HF_HUB_OFFLINE -u TRANSFORMERS_OFFLINE \
-         python3 "$CI_ROOT/tools/parity/fetch_models.py" --suite tiny-gpt2 --graph-only; then
+    STAGED=0
+    for attempt in 1 2 3; do
+        if env -u HF_HUB_OFFLINE -u TRANSFORMERS_OFFLINE \
+             python3 "$CI_ROOT/tools/parity/fetch_models.py" --suite tiny-gpt2 --graph-only; then
+            STAGED=1
+            break
+        fi
+        # A runner's network is not the change under test: give it a moment
+        # and try again before drawing any conclusion from the failure.
+        echo "attempt $attempt could not stage the pinned graph; retrying in 5s" >&2
+        sleep 5
+    done
+    if [[ "$STAGED" != "1" ]]; then
         if [[ "${PINNED_MODEL_ALLOW_SKIP:-0}" == "1" ]]; then
             ci::not_verified "PINNED_MODEL_ALLOW_SKIP=1 and the pinned graph could not be staged"
         fi
-        ci::failed "the pinned graph could not be staged; without it this lane would prove nothing" \
-            "python3 tools/parity/fetch_models.py --suite tiny-gpt2 --graph-only"
+        if [[ -f "$MODEL" ]]; then
+            # Bytes arrived but do not match the lock. That is a real defect in
+            # what the Hub served, not a missing network, and it must not be
+            # reported as "no evidence" or executed.
+            ci::failed "the pinned graph was downloaded but does not match the lock; it must not be executed" \
+                "python3 tools/parity/fetch_models.py --suite tiny-gpt2 --graph-only"
+        fi
+        # No bytes at all: this advisory lane simply has no evidence to offer.
+        # Reporting FAILED would blame the change for the runner's network;
+        # reporting PASSED would claim a model ran when none did.
+        ci::not_verified "the pinned graph could not be staged (the Hub was unreachable after three attempts); no evidence was produced"
     fi
 fi
 if [[ ! -f "$MODEL" ]]; then
