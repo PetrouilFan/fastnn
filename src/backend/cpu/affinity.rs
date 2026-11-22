@@ -108,6 +108,18 @@ pub fn worker_count() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, PoisonError};
+
+    /// Rayon's global pool can be built once, so two tests that each choose a
+    /// width race for it and the loser sees `TooLate`. They take this lock so
+    /// the width is decided by one test at a time.
+    static POOL_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_pool() -> std::sync::MutexGuard<'static, ()> {
+        POOL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
 
     #[test]
     fn the_worker_count_is_never_zero() {
@@ -116,22 +128,26 @@ mod tests {
 
     #[test]
     fn asking_for_the_current_width_is_not_an_error() {
-        // The suite runs in parallel, so the pool usually exists by now. Asking
-        // for the width already in effect must never fail, which is what lets a
-        // caller set the thread count unconditionally.
+        let _guard = lock_pool();
+        // Asking for the width already in effect must never fail, which is what
+        // lets a caller set the thread count unconditionally.
         let current = worker_count();
         assert!(configure_threads(current).is_ok());
+        assert_eq!(worker_count(), current);
     }
 
     #[test]
     fn zero_workers_is_read_as_one() {
+        let _guard = lock_pool();
         // A caller passing 0 or a negative Python value wants "do not
-        // oversubscribe", not a pool with no workers.
-        let current = worker_count();
-        if configure_threads(0).is_err() {
-            // The pool already exists at another width; the clamp is still the
-            // intended reading, so assert the width it kept.
-            assert!(current >= 1);
+        // oversubscribe", not a pool with no workers. Only assert the clamp when
+        // this test gets to decide the width: once another caller has fixed the
+        // pool, asking for a different width is `TooLate` by design.
+        if CONFIGURED.load(Ordering::Relaxed) == 0 {
+            assert!(configure_threads(0).is_ok());
+            assert_eq!(worker_count(), 1, "zero workers must read as one");
+        } else {
+            assert!(worker_count() >= 1);
         }
     }
 }
