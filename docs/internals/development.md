@@ -91,6 +91,35 @@ deleted training tree.
 3. Add IR, compiler and CPU tests; if the op is imported, extend
    `src/onnx/converter.rs` and cover it with a round-trip test.
 
+## Performance reports
+
+`tools/bench/perf_report.py` writes one JSON report per measurement:
+
+```bash
+PYTHONPATH=. .venv/bin/python tools/bench/perf_report.py \
+  --model evit-depth-5m=/path/to/efficientvit_depth_5m.onnx \
+  --input pixel_values=1,3,336,448 --threads 4 --repeat 20 \
+  --require-quiet 2 --out docs/reports/perf-evit-depth-5m-cpu.json
+```
+
+It records the commit, the machine (including the 1-minute load average), the
+thread count, the dtype, the model's size and SHA-256, min/median/p95, RSS at
+each stage, the arena size when the executor reports one, and a SHA-256 of
+every output. `--require-quiet N` refuses to measure when the load average is
+above `N`: a benchmark taken on a busy host is noise, and the number is recorded
+in the report so a reader can tell the two apart.
+
+`tools/bench/compare_perf.py --base A --head B` prints the transitions and
+fails when the median grows past 15 % or the peak RSS past 20 %, or when an
+output digest changed. `tools/ci/perf-lane.sh` runs both, and skips with an
+explanation when the model or the baseline is absent, because a model is not
+committed to this repository.
+
+The Python facade exposes no quantizing builder yet, so the harness refuses
+`--dtype u8|i8` instead of reporting an F32 number under a quantized label.
+Those dtypes are reachable from Rust through `CompileTarget`; measuring them
+from Python needs a facade first.
+
 ## Tests
 
 | Area | Command |

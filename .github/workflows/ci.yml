@@ -136,6 +136,20 @@ jobs:
           path: ${{ github.workspace }}/target/ci-lane-status/*.json
           if-no-files-found: ignore
 
+  perf:
+    name: "perf — advisory benchmark and accuracy digests"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Advisory: the lane skips with an explanation when the model or the
+      # committed baseline is absent, because no CNN model is pinned into this
+      # repository yet. Set PERF_MODEL (or cache one under
+      # tools/parity/.cache/models) and it measures for real.
+      - name: Run the advisory perf lane
+        run: tools/ci/perf-lane.sh
+
   packaging:
     name: "packaging / ${{ matrix.os }} — wheel install smoke, NO GPU"
     runs-on: ${{ matrix.os }}

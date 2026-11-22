@@ -1,0 +1,56 @@
+{
+  "arena_bytes": 40978048,
+  "commit": "c4635803ac3c113ce1014d12c1248f2a1a62534b",
+  "dtype": "f32",
+  "input": {
+    "name": "pixel_values",
+    "seed": 0,
+    "shape": [
+      1,
+      3,
+      336,
+      448
+    ]
+  },
+  "machine": {
+    "cpus": 16,
+    "load_average_1m": 11.375,
+    "platform": "Linux-7.3.5-arch1-1-x86_64-with-glibc2.44",
+    "processor": "x86_64",
+    "python": "3.13.15"
+  },
+  "memory_mb": {
+    "after_load": 113.8,
+    "before_load": 39.8,
+    "peak": 184.4
+  },
+  "model": {
+    "bytes": 19406435,
+    "name": "evit-depth-5m",
+    "path": "/tmp/opencode/cnn/evit.fnn",
+    "sha256": "8ccfb529d55820252d317e80e59256d1c2276fc64e92b692e125bffbb6bf0e23"
+  },
+  "outputs": {
+    "depth": {
+      "max": 2.1558611392974854,
+      "min": 0.8267627358436584,
+      "sha256": "84383e37e31d98a80663ad6956ae0022161721d1c171a64b5bd8286a66aeca2f",
+      "shape": [
+        1,
+        336,
+        448
+      ],
+      "sum": 226954.56713593006
+    }
+  },
+  "repeat": 10,
+  "schema": "fastnn-perf/1",
+  "threads": 8,
+  "timing_ms": {
+    "max": 36.099,
+    "median": 30.121,
+    "min": 29.402,
+    "p95": 31.349
+  },
+  "warmup": 3
+}
