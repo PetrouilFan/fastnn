@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
 """Measure one model and write a machine-readable performance report.
 
+NOTE: this script still drives the archived 2.x Python facade
+(`fastnn.build_model_from_fnn`, `fastnn.tensor_from_numpy`), which tag
+`archive/3.0` removed. It is kept as the schema and discipline for the v3
+harness (issue #106) and will be ported to the new `prepare`/`load`/`run`
+API before it is used again.
+
+NOTE: this script still drives the archived 2.x Python facade
+(`fastnn.build_model_from_fnn`, `fastnn.tensor_from_numpy`), which tag
+`archive/3.0` removed. It is kept as the schema and discipline for the v3
+harness (issue #106) and will be ported to the new `prepare`/`load`/`run`
+API before it is used again.
+
 Unit tests answer "is this correct"; this answers "how fast, on which machine,
 with how many threads, and does the output still match what it produced
 before". A single number from a single run is not evidence, so the report

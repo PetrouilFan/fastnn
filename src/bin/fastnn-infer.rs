@@ -1,14 +1,12 @@
-//! `fastnn-infer`: the FastNN 3.0 inference command-line tool (FN3-17 / #63).
+//! `fastnn-infer`: the FastNN inference command-line tool.
 //!
-//! Build without the default features so the Python extension module does not
-//! impose its linker mode on a standalone binary:
+//! Build without the `python` feature so the extension-module linker mode does
+//! not apply to a standalone binary:
 //!
 //! ```text
 //! cargo build --release --no-default-features --features cli
 //! cargo build --release --no-default-features --features cli,vulkan
 //! ```
-//!
-//! Run `fastnn-infer help`, or read `docs/quickstart-fn3.md`.
 
 fn main() {
     fastnn::inference::cli::main_entry();

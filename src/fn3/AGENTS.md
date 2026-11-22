@@ -1,7 +1,7 @@
 # FastNN inference core guide
 
 `src/fn3/` is the inference-only core and the crate's primary API. The contract
-authority is `docs/roadmap/fn3-architecture.md`.
+authority is `docs/archive/roadmap/fn3-architecture.md`.
 
 ## Ownership
 

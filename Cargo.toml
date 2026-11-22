@@ -2,25 +2,16 @@
 name = "fastnn"
 version = "3.0.0"
 edition = "2021"
-autobenches = false
-description = "Inference-only neural networks in Rust: ONNX decoder import, prepared-model artifacts, and CPU or Vulkan prefill/decode."
+description = "Inference-only neural-network runtime: strict ONNX import, a target-aware planner, prepared-model artifacts, and CPU or Vulkan execution."
 license = "MIT"
 repository = "https://github.com/PetrouilFan/fastnn"
 readme = "README.md"
 keywords = ["neural-network", "inference", "onnx", "vulkan", "python-bindings"]
 categories = ["science", "hardware-support"]
-# Verified floor: cargo check passes with 1.89.0 for the default features,
-# --no-default-features, --features cli,vulkan and the fn3-bench feature set;
-# 1.88.0 rejects the AVX-512 intrinsics in the retained 2.x CPU kernels.
 rust-version = "1.89"
-# Ship the crate's own sources and the Rust targets declared below. Fixtures,
-# models, docs, tests and the Python package are not part of the crate: the
-# fixture trees alone are 2.1 MiB of numeric test data.
 include = [
   "/src/**",
-  "/benches/**",
-  "/examples/**",
-  "/tools/bench/**",
+  "/tools/perf/**",
   "/Cargo.toml",
   "/README.md",
   "/CHANGELOG.md",
@@ -32,90 +23,47 @@ name = "fastnn"
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-pyo3          = { version = "0.28", features = ["extension-module", "abi3-py311"], optional = true }
-rayon         = { version = "1.8", optional = true }
-smallvec      = { version = "1.11", features = ["union", "const_generics"] }
-half          = "2.3"
-bytemuck      = "1.14"
-thiserror     = "1.0"
-parking_lot   = "0.12"
-dashmap       = "6"
-serde         = { version = "1.0", features = ["derive", "rc"] }
-serde_json    = "1.0"
-bincode       = "1.3"
-rand          = "0.8"
-gemm          = { version = "0.19", default-features = false, features = ["std", "rayon"] }
-core_affinity = "0.8"
-raw-cpuid = "11.0"
-openblas-src = { version = "0.10", optional = true }
-blas-src     = { version = "0.10", features = ["openblas"], optional = true }
-rustc-hash  = "2.0"
-# FN3-11 (#57): raw Vulkan loader for the 3.0 Vulkan backend. Optional so a
-# default build never touches the loader; enabled by `--features vulkan`.
-ash          = { version = "0.38", optional = true }
+pyo3        = { version = "0.28", features = ["extension-module", "abi3-py311"], optional = true }
+rayon       = { version = "1.8", optional = true }
+half        = "2.3"
+bytemuck    = "1.14"
+# The Python session object holds its inner state behind a parking_lot mutex so a
+# second call from another thread cannot observe a half-updated session.
+parking_lot = { version = "0.12", optional = true }
+# Raw Vulkan loader for the Vulkan backend. Optional so a default build never
+# touches the loader; enabled by `--features vulkan`.
+ash         = { version = "0.38", optional = true }
 
 [dev-dependencies]
-criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support", "html_reports"] }
+# Tests assert on JSON reports and fixture metadata; the library itself does not
+# parse JSON.
+serde_json = "1.0"
 
 [features]
-# Inference defaults: SIMD/threaded CPU kernels, forward fusion, PyO3 bindings
-# and the prepared-plan runtime.
-default = ["simd", "parallel", "fusion-forward", "python", "prepared-plan"]
+# A default build is a working CPU runtime with Python bindings. The Vulkan
+# backend is opt-in because an enabled feature advertises a device that must be
+# able to allocate and dispatch.
+default = ["parallel", "python"]
 
-# The 3.0 Vulkan compute backend. Opt-in because an enabled feature advertises
-# a device that must be able to allocate and dispatch; the four kernel families
-# are registered and tested on a physical GTX 1080 Ti.
+# FastNN Python bindings (`fastnn._core`).
+python = ["dep:pyo3", "dep:parking_lot"]
+# Session-managed CPU worker pool.
+parallel = ["dep:rayon"]
+# The Vulkan compute backend.
 vulkan = ["dep:ash"]
-# Deterministic fault injection for the FN3-27 (#73) runtime-hardening matrix.
-# Non-default and test-only: it adds no failure path unless a test arms one, and
-# it is compiled out of every shipped configuration.
+# Deterministic fault injection for the runtime-hardening matrix. Non-default
+# and test-only: it adds no failure path unless a test arms one.
 vulkan-fault-injection = ["vulkan"]
-# Links the real 3.0 prepared-model adapter into `fn3-bench` (FN3-21 / #67).
-# Off by default: the adapter reads a model manifest and a 28 MB artifact, and a
-# benchmark harness must not imply that it measured a model it was not given.
 fn3 = []
-# FastNN 3.0 Python bindings (`fastnn._core.inference`).
-python = ["dep:pyo3"]
-# CPU acceleration.
-openblas = ["blas-src/openblas-src"]
-blas = []
-parallel = ["rayon"]
-simd = []
-# Extra runtime assertions in the CPU direct-convolution kernels.
-debug_canary = []
-# Prepared-plan construction and the persistent executor path.
-prepared-plan = []
-
-# ── Forward fusion passes (compile-time modular) ─────────────────────────────
-fusion-forward = [
-  "fusion-op-relu",
-  "fusion-op-gelu",
-  "fusion-op-silu",
-  "fusion-matmul-add-relu",
-  "fusion-matmul-add-gelu",
-  "fusion-matmul-add-silu",
-  "fusion-residual-add-norm",
-]
-fusion-op-relu = []
-fusion-op-gelu = []
-fusion-op-silu = []
-fusion-matmul-add-relu = []
-fusion-matmul-add-gelu = []
-fusion-matmul-add-silu = []
-fusion-residual-add-norm = []
-
-# ── CLI binary ────────────────────────────────────────────────────────
-# Target gate only: `fastnn-infer` declares `required-features = ["cli"]`.
-# The feature enables no dependency.
+# The `fastnn-infer` CLI. Enables no dependency; the binary declares it.
 cli = []
 
-[[example]]
-name = "gemm_bench"
-path = "examples/gemm_bench.rs"
-
-[[example]]
-name = "packed_bench"
-path = "benches/packed_bench.rs"
+# The inference CLI is built without the `python` feature: PyO3's
+# extension-module mode is for shared libraries, not standalone binaries.
+[[bin]]
+name = "fastnn-infer"
+path = "src/bin/fastnn-infer.rs"
+required-features = ["cli"]
 
 [profile.release]
 lto = true
@@ -131,23 +79,3 @@ codegen-units = 1
 opt-level = 3
 debug = false
 strip = true
-
-[[bench]]
-name = "cpu_baselines"
-path = "benches/cpu_baselines.rs"
-harness = false
-
-# FN3-04 reproducible benchmark harness. Build with --no-default-features
-# (the default `python` feature makes pyo3 an extension-module and breaks
-# standalone binary linking); add simd/parallel/prepared-plan explicitly for
-# measurements that should reflect the default CPU configuration.
-[[bin]]
-name = "fn3-bench"
-path = "tools/bench/main.rs"
-
-# The inference CLI is built without the default `python` feature: PyO3's
-# extension-module mode is for shared libraries, not standalone binaries.
-[[bin]]
-name = "fastnn-infer"
-path = "src/bin/fastnn-infer.rs"
-required-features = ["cli"]
