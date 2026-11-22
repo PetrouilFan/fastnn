@@ -24,7 +24,7 @@ Download the wheel for your platform from [GitHub Releases](https://github.com/P
 python -m pip install ./path/to/downloaded.whl
 ```
 
-The repository's [installation guide](docs/guides/getting-started.md) covers source builds. For reproducible release builds, check out the corresponding Git tag.
+The repository's [installation guide](docs/quickstart-fn3.md) covers source builds. For reproducible release builds, check out the corresponding Git tag.
 
 ## Run a model
 
@@ -65,13 +65,15 @@ Each session owns its KV cache. Set `weight_int8=True` on `inference.load` to en
 
 ## Verification and performance
 
-The 3.0.0 evidence covers tiny and trained GPT-2 on Linux x86-64, with physical Vulkan runs on a GeForce GTX 1080 Ti. Wheel availability is broader than the verified inference matrix. The importer accepts a defined subset of ONNX graphs and returns errors for unsupported operators or shapes. See the [support matrix](docs/reports/fn3-74-support-matrix.md) for tested platforms, drivers, model variants, and context lengths.
+The 3.0.0 evidence covers tiny and trained GPT-2 on Linux x86-64, with physical Vulkan runs on a GeForce GTX 1080 Ti. Wheel availability is broader than the verified inference matrix. The importer accepts a defined subset of ONNX graphs and returns errors for unsupported operators or shapes. See the [support matrix](docs/archive/reports/fn3-74-support-matrix.md) for tested platforms, drivers, model variants, and context lengths.
 
-Quantization reduces the size of eligible projection weights. End-to-end latency and memory use depend on the model, backend, and context. The [3.0.0 validation report](docs/reports/fn3-3.0.0-release.md) links the benchmark commands and raw results.
+Quantization reduces the size of eligible projection weights. End-to-end latency and memory use depend on the model, backend, and context. The [3.0.0 validation report](docs/archive/reports/fn3-3.0.0-release.md) links the benchmark commands and raw results.
 
 ## Documentation
 
-- [CLI quickstart](docs/quickstart-fn3.md) and [Python API](docs/reference/python-api.md)
-- [INT8 execution](docs/quantization/artifact-int8.md) and [runtime architecture](docs/roadmap/fn3-architecture.md)
-- [Migration from 2.x](docs/guides/migrate-from-2x.md) and [changelog](CHANGELOG.md)
+- [CLI quickstart](docs/quickstart-fn3.md) and the [v3 design record](docs/v3/adr-0001-one-runtime.md)
+- [Artifact INT8](docs/archive/quantization/artifact-int8.md) and the
+  [3.0 runtime architecture](docs/archive/roadmap/fn3-architecture.md) (archived:
+  they describe tag `archive/3.0`)
+- [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md) and [documentation index](docs/index.md)

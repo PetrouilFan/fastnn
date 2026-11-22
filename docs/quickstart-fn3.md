@@ -11,7 +11,7 @@ does not approximate one; see [Token IDs](#token-ids) at the end.
 
 Run the commands below from the repository root on the pinned tiny-GPT-2
 model. The sample output uses the current CLI name; the original run is
-recorded in [FN3-17 evidence](reports/fn3-17-cli-quickstart.md).
+recorded in [FN3-17 evidence](archive/reports/fn3-17-cli-quickstart.md).
 
 ## 0. Build
 
@@ -450,7 +450,7 @@ trained model and decode is 7–10% slower. `--device vulkan` with
 falling back to CPU. In Python,
 `fastnn.inference.load(artifact, weight_int8=True)` sets the same option and
 `session.weight_int8_report` returns the same fields as a dict. See
-[artifact INT8](quantization/artifact-int8.md).
+[artifact INT8](archive/quantization/artifact-int8.md).
 
 ## Token IDs
 

@@ -2,9 +2,9 @@
 
 This directory owns the investigation that decides whether the trained GPT-2
 `mean_abs` excess is a numerical defect or a tolerance-policy problem. The
-report is [`docs/reports/fn3-trained-fp32.md`](../../../docs/reports/fn3-trained-fp32.md);
+report is [`docs/reports/fn3-trained-fp32.md`](../../../docs/archive/reports/fn3-trained-fp32.md);
 the raw reduced outputs are in
-[`docs/reports/fn3-trained-fp32/`](../../../docs/reports/fn3-trained-fp32/).
+[`docs/reports/fn3-trained-fp32/`](../../../docs/archive/reports/fn3-trained-fp32/).
 
 Nothing here runs in CI and no model weights are stored in the repository. The
 scripts are standard Python 3 plus NumPy/ONNX/ONNX Runtime; the Rust probes are

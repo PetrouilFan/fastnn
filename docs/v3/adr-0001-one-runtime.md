@@ -2,7 +2,7 @@
 
 - **Status:** accepted
 - **Date:** 2026-11-22
-- **Supersedes:** `docs/roadmap/fn3-architecture.md`, the 3.1 roadmap (#81)
+- **Supersedes:** `docs/archive/roadmap/fn3-architecture.md`, the 3.1 roadmap (#81)
 - **Related:** epic #94, children #95–#111
 
 ## Context

@@ -29,4 +29,4 @@ results over assertions about private file layout.
   making unrelated tests slow.
 
 Run the narrowest affected test first, then the structural verification gates
-in `docs/roadmap/codebase-reorganization.md` before declaring a move complete.
+in `docs/archive/roadmap/codebase-reorganization.md` before declaring a move complete.
