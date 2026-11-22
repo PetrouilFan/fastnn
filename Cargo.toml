@@ -63,6 +63,10 @@ cpu-onednn = ["dep:onednn-src"]
 # Deterministic fault injection for the runtime-hardening matrix. Non-default
 # and test-only: it adds no failure path unless a test arms one.
 vulkan-fault-injection = ["vulkan"]
+# Per-segment wall-clock accounting, for performance work only. Non-default and
+# test-only: with it off no clock is read and `Session` has no timing field, so
+# the feature costs exactly nothing in a shipped build.
+segment-timing = []
 fn3 = []
 # The `fastnn-infer` CLI. Enables no dependency; the binary declares it.
 cli = []

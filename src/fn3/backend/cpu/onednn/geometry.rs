@@ -413,7 +413,19 @@ impl MatMul {
     }
 }
 
-/// A contiguous range of convolution output channels.
+/// A contiguous range of convolution output.
+///
+/// A block is split along exactly one dimension, recorded in
+/// [`ConvSplit::axis`]:
+///
+/// - [`ConvSplitAxis::Channels`]: `out_start..out_start + out_channels` and,
+///   for a grouped convolution, `in_start..in_start + in_channels`; the row
+///   fields describe the whole output.
+/// - [`ConvSplitAxis::Rows`]: the whole channel range, output rows
+///   `out_row_start..out_row_start + out_rows`, and the input rows
+///   `in_row_start..in_row_start + in_rows` that those output rows need,
+///   including the halo but excluding rows outside the input (which
+///   `pad_top`/`pad_bottom` let the convolution's own padding supply).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ConvBlock {
     /// First group this block covers.
@@ -428,6 +440,38 @@ pub(crate) struct ConvBlock {
     pub in_start: usize,
     /// Input channels the block reads.
     pub in_channels: usize,
+    /// First output row of the block.
+    pub out_row_start: usize,
+    /// Output rows the block writes.
+    pub out_rows: usize,
+    /// First input row of the block's source submemory.
+    pub in_row_start: usize,
+    /// Input rows in the block's source submemory.
+    pub in_rows: usize,
+    /// Padding rows oneDNN must add before `in_row_start` (a first block that
+    /// begins inside the parent's top padding).
+    pub pad_top: usize,
+    /// Padding rows oneDNN must add after the submemory (a last block that
+    /// ends inside the parent's bottom padding).
+    pub pad_bottom: usize,
+}
+
+/// The dimension a convolution segment is split along.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConvSplitAxis {
+    /// Contiguous output-channel ranges (the phase-3a split).
+    Channels,
+    /// Contiguous output-row ranges with an input halo (phase 3b).
+    Rows,
+}
+
+/// A convolution's complete block plan for one worker count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConvSplit {
+    /// Which dimension the blocks divide.
+    pub axis: ConvSplitAxis,
+    /// The blocks, in ascending output order.
+    pub blocks: Vec<ConvBlock>,
 }
 
 /// Split `units` work units into at most `workers` contiguous, evenly sized
@@ -471,14 +515,62 @@ fn split_units(
 impl Conv {
     /// The block split for this convolution and this session's worker count.
     ///
-    /// A **plain** convolution splits its output channels directly. A
-    /// **grouped** one splits whole groups, because the weights of one group
-    /// only multiply that group's input channels; a boundary inside a group
-    /// would make each block a smaller one-group convolution with a partial
-    /// weight row, which oneDNN cannot express as a submemory of the ONNX
-    /// `[O, C/g, kh, kw]` payload. Depthwise convolutions (`C_out/g ==
-    /// 1`) therefore still split one channel per block.
-    pub(crate) fn blocks(&self, workers: usize) -> Vec<ConvBlock> {
+    /// A plain convolution can divide its output two ways:
+    ///
+    /// - **channels**, the phase-3a split: each block reads the full input (a
+    ///   plain convolution has no channel submemory), so `B` blocks move `B`
+    ///   times the input bytes. Correct, but on a memory-bound graph eight
+    ///   blocks scale like one.
+    /// - **rows with a halo**, phase 3b: each block reads only the input rows
+    ///   its output rows need. Consecutive blocks overlap by the kernel's
+    ///   halo, so the input moves about `(H + halo) / H` times instead of `B`
+    ///   times. A block near the top or bottom of the input is clamped to the
+    ///   real memory and the missing rows are supplied by oneDNN's
+    ///   convolution padding (`pad_top`/`pad_bottom`), so no block ever reads
+    ///   outside the source slot.
+    ///
+    /// The choice is deterministic from `(shape, params, workers)`:
+    ///
+    /// 1. split channels when row splitting would produce fewer blocks than the
+    ///    channel split (parallelism is never traded away);
+    /// 2. otherwise split rows when their estimated input traffic is lower.
+    ///
+    /// A grouped convolution's channel blocks read only their own channels, so
+    /// the traffic estimate keeps it on channels; a depthwise convolution
+    /// therefore never pays for a halo it does not need. A one-worker session
+    /// gets one block either way.
+    pub(crate) fn split(&self, workers: usize) -> ConvSplit {
+        let channels = self.channel_blocks(workers);
+        let rows = self.row_blocks(workers);
+        if self.prefer_rows(&channels, &rows) {
+            ConvSplit {
+                axis: ConvSplitAxis::Rows,
+                blocks: rows,
+            }
+        } else {
+            ConvSplit {
+                axis: ConvSplitAxis::Channels,
+                blocks: channels,
+            }
+        }
+    }
+
+    fn channel_blocks(&self, workers: usize) -> Vec<ConvBlock> {
+        let whole_output =
+            |out_start, out_channels, group_start, groups, in_start, in_channels| ConvBlock {
+                group_start,
+                groups,
+                out_start,
+                out_channels,
+                in_start,
+                in_channels,
+                out_row_start: 0,
+                out_rows: self.out_hw[0],
+                in_row_start: 0,
+                in_rows: self.in_hw[0],
+                pad_top: 0,
+                pad_bottom: 0,
+            };
         if self.group == 1 {
             let split = split_units(
                 self.out_channels,
@@ -488,13 +580,8 @@ impl Conv {
             );
             return split
                 .into_iter()
-                .map(|(out_start, out_channels)| ConvBlock {
-                    group_start: 0,
-                    groups: 1,
-                    out_start,
-                    out_channels,
-                    in_start: 0,
-                    in_channels: self.in_channels,
+                .map(|(out_start, out_channels)| {
+                    whole_output(out_start, out_channels, 0, 1, 0, self.in_channels)
                 })
                 .collect();
         }
@@ -507,15 +594,89 @@ impl Conv {
         );
         split
             .into_iter()
-            .map(|(group_start, groups)| ConvBlock {
-                group_start,
-                groups,
-                out_start: group_start * per_group,
-                out_channels: groups * per_group,
-                in_start: group_start * self.in_per_group,
-                in_channels: groups * self.in_per_group,
+            .map(|(group_start, groups)| {
+                whole_output(
+                    group_start * per_group,
+                    groups * per_group,
+                    group_start,
+                    groups,
+                    group_start * self.in_per_group,
+                    groups * self.in_per_group,
+                )
             })
             .collect()
+    }
+
+    /// The row split: at most `workers` contiguous output-row ranges, each with
+    /// the input rows its dilated windows touch.
+    fn row_blocks(&self, workers: usize) -> Vec<ConvBlock> {
+        let out_rows_total = self.out_hw[0];
+        if out_rows_total == 0 {
+            return Vec::new();
+        }
+        let row_elements = self.batch * self.out_channels * self.out_hw[1];
+        let payload_rows = MIN_BLOCK_ELEMENTS.div_ceil(row_elements.max(1)).max(1);
+        // A block that covers less than one dilated kernel span would read more
+        // halo than output. That is a floor on rows, not a size tuning knob.
+        let kernel_rows = ((self.kernel[0] - 1) * self.dilations[0]).div_ceil(self.strides[0]) + 1;
+        let min_rows = payload_rows.max(kernel_rows).min(out_rows_total);
+        let blocks = workers.max(1).min(out_rows_total / min_rows).max(1);
+        let base = out_rows_total / blocks;
+        let remainder = out_rows_total % blocks;
+        let stride = self.strides[0] as i64;
+        let dilation = self.dilations[0] as i64;
+        let kernel = self.kernel[0] as i64;
+        let pad_top = self.pads[0].0;
+        let in_rows_total = self.in_hw[0] as i64;
+        let mut result = Vec::with_capacity(blocks);
+        let mut out_row_start = 0usize;
+        for index in 0..blocks {
+            let out_rows = base + usize::from(index < remainder);
+            // The parent convolution reads input row `r * stride - pad_top`
+            // through `r * stride - pad_top + (kh - 1) * dilation` for output
+            // row `r`; a block needs the union over its own rows.
+            let ideal_start = out_row_start as i64 * stride - pad_top;
+            let ideal_end =
+                (out_row_start + out_rows - 1) as i64 * stride + (kernel - 1) * dilation + 1
+                    - pad_top;
+            let row_start = ideal_start.max(0);
+            let row_end = ideal_end.min(in_rows_total);
+            debug_assert!(row_end > row_start, "an existing output row has a window");
+            result.push(ConvBlock {
+                group_start: 0,
+                groups: self.group,
+                out_start: 0,
+                out_channels: self.out_channels,
+                in_start: 0,
+                in_channels: self.in_channels,
+                out_row_start,
+                out_rows,
+                in_row_start: row_start as usize,
+                in_rows: (row_end - row_start) as usize,
+                // Only the padding outside the real input is handed back to
+                // oneDNN; the submemory starts at a real row.
+                pad_top: (-ideal_start).max(0) as usize,
+                pad_bottom: (ideal_end - in_rows_total).max(0) as usize,
+            });
+            out_row_start += out_rows;
+        }
+        result
+    }
+
+    /// `true` when the row split moves less input and keeps the parallelism.
+    fn prefer_rows(&self, channels: &[ConvBlock], rows: &[ConvBlock]) -> bool {
+        if rows.len() <= 1 || rows.len() < channels.len() {
+            return false;
+        }
+        let channel_cells: usize = channels
+            .iter()
+            .map(|block| block.in_channels * self.in_hw[0] * self.in_hw[1] * self.batch)
+            .sum();
+        let row_cells: usize = rows
+            .iter()
+            .map(|block| block.in_channels * block.in_rows * self.in_hw[1] * self.batch)
+            .sum();
+        row_cells < channel_cells
     }
 }
 
@@ -557,7 +718,7 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_convolution_splits_channels_evenly_and_deterministically() {
+    fn a_plain_convolution_prefers_rows_when_channels_do_not_fill_the_pool() {
         let conv = Conv::new(
             &Shape::from_dims([1, 64, 40, 40]),
             &Shape::from_dims([64, 64, 3, 3]),
@@ -566,20 +727,72 @@ mod tests {
         )
         .unwrap();
         // 64 channels of 40x40 is 102 Ki elements; the 16 Ki payload floor
-        // keeps one block to at least 11 channels, so eight workers get five
-        // blocks rather than eight.
-        let blocks = conv.blocks(8);
-        assert_eq!(blocks.len(), 5);
-        assert_eq!(blocks.iter().map(|b| b.out_channels).sum::<usize>(), 64);
+        // keeps a channel block to at least 11 channels, so the channel split
+        // gives five blocks. The row split also gives five blocks (eight output
+        // rows each) but reads 49 input rows instead of 5 x 40, so it wins.
+        let split = conv.split(8);
+        assert_eq!(split.axis, ConvSplitAxis::Rows);
+        assert_eq!(split.blocks.len(), 5);
         assert_eq!(
-            blocks.iter().map(|b| b.out_channels).collect::<Vec<_>>(),
-            vec![13, 13, 13, 13, 12]
+            split.blocks.iter().map(|b| b.out_rows).collect::<Vec<_>>(),
+            vec![8, 8, 8, 8, 8]
         );
-        assert_eq!(blocks[3].out_start, 39);
-        assert_eq!(conv.blocks(8), blocks);
-        // One worker is one block.
-        assert_eq!(conv.blocks(1).len(), 1);
-        assert_eq!(conv.blocks(1)[0].out_channels, 64);
+        assert_eq!(
+            split.blocks.iter().map(|b| b.in_rows).sum::<usize>(),
+            48,
+            "eight output rows need nine input rows, interior blocks ten, plus a nine-row tail"
+        );
+        assert_eq!(split.blocks[0].pad_top, 1);
+        assert_eq!(split.blocks[0].in_row_start, 0);
+        assert_eq!(split.blocks[4].pad_bottom, 1);
+        for block in &split.blocks {
+            assert_eq!(block.out_channels, 64);
+            assert_eq!(block.in_channels, 64);
+            assert!(block.in_row_start + block.in_rows <= 40);
+        }
+        // Deterministic for the same thread count.
+        assert_eq!(conv.split(8), split);
+        // One worker is one channel block, never a row split.
+        let one = conv.split(1);
+        assert_eq!(one.axis, ConvSplitAxis::Channels);
+        assert_eq!(one.blocks.len(), 1);
+        assert_eq!(one.blocks[0].out_channels, 64);
+    }
+
+    #[test]
+    fn a_first_convolution_splits_rows_to_fill_the_pool() {
+        // YOLOv8n's first convolution: 3 -> 16 channels, 320x320, stride 2. The
+        // channel split cannot make more than two blocks (the 16 Ki payload
+        // floor wants eight channels), so rows are the only way to use eight
+        // workers.
+        let conv = Conv::new(
+            &Shape::from_dims([1, 3, 320, 320]),
+            &Shape::from_dims([16, 3, 3, 3]),
+            &Shape::from_dims([1, 16, 160, 160]),
+            &OpParams::new()
+                .with_kernel_shape([3, 3])
+                .with_strides([2, 2])
+                .with_pads([1, 1, 1, 1])
+                .with_dilations([1, 1]),
+        )
+        .unwrap();
+        let split = conv.split(8);
+        assert_eq!(split.axis, ConvSplitAxis::Rows);
+        assert_eq!(split.blocks.len(), 8);
+        assert_eq!(split.blocks.iter().map(|b| b.out_rows).sum::<usize>(), 160);
+        let first = split.blocks.first().unwrap();
+        assert_eq!(first.in_row_start, 0);
+        assert_eq!(first.pad_top, 1, "the parent's top pad is one row");
+        let last = split.blocks.last().unwrap();
+        assert_eq!(
+            last.pad_bottom, 0,
+            "160 is even; the last window ends at 320"
+        );
+        assert!(last.in_row_start + last.in_rows <= 320);
+        // The halo is read twice, not the full input eight times.
+        let halo_rows: usize = split.blocks.iter().map(|b| b.in_rows).sum();
+        assert!(halo_rows < 8 * 320, "{halo_rows}");
+        assert!(halo_rows <= 320 + 8 * 2, "{halo_rows}");
     }
 
     #[test]
@@ -593,9 +806,13 @@ mod tests {
             &p,
         )
         .unwrap();
-        let blocks = conv.blocks(8);
-        assert_eq!(blocks.len(), 4, "one block per group at most");
-        for (index, block) in blocks.iter().enumerate() {
+        // A grouped block reads only its own input channels, so the channel
+        // split already moves each input row once; rows would add halo traffic
+        // for no bandwidth win.
+        let split = conv.split(8);
+        assert_eq!(split.axis, ConvSplitAxis::Channels);
+        assert_eq!(split.blocks.len(), 4, "one block per group at most");
+        for (index, block) in split.blocks.iter().enumerate() {
             assert_eq!(block.out_start, index * 16);
             assert_eq!(block.out_channels, 16);
             assert_eq!(block.groups, 1);
@@ -617,20 +834,23 @@ mod tests {
         .unwrap();
         // One group per channel, 32x32 each: the payload floor wants 16
         // channels per block, so eight workers get four blocks.
-        let blocks = conv.blocks(8);
-        assert_eq!(blocks.len(), 4);
-        assert_eq!(blocks.iter().map(|b| b.out_channels).sum::<usize>(), 64);
-        assert!(blocks.iter().all(|b| b.out_channels == 16));
-        assert_eq!(blocks[1].group_start, 16);
+        let split = conv.split(8);
+        assert_eq!(split.axis, ConvSplitAxis::Channels);
+        assert_eq!(split.blocks.len(), 4);
+        assert_eq!(
+            split.blocks.iter().map(|b| b.out_channels).sum::<usize>(),
+            64
+        );
+        assert!(split.blocks.iter().all(|b| b.out_channels == 16));
+        assert_eq!(split.blocks[1].group_start, 16);
     }
 
     #[test]
     fn a_small_problem_stays_one_block() {
-        let mut p = OpParams::new()
+        let p = OpParams::new()
             .with_kernel_shape([1, 1])
             .with_strides([1, 1])
             .with_dilations([1, 1]);
-        p.group = 1;
         let conv = Conv::new(
             &Shape::from_dims([1, 4, 2, 2]),
             &Shape::from_dims([4, 4, 1, 1]),
@@ -638,12 +858,14 @@ mod tests {
             &p,
         )
         .unwrap();
-        assert_eq!(conv.blocks(8).len(), 1);
+        let split = conv.split(8);
+        assert_eq!(split.axis, ConvSplitAxis::Channels);
+        assert_eq!(split.blocks.len(), 1);
     }
 
     #[test]
     fn ceil_mode_and_batched_matmul_fall_back() {
-        let mut p = OpParams::new()
+        let p = OpParams::new()
             .with_kernel_shape([2, 2])
             .with_strides([2, 2])
             .with_ceil_mode(true);

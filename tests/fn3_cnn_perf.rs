@@ -20,6 +20,10 @@
 //!     --test fn3_cnn_perf -- --nocapture
 //! ```
 //!
+//! Add `--features segment-timing` to print the per-op table (`calls`, median
+//! total ms, share) at one and eight threads. That feature compiles the timing
+//! into `Session`; a normal build has no clock read and no timing field.
+//!
 //! `Evidence` lines start with `[fn3perf]`.
 //!
 //! The ONNX Runtime side of the table is produced by
@@ -31,6 +35,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use fastnn::inference::import::{import_onnx_graph, ImportedGraph};
+#[cfg(feature = "segment-timing")]
+use fastnn::inference::ops::OpId;
 use fastnn::inference::runtime::{physical_core_count, EngineChoice, Session, Threading};
 
 const YOLOV8N: &str = "/home/petrouil/.hermes/yolov8n.onnx";
@@ -40,6 +46,14 @@ const WARMUP: usize = 3;
 
 /// Timed forwards.
 const ITERATIONS: usize = 30;
+
+/// Groups of forwards per op in the per-op table (the median is over groups).
+#[cfg(feature = "segment-timing")]
+const TIMING_REPEATS: usize = 3;
+
+/// Forwards per group in the per-op table.
+#[cfg(feature = "segment-timing")]
+const TIMING_FORWARDS: usize = 3;
 
 fn machine() -> String {
     let model = std::fs::read_to_string("/proc/cpuinfo")
@@ -127,6 +141,117 @@ fn measure(
     let _ = threads;
 }
 
+/// One op's row in the timing table.
+#[cfg(feature = "segment-timing")]
+struct OpRow {
+    op: OpId,
+    calls: f64,
+    total_ms: f64,
+    longest_ms: f64,
+}
+
+/// Print the per-op table for one engine and worker count.
+///
+/// Each repeat is [`TIMING_FORWARDS`] forwards with the session's timing table
+/// reset first; the reported total is the median of the repeats divided by the
+/// forwards, so a single scheduling hiccup cannot move the table. Warm-up
+/// forwards are not counted.
+#[cfg(feature = "segment-timing")]
+fn print_segment_timings(
+    engine: &str,
+    imported: &Arc<ImportedGraph>,
+    input: &[f32],
+    workers: usize,
+) {
+    let choice = if engine == "scalar" {
+        EngineChoice::Scalar
+    } else {
+        EngineChoice::Auto
+    };
+    let mut session = Session::new_with(Arc::clone(imported), Threading::Fixed(workers), choice)
+        .expect("open the timing session");
+    for _ in 0..WARMUP {
+        session
+            .run(&[("images", input)])
+            .expect("a timing warm-up forward must succeed");
+    }
+    let mut repeats: Vec<Vec<(OpId, u64, f64, f64)>> = Vec::with_capacity(TIMING_REPEATS);
+    let mut wall = Vec::with_capacity(TIMING_REPEATS);
+    for _ in 0..TIMING_REPEATS {
+        session.reset_segment_timings();
+        let started = Instant::now();
+        for _ in 0..TIMING_FORWARDS {
+            session
+                .run(&[("images", input)])
+                .expect("a timing forward must succeed");
+        }
+        wall.push(started.elapsed().as_secs_f64() * 1000.0 / TIMING_FORWARDS as f64);
+        repeats.push(
+            session
+                .segment_timings()
+                .entries()
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.op,
+                        entry.calls,
+                        entry.total.as_secs_f64() * 1000.0,
+                        entry.longest.as_secs_f64() * 1000.0,
+                    )
+                })
+                .collect(),
+        );
+    }
+    let mut rows: Vec<OpRow> = Vec::with_capacity(repeats[0].len());
+    for (index, &(op, _, _, _)) in repeats[0].iter().enumerate() {
+        let mut totals = Vec::with_capacity(TIMING_REPEATS);
+        let mut longest = 0.0f64;
+        let mut calls = 0u64;
+        for repeat in &repeats {
+            let entry = repeat
+                .get(index)
+                .filter(|entry| entry.0 == op)
+                .expect("the same plan must record the same ops in the same order");
+            totals.push(entry.2 / TIMING_FORWARDS as f64);
+            longest = longest.max(entry.3);
+            calls = entry.1;
+        }
+        totals.sort_by(|a, b| a.partial_cmp(b).expect("finite durations"));
+        rows.push(OpRow {
+            op,
+            calls: calls as f64 / TIMING_FORWARDS as f64,
+            total_ms: percentile(&totals, 0.50),
+            longest_ms: longest,
+        });
+    }
+    rows.sort_by(|a, b| {
+        b.total_ms
+            .partial_cmp(&a.total_ms)
+            .expect("finite durations")
+    });
+    let accounted: f64 = rows.iter().map(|row| row.total_ms).sum();
+    wall.sort_by(|a, b| a.partial_cmp(b).expect("finite durations"));
+    let wall_median = percentile(&wall, 0.50);
+    println!(
+        "[fn3perf][timing] engine {engine}, threads {workers}, median forward {wall_median:.2} ms, \
+         segments {accounted:.2} ms, glue {:.2} ms (median of {TIMING_REPEATS} groups of \
+         {TIMING_FORWARDS})",
+        wall_median - accounted
+    );
+    println!("[fn3perf][timing]   op              calls  total_ms   share   mean_ms  longest_ms");
+    for row in &rows {
+        println!(
+            "[fn3perf][timing]   {:<15} {:>5.1}  {:>8.2}  {:>6.1}%  {:>8.3}  {:>8.3}",
+            row.op.name(),
+            row.calls,
+            row.total_ms,
+            100.0 * row.total_ms / accounted.max(f64::MIN_POSITIVE),
+            row.total_ms / row.calls.max(1.0),
+            row.longest_ms,
+        );
+    }
+}
+
 #[test]
 fn cnn_forward_latency() {
     let Some(engine) =
@@ -178,6 +303,8 @@ fn cnn_forward_latency() {
             )
             .expect("open the scalar session");
             measure("scalar", workers, workers, session, &input, None);
+            #[cfg(feature = "segment-timing")]
+            print_timing_tables(&engine, &imported, &input);
         }
         "onednn" => {
             #[cfg(feature = "cpu-onednn")]
@@ -190,24 +317,44 @@ fn cnn_forward_latency() {
                 .expect("open the oneDNN session");
                 let report = session.one_dnn_report().map(|report| {
                     format!(
-                        "oneDNN {} ({} runtime), {} segments ({} conv, {} pool, {} matmul), \
-                         {} prepacked bytes, {} reordered weight blocks, parallel blocks {}",
+                        "oneDNN {} ({} runtime), {} segments ({} conv: {} row-split, {} \
+                         channel-split; {} pool, {} matmul), {} prepacked bytes, {} staging \
+                         bytes, {} reordered weight blocks, parallel blocks {}",
                         report.version,
                         report.cpu_runtime,
                         report.segments,
                         report.conv_segments,
+                        report.conv_row_segments,
+                        report.conv_channel_segments,
                         report.pool_segments,
                         report.matmul_segments,
                         report.prepacked_bytes,
+                        report.staging_bytes,
                         report.reordered_blocks,
                         report.parallel_blocks
                     )
                 });
                 measure("onednn", workers, workers, session, &input, report);
+                #[cfg(feature = "segment-timing")]
+                print_timing_tables(&engine, &imported, &input);
             }
             #[cfg(not(feature = "cpu-onednn"))]
             panic!("FN3_CNN_PERF=onednn needs --features cpu-onednn");
         }
         other => panic!("FN3_CNN_PERF must be `scalar` or `onednn`, not {other:?}"),
+    }
+}
+
+/// The per-op table at one and eight threads.
+///
+/// Both tables come from fresh sessions on the same imported graph, after the
+/// latency measurement above, so the peak-RSS line stays a single-engine number.
+#[cfg(feature = "segment-timing")]
+fn print_timing_tables(engine: &str, imported: &Arc<ImportedGraph>, input: &[f32]) {
+    for threads in [1usize, 8] {
+        if threads > 1 && !cfg!(feature = "parallel") {
+            continue;
+        }
+        print_segment_timings(engine, imported, input, threads);
     }
 }

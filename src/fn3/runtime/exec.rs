@@ -70,6 +70,8 @@ use crate::inference::storage::{AlignedBuffer, DTypeAlignment};
 use crate::inference::tensor::{TensorMeta, TensorMut, TensorView};
 
 #[cfg(feature = "cpu-onednn")]
+use crate::inference::backend::cpu::onednn::geometry::ConvSplitAxis;
+#[cfg(feature = "cpu-onednn")]
 use crate::inference::backend::cpu::onednn::{OneDnnCapability, OneDnnEngine, SegmentSpec};
 
 /// One graph output, materialised on the host.
@@ -166,6 +168,10 @@ pub struct OneDnnReport {
     pub segments: usize,
     /// Convolution segments prepared.
     pub conv_segments: usize,
+    /// Convolution segments divided along output channels.
+    pub conv_channel_segments: usize,
+    /// Convolution segments divided along output rows with a halo.
+    pub conv_row_segments: usize,
     /// Pooling segments prepared.
     pub pool_segments: usize,
     /// Matmul segments prepared.
@@ -175,9 +181,43 @@ pub struct OneDnnReport {
     /// Weight blocks oneDNN wanted in a layout other than the ONNX payload's,
     /// i.e. blocks that needed a real reorder at session open.
     pub reordered_blocks: usize,
+    /// Bytes of dense source/destination staging owned by row-split blocks.
+    pub staging_bytes: usize,
     /// `true` when blocks are executed on the session's pool; `false` when a
     /// non-sequential oneDNN build forced serial block execution.
     pub parallel_blocks: bool,
+}
+
+/// Which dimension a convolution segment's blocks divide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConvBlockAxis {
+    /// Contiguous output-channel ranges.
+    Channels,
+    /// Contiguous output-row ranges with an input halo.
+    Rows,
+}
+
+/// One convolution's block plan, recorded at session open.
+///
+/// A forward never re-decides this. The split is a pure function of the
+/// segment's shape and attributes and the session's worker count, and it is
+/// stored in the prepared segment, so this report is what the engine will
+/// execute rather than a second calculation that could disagree with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConvSplitReport {
+    /// Position of the convolution in [`Plan::segments`].
+    pub segment: usize,
+    /// The dimension the blocks divide.
+    pub axis: ConvBlockAxis,
+    /// Number of blocks.
+    pub blocks: usize,
+    /// `(start, count)` per block, in the split dimension: output channels for
+    /// [`ConvBlockAxis::Channels`], output rows for [`ConvBlockAxis::Rows`].
+    pub ranges: Vec<(usize, usize)>,
+    /// Input rows read across all blocks: the halo traffic proxy.
+    pub source_rows: usize,
+    /// The split dimension's total extent in the parent output.
+    pub out_extent: usize,
 }
 
 /// A session: an immutable plan over one mutable arena.
@@ -202,6 +242,12 @@ pub struct Session {
     /// Per slot: an aligned copy of a weight payload, only when the importer's
     /// bytes were not aligned for their dtype.
     aligned_weights: Vec<Option<AlignedBuffer>>,
+    /// Per-segment wall times, only in a `segment-timing` build.
+    ///
+    /// Plain per-session data, updated after a segment returns by the thread
+    /// that called [`Session::execute`]; see `runtime::timing`.
+    #[cfg(feature = "segment-timing")]
+    timings: crate::inference::runtime::timing::SegmentTimings,
 }
 
 impl Session {
@@ -335,6 +381,8 @@ impl Session {
             source,
             slot_meta,
             aligned_weights,
+            #[cfg(feature = "segment-timing")]
+            timings: crate::inference::runtime::timing::SegmentTimings::default(),
         })
     }
 
@@ -388,6 +436,8 @@ impl Session {
             source,
             slot_meta,
             aligned_weights,
+            #[cfg(feature = "segment-timing")]
+            timings,
         } = self;
         if inputs.len() != plan.inputs.len() {
             return Err(Fn3Error::ShapeMismatch {
@@ -437,6 +487,12 @@ impl Session {
         }
 
         for (segment_index, segment) in plan.segments.iter().enumerate() {
+            // One clock pair per segment, compiled out entirely without the
+            // `segment-timing` feature. The record happens on this thread after
+            // the segment (and any pool work it started) has finished, so the
+            // table is never shared mutably.
+            #[cfg(feature = "segment-timing")]
+            let started = std::time::Instant::now();
             match segment.engine {
                 SegmentEngine::Scalar => {
                     let (input_windows, output_windows) =
@@ -530,6 +586,8 @@ impl Session {
                     }
                 }
             }
+            #[cfg(feature = "segment-timing")]
+            timings.record(segment.op_id(), started.elapsed());
         }
         Ok(())
     }
@@ -537,6 +595,26 @@ impl Session {
     /// How many segments each engine runs in this session's plan.
     pub fn engine_counts(&self) -> EngineCounts {
         self.plan.engine_counts()
+    }
+
+    /// The per-op wall times recorded since the last reset.
+    ///
+    /// Present only in a `segment-timing` build; a normal build has no timing
+    /// field and no clock read. The table is per session and is updated by the
+    /// thread running [`Session::execute`], so one session's numbers cannot be
+    /// observed or changed by another session or by a pool worker.
+    #[cfg(feature = "segment-timing")]
+    pub fn segment_timings(&self) -> &crate::inference::runtime::timing::SegmentTimings {
+        &self.timings
+    }
+
+    /// Clear the per-op timing table, keeping its allocation.
+    ///
+    /// Opening a session starts with an empty table; a caller that wants warm
+    /// timings only resets after its warm-up forwards.
+    #[cfg(feature = "segment-timing")]
+    pub fn reset_segment_timings(&mut self) {
+        self.timings.reset();
     }
 
     /// What the optional oneDNN engine covers, or `None`.
@@ -549,21 +627,65 @@ impl Session {
         {
             let engine = self.onednn.as_ref()?;
             let (conv, pool, matmul) = engine.segment_kinds();
+            let splits = self.one_dnn_splits();
+            let conv_channel_segments = splits
+                .iter()
+                .filter(|split| split.axis == ConvBlockAxis::Channels)
+                .count();
             Some(OneDnnReport {
                 version: engine.version().number(),
                 cpu_runtime: engine.version().cpu_runtime_name(),
                 segments: self.plan.engine_counts().one_dnn,
                 conv_segments: conv,
+                conv_channel_segments,
+                conv_row_segments: splits.len() - conv_channel_segments,
                 pool_segments: pool,
                 matmul_segments: matmul,
                 prepacked_bytes: engine.prepacked_bytes(),
                 reordered_blocks: engine.reordered_blocks(),
+                staging_bytes: engine.staging_bytes(),
                 parallel_blocks: engine.blocks_run_in_parallel(),
             })
         }
         #[cfg(not(feature = "cpu-onednn"))]
         {
             None
+        }
+    }
+
+    /// The block plan of every prepared convolution, in plan order.
+    ///
+    /// Empty without the `cpu-onednn` feature or when the plan assigned no
+    /// convolution to the engine. This is the recorded decision, not a
+    /// recomputation: see [`ConvSplitReport`].
+    pub fn one_dnn_splits(&self) -> Vec<ConvSplitReport> {
+        #[cfg(feature = "cpu-onednn")]
+        {
+            let Some(engine) = self.onednn.as_ref() else {
+                return Vec::new();
+            };
+            let mut reports = Vec::new();
+            for index in 0..self.plan.segments.len() {
+                let Some(split) = engine.prepared_split(index) else {
+                    continue;
+                };
+                reports.push(ConvSplitReport {
+                    segment: index,
+                    axis: match split.axis {
+                        ConvSplitAxis::Channels => ConvBlockAxis::Channels,
+                        ConvSplitAxis::Rows => ConvBlockAxis::Rows,
+                    },
+                    blocks: split.ranges.len(),
+                    ranges: split.ranges.clone(),
+                    source_rows: split.source_rows,
+                    out_extent: split.out_extent,
+                });
+            }
+            reports
+        }
+        #[cfg(not(feature = "cpu-onednn"))]
+        {
+            Vec::new()
         }
     }
 

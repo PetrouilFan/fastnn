@@ -88,8 +88,17 @@ authority is `docs/archive/roadmap/fn3-architecture.md`.
   it claims must be read-only model data and is prepacked at session open; a
   forward never reorders a weight, installs a data handle only for the duration
   of one `dnnl_primitive_execute`, and never touches a process-global oneDNN
-  setting or cache. Blocks are output-channel ranges split at group boundaries,
-  each with its own primitive, stream and user scratchpad.
+  setting or cache. Blocks divide a convolution along output channels (whole
+  groups for a grouped convolution, one channel per group for depthwise) or,
+  when the channel split is limited by the output-channel count and re-reads
+  the whole input per block, along output rows with a clamped halo: each row
+  block's source is a row submemory, its destination a row submemory, and the
+  rows outside the real input are supplied by that block's oneDNN padding. The
+  dimension is a deterministic function of `(shape, params, worker count)`, is
+  recorded in the prepared segment, and is reported by
+  `Session::one_dnn_splits`. Each block owns its primitive, stream and user
+  scratchpad; the row blocks of one convolution share one read-only prepacked
+  weight buffer.
 - Plan preflight asks `Backend::admits` for the plan's concrete operand shapes
   and dtypes; the default body is `supports`. An `admits` override may confirm
   a `Partial` subset, never widen `Unsupported`.
@@ -162,6 +171,10 @@ oneDNN before that pin needs `cargo clean -p onednn-src`. The engine checks the
 runtime it linked and reports it, so a foreign threaded build still runs, with
 serial blocks. `tests/fn3_cnn_perf.rs` is opt-in (`FN3_CNN_PERF=scalar|onednn`,
 one process per configuration) and is the only place latency claims are made.
+With `--features segment-timing` it also prints a per-op table at one and eight
+threads; that feature is instrumentation only, adds no clock read or session
+field to a shipped build, and keeps its counters in the session rather than in
+process-global state.
 
 `cargo test --lib` must also pass: it proves the 2.x tree still compiles beside
 `src/fn3/`. Contract changes need a new or updated `tests/fn3_contracts.rs` case.

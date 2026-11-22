@@ -113,13 +113,14 @@ use crate::inference::error::Fn3Error;
 use crate::inference::ops::OpId;
 use crate::inference::shape::Shape;
 use crate::inference::storage::AlignedBuffer;
+use std::sync::Arc;
 
 use self::ffi::{
     context, Desc, EngineHandle, ExecArg, MemoryHandle, PrimitiveAttrHandle, PrimitiveDescHandle,
     PrimitiveHandle, StreamHandle, Version, ARG_BIAS, ARG_DST, ARG_SCRATCHPAD, ARG_SRC,
     ARG_WEIGHTS, FORMAT_TAG_A, FORMAT_TAG_ABCD, FORMAT_TAG_ABCDE, FORMAT_TAG_ANY, QUERY_WEIGHTS_MD,
 };
-use self::geometry::{Conv, MatMul, Pool};
+use self::geometry::{Conv, ConvSplitAxis, MatMul, Pool};
 
 /// Provider name in errors.
 const BACKEND: &str = "oneDNN";
@@ -368,11 +369,108 @@ struct Block {
     /// Where each argument's pointer comes from at run time.
     sources: Vec<ArgSource>,
     /// The block's prepacked weights, when the op has weights.
-    weights: Option<AlignedBuffer>,
+    ///
+    /// Shared by the row blocks of one convolution: they use the same weight
+    /// descriptor and read it immutably, so one prepacked copy serves them all
+    /// (and stays in cache across the blocks).
+    weights: Option<Arc<AlignedBuffer>>,
     /// The block's bias slice, when the op has a constant bias.
     bias: Option<AlignedBuffer>,
     /// The user-managed scratchpad, when the primitive needs one.
     scratchpad: Option<AlignedBuffer>,
+    /// Dense source/destination staging for a row block. `None` otherwise.
+    staging: Option<RowStaging>,
+}
+
+/// Dense staging for one row block.
+///
+/// # Why it exists
+///
+/// A row submemory of the parent slot keeps the parent's strides, so its
+/// descriptor no longer matches `nchw` (`C * H * W` is `C * in_rows * W`
+/// only when the block spans the whole height). Measured on oneDNN 3.14.1, a
+/// `[1, 16, 21, 160]` source submemory of `[1, 16, 160, 160]` runs a 3x3
+/// convolution in ~100 ms per block, against ~4.8 ms for the whole dense
+/// tensor: the mismatched strides take the primitive off its JIT path. The
+/// block therefore copies its input rows into a dense buffer, runs the
+/// primitive on dense descriptors, and copies the dense output rows back.
+/// That is one extra input read plus one output write per block — still O(1)
+/// input traffic, not the O(blocks) the channel split pays.
+#[derive(Debug)]
+struct RowStaging {
+    source: AlignedBuffer,
+    destination: AlignedBuffer,
+    /// Byte length of the parent input slot (what the executor hands us).
+    source_len: usize,
+    /// Byte length of the parent output slot.
+    destination_len: usize,
+    batch: usize,
+    in_channels: usize,
+    out_channels: usize,
+    in_rows: usize,
+    out_rows: usize,
+    in_row_start: usize,
+    out_row_start: usize,
+    in_h: usize,
+    out_h: usize,
+    in_row_bytes: usize,
+    out_row_bytes: usize,
+}
+
+impl RowStaging {
+    fn copy_in(&self, address: usize) -> Result<(), Fn3Error> {
+        if address == 0 {
+            return Err(segment_error(
+                "a staged source has a null address".to_string(),
+            ));
+        }
+        // SAFETY: `address` is the executor's live source window for this
+        // call. The plan sized that slot to `source_len` bytes (batch, channels,
+        // in_h, in_w), which is the length used here; the window outlives the
+        // copy. The destination is this block's own staging buffer, and the
+        // block is executed by one worker at a time.
+        let source = unsafe { std::slice::from_raw_parts(address as *const u8, self.source_len) };
+        let destination = unsafe {
+            std::slice::from_raw_parts_mut(self.source.as_ptr() as *mut u8, self.source.len())
+        };
+        let run = self.in_rows * self.in_row_bytes;
+        for batch in 0..self.batch {
+            for channel in 0..self.in_channels {
+                let from = ((batch * self.in_channels + channel) * self.in_h + self.in_row_start)
+                    * self.in_row_bytes;
+                let to = (batch * self.in_channels + channel) * run;
+                destination[to..to + run].copy_from_slice(&source[from..from + run]);
+            }
+        }
+        Ok(())
+    }
+
+    fn copy_out(&self, address: usize) -> Result<(), Fn3Error> {
+        if address == 0 {
+            return Err(segment_error(
+                "a staged destination has a null address".to_string(),
+            ));
+        }
+        // SAFETY: `address` is the executor's live destination window for this
+        // call, `destination_len` bytes (batch, channels, out_h, out_w), and it
+        // is disjoint from the source by the plan. The staging buffer is owned
+        // by this block; one worker runs the block at a time.
+        let destination =
+            unsafe { std::slice::from_raw_parts_mut(address as *mut u8, self.destination_len) };
+        let source = unsafe {
+            std::slice::from_raw_parts(self.destination.as_ptr(), self.destination.len())
+        };
+        let run = self.out_rows * self.out_row_bytes;
+        for batch in 0..self.batch {
+            for channel in 0..self.out_channels {
+                let from = (batch * self.out_channels + channel) * run;
+                let to = ((batch * self.out_channels + channel) * self.out_h + self.out_row_start)
+                    * self.out_row_bytes;
+                destination[to..to + run].copy_from_slice(&source[from..from + run]);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Where a block argument's data handle comes from at execute time.
@@ -382,6 +480,10 @@ enum ArgSource {
     Input(usize),
     /// The executor's output window at this operand index.
     Output(usize),
+    /// This block's dense source staging (a row block).
+    StagingSource,
+    /// This block's dense destination staging (a row block).
+    StagingDestination,
     /// The block's prepacked weights.
     Weights,
     /// The block's bias slice.
@@ -392,6 +494,12 @@ enum ArgSource {
 
 impl Block {
     fn run(&self, inputs: &[usize], outputs: &[usize]) -> Result<(), Fn3Error> {
+        if let Some(staging) = &self.staging {
+            let source = *inputs
+                .first()
+                .ok_or_else(|| segment_error("missing input window 0".to_string()))?;
+            staging.copy_in(source)?;
+        }
         for (memory, source) in self.memories.iter().zip(self.sources.iter()) {
             let address = match *source {
                 ArgSource::Input(index) => *inputs
@@ -400,7 +508,19 @@ impl Block {
                 ArgSource::Output(index) => *outputs
                     .get(index)
                     .ok_or_else(|| segment_error(format!("missing output window {index}")))?,
-                ArgSource::Weights => buffer_address(self.weights.as_ref())?,
+                ArgSource::StagingSource => self
+                    .staging
+                    .as_ref()
+                    .ok_or_else(|| segment_error("a block has no source staging".to_string()))?
+                    .source
+                    .as_ptr() as usize,
+                ArgSource::StagingDestination => self
+                    .staging
+                    .as_ref()
+                    .ok_or_else(|| segment_error("a block has no destination staging".to_string()))?
+                    .destination
+                    .as_ptr() as usize,
+                ArgSource::Weights => buffer_address(self.weights.as_deref())?,
                 ArgSource::Bias => buffer_address(self.bias.as_ref())?,
                 ArgSource::Scratchpad => buffer_address(self.scratchpad.as_ref())?,
             };
@@ -410,9 +530,10 @@ impl Block {
                 ));
             }
             // SAFETY: the address is either a live arena window the executor
-            // holds for this call (`Input`/`Output`) or the start of a buffer
-            // owned by this block (`Weights`/`Bias`/`Scratchpad`). Both outlive
-            // the `dnnl_primitive_execute` call below; the descriptor they are
+            // holds for this call (`Input`/`Output`), the start of a buffer
+            // owned by this block (`Weights`/`Bias`/`Scratchpad`/staging), or
+            // the staging buffer's pointer. All outlive the
+            // `dnnl_primitive_execute` call below; the descriptor they are
             // installed on requires at most `desc.size()` bytes, which the
             // prepared shape provides. oneDNN borrows the pointer only for the
             // duration of the execute call.
@@ -428,7 +549,14 @@ impl Block {
         // The sequential CPU stream completes inside `execute`; the wait is a
         // no-op today and the fence that keeps a future threaded runtime
         // correct.
-        self.stream.wait()
+        self.stream.wait()?;
+        if let Some(staging) = &self.staging {
+            let destination = *outputs
+                .first()
+                .ok_or_else(|| segment_error("missing output window 0".to_string()))?;
+            staging.copy_out(destination)?;
+        }
+        Ok(())
     }
 }
 
@@ -452,11 +580,43 @@ fn segment_error(detail: String) -> Fn3Error {
     }
 }
 
+/// The byte length of a dense array with these extents, checked.
+fn staging_bytes(extents: &[usize], element_bytes: usize) -> Result<usize, Fn3Error> {
+    let mut bytes = element_bytes;
+    for (&extent, axis) in extents.iter().zip(0..) {
+        bytes = bytes.checked_mul(extent).ok_or(Fn3Error::ShapeOverflow {
+            context: "oneDNN row staging",
+            axis: Some(axis),
+            detail: format!("{extents:?} exceeds usize::MAX bytes"),
+        })?;
+    }
+    Ok(bytes)
+}
+
+/// How a prepared convolution divided its output, for the session report.
+///
+/// Recorded at preparation time from `(shape, params, workers)` and never
+/// re-decided by a forward. `ranges` are `(start, count)` in the split
+/// dimension: output channels for [`ConvSplitAxis::Channels`], output rows for
+/// [`ConvSplitAxis::Rows`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConvSplitSummary {
+    pub axis: ConvSplitAxis,
+    pub ranges: Vec<(usize, usize)>,
+    /// Input rows read across all blocks (a traffic proxy; equals blocks ×
+    /// input height for a channel split).
+    pub source_rows: usize,
+    /// The split dimension's total extent in the parent output.
+    pub out_extent: usize,
+}
+
 /// A segment's prepared blocks.
 #[derive(Debug)]
 pub(crate) struct PreparedSegment {
     /// `"conv"`, `"pool"` or `"matmul"`, for diagnostics.
     kind: &'static str,
+    /// The convolution split, when this is a convolution segment.
+    split: Option<ConvSplitSummary>,
     blocks: Vec<Block>,
 }
 
@@ -500,6 +660,8 @@ pub(crate) struct OneDnnEngine {
     prepared: Vec<Option<PreparedSegment>>,
     /// Bytes of engine-owned prepacked weights and biases.
     prepacked_bytes: usize,
+    /// Bytes of dense source/destination staging owned by row blocks.
+    staging_bytes: usize,
     /// Prepared segments per kind, for the session report.
     conv_segments: usize,
     pool_segments: usize,
@@ -518,10 +680,14 @@ pub(crate) struct OneDnnEngine {
 unsafe impl Send for OneDnnEngine {}
 
 // SAFETY: a `Block` is shared by reference across Rayon tasks. Each block owns
-// its primitive, stream, memories and scratchpad, all of which are distinct from
-// every other block's; `run` only writes through `&self` to oneDNN objects that
-// are not shared, and to arena windows the plan proved disjoint. The raw
-// pointers inside the wrapper types are never mutated by `&self` Rust code.
+// its primitive, stream, memories, scratchpad and row-staging buffers, all of
+// which are distinct from every other block's; `run` only writes through
+// `&self` to oneDNN objects that are not shared, to arena windows the plan
+// proved disjoint, and to its own staging buffers (which no other block names).
+// A block's prepacked weights may be an `Arc` shared with the other row blocks
+// of the same convolution, but `AlignedBuffer` exposes only immutable views and
+// oneDNN only reads a weight argument. The raw pointers inside the wrapper
+// types are never mutated by `&self` Rust code.
 unsafe impl Sync for Block {}
 unsafe impl Send for Block {}
 
@@ -548,6 +714,7 @@ impl OneDnnEngine {
             version,
             prepared: (0..segments).map(|_| None).collect(),
             prepacked_bytes: 0,
+            staging_bytes: 0,
             conv_segments: 0,
             pool_segments: 0,
             matmul_segments: 0,
@@ -563,6 +730,11 @@ impl OneDnnEngine {
     /// Bytes of prepacked weights and biases this session owns.
     pub(crate) fn prepacked_bytes(&self) -> usize {
         self.prepacked_bytes
+    }
+
+    /// Bytes of dense staging owned by row blocks.
+    pub(crate) fn staging_bytes(&self) -> usize {
+        self.staging_bytes
     }
 
     /// Prepared segments by kind: `(conv, pool, matmul)`.
@@ -630,14 +802,6 @@ impl OneDnnEngine {
                 ))
             }
         };
-        self.prepacked_bytes += prepared
-            .blocks
-            .iter()
-            .map(|block| {
-                block.weights.as_ref().map_or(0, AlignedBuffer::len)
-                    + block.bias.as_ref().map_or(0, AlignedBuffer::len)
-            })
-            .sum::<usize>();
         match prepared.kind {
             "conv" => self.conv_segments += 1,
             "pool" => self.pool_segments += 1,
@@ -656,6 +820,13 @@ impl OneDnnEngine {
     /// The prepared segment at a plan position, if one was built.
     pub(crate) fn prepared(&self, index: usize) -> Option<&PreparedSegment> {
         self.prepared.get(index).and_then(Option::as_ref)
+    }
+
+    /// The convolution split recorded for plan segment `index`, if it is a
+    /// prepared convolution.
+    pub(crate) fn prepared_split(&self, index: usize) -> Option<&ConvSplitSummary> {
+        self.prepared(index)
+            .and_then(|segment| segment.split.as_ref())
     }
 
     fn prepare_conv(&mut self, spec: &SegmentSpec<'_>) -> Result<PreparedSegment, Fn3Error> {
@@ -751,8 +922,33 @@ impl OneDnnEngine {
             })
             .transpose()?;
 
-        let blocks = conv.blocks(spec.workers);
+        let split = conv.split(spec.workers);
+        let row_split = split.axis == ConvSplitAxis::Rows;
+        let summary = ConvSplitSummary {
+            axis: split.axis,
+            ranges: split
+                .blocks
+                .iter()
+                .map(|block| {
+                    if row_split {
+                        (block.out_row_start, block.out_rows)
+                    } else {
+                        (block.out_start, block.out_channels)
+                    }
+                })
+                .collect(),
+            source_rows: split.blocks.iter().map(|block| block.in_rows).sum(),
+            out_extent: if row_split {
+                conv.out_hw[0]
+            } else {
+                conv.out_channels
+            },
+        };
+        let blocks = split.blocks;
         let single_block = blocks.len() == 1;
+        // Row blocks of one convolution use the same weights; prepack once and
+        // share the buffer when oneDNN chose the same layout for every block.
+        let mut shared_weights: Option<(Desc, Arc<AlignedBuffer>)> = None;
         let mut prepared = Vec::with_capacity(blocks.len());
         for block in blocks {
             let block_dims: Vec<i64> = if conv.group == 1 {
@@ -786,6 +982,18 @@ impl OneDnnEngine {
 
             let src = if single_block {
                 Desc::with_tag(&src_parent_dims, FORMAT_TAG_ABCD)?
+            } else if row_split {
+                // Dense staging, not a submemory: a row submemory keeps the
+                // parent's strides and takes oneDNN off its JIT path (see
+                // `RowStaging`). The staging copy fills exactly the rows inside
+                // the parent; the block's own padding supplies the rest.
+                let dims = vec![
+                    conv.batch as i64,
+                    conv.in_channels as i64,
+                    block.in_rows as i64,
+                    conv.in_hw[1] as i64,
+                ];
+                Desc::with_tag(&dims, FORMAT_TAG_ABCD)?
             } else if conv.group == 1 {
                 // The full input: no spatial split, no halo.
                 Desc::with_tag(&src_parent_dims, FORMAT_TAG_ABCD)?
@@ -801,6 +1009,14 @@ impl OneDnnEngine {
             };
             let dst = if single_block {
                 Desc::with_tag(&dst_parent_dims, FORMAT_TAG_ABCD)?
+            } else if row_split {
+                let dims = vec![
+                    conv.batch as i64,
+                    conv.out_channels as i64,
+                    block.out_rows as i64,
+                    conv.out_hw[1] as i64,
+                ];
+                Desc::with_tag(&dims, FORMAT_TAG_ABCD)?
             } else {
                 let dims = vec![
                     conv.batch as i64,
@@ -821,6 +1037,9 @@ impl OneDnnEngine {
                     AlignedBuffer::from_bytes(&bytes[start..start + block.out_channels * 4])
                 })
                 .transpose()?;
+            if let Some(buffer) = &bias_buffer {
+                self.prepacked_bytes += buffer.len();
+            }
 
             let attr = PrimitiveAttrHandle::user_scratchpad()?;
             let strides: Vec<i64> = conv.strides.iter().map(|&value| value as i64).collect();
@@ -831,8 +1050,13 @@ impl OneDnnEngine {
                 .iter()
                 .map(|&value| value as i64 - 1)
                 .collect();
-            let padding_l = vec![conv.pads[0].0, conv.pads[1].0];
-            let padding_r = vec![conv.pads[0].1, conv.pads[1].1];
+            let (pad_top, pad_bottom) = if row_split && !single_block {
+                (block.pad_top as i64, block.pad_bottom as i64)
+            } else {
+                (conv.pads[0].0, conv.pads[0].1)
+            };
+            let padding_l = vec![pad_top, conv.pads[1].0];
+            let padding_r = vec![pad_bottom, conv.pads[1].1];
             let pd = PrimitiveDescHandle::convolution(
                 &self.engine,
                 ffi::ALG_CONVOLUTION_DIRECT,
@@ -849,28 +1073,99 @@ impl OneDnnEngine {
             .map_err(|error| {
                 context(error, || {
                     format!(
-                        "conv segment: {}x{}, {} of {} output channels, groups {}",
+                        "conv segment: {}x{}, {} of {} output channels, groups {}, {}",
                         conv.in_hw[0],
                         conv.in_hw[1],
                         block.out_channels,
                         conv.out_channels,
-                        conv.group
+                        conv.group,
+                        if row_split {
+                            format!(
+                                "rows {}..{} of {} (input rows {}..{})",
+                                block.out_row_start,
+                                block.out_row_start + block.out_rows,
+                                conv.out_hw[0],
+                                block.in_row_start,
+                                block.in_row_start + block.in_rows
+                            )
+                        } else {
+                            format!("channels from {}", block.out_start)
+                        }
                     )
                 })
             })?;
             let expected_weights = pd.query_md(QUERY_WEIGHTS_MD, 0)?;
             let weight_plain = Desc::with_tag(&block_dims, weight_tag)?;
-            let (prepacked, reformatted) = self.repack(
-                &staged_weights,
-                &weight_source,
-                &expected_weights,
-                &weight_plain,
-            )?;
+            let (prepacked, reformatted) = match shared_weights.as_ref() {
+                Some((descriptor, buffer)) if row_split && descriptor.equal(&expected_weights) => {
+                    (Arc::clone(buffer), false)
+                }
+                _ => {
+                    let (buffer, reformatted) = self.repack(
+                        &staged_weights,
+                        &weight_source,
+                        &expected_weights,
+                        &weight_plain,
+                    )?;
+                    let buffer = Arc::new(buffer);
+                    if row_split {
+                        shared_weights = Some((expected_weights.duplicate()?, Arc::clone(&buffer)));
+                    }
+                    (buffer, reformatted)
+                }
+            };
             if reformatted {
                 self.reordered_blocks += 1;
             }
             let scratchpad = prepare_scratchpad(&pd)?;
             let primitive = PrimitiveHandle::new(&pd)?;
+
+            let staging = if row_split {
+                let source_bytes = staging_bytes(
+                    &[conv.batch, conv.in_channels, block.in_rows, conv.in_hw[1]],
+                    std::mem::size_of::<f32>(),
+                )?;
+                let destination_bytes = staging_bytes(
+                    &[
+                        conv.batch,
+                        conv.out_channels,
+                        block.out_rows,
+                        conv.out_hw[1],
+                    ],
+                    std::mem::size_of::<f32>(),
+                )?;
+                self.staging_bytes += source_bytes + destination_bytes;
+                Some(RowStaging {
+                    source: AlignedBuffer::zeroed(source_bytes)?,
+                    destination: AlignedBuffer::zeroed(destination_bytes)?,
+                    source_len: staging_bytes(
+                        &[conv.batch, conv.in_channels, conv.in_hw[0], conv.in_hw[1]],
+                        std::mem::size_of::<f32>(),
+                    )?,
+                    destination_len: staging_bytes(
+                        &[
+                            conv.batch,
+                            conv.out_channels,
+                            conv.out_hw[0],
+                            conv.out_hw[1],
+                        ],
+                        std::mem::size_of::<f32>(),
+                    )?,
+                    batch: conv.batch,
+                    in_channels: conv.in_channels,
+                    out_channels: conv.out_channels,
+                    in_rows: block.in_rows,
+                    out_rows: block.out_rows,
+                    in_row_start: block.in_row_start,
+                    out_row_start: block.out_row_start,
+                    in_h: conv.in_hw[0],
+                    out_h: conv.out_hw[0],
+                    in_row_bytes: conv.in_hw[1] * std::mem::size_of::<f32>(),
+                    out_row_bytes: conv.out_hw[1] * std::mem::size_of::<f32>(),
+                })
+            } else {
+                None
+            };
 
             let mut memories = Vec::with_capacity(5);
             let mut args = Vec::with_capacity(5);
@@ -882,7 +1177,11 @@ impl OneDnnEngine {
                 &src,
                 &self.engine,
                 ARG_SRC,
-                ArgSource::Input(0),
+                if row_split {
+                    ArgSource::StagingSource
+                } else {
+                    ArgSource::Input(0)
+                },
             )?;
             push_arg(
                 &mut memories,
@@ -911,7 +1210,11 @@ impl OneDnnEngine {
                 &dst,
                 &self.engine,
                 ARG_DST,
-                ArgSource::Output(0),
+                if row_split {
+                    ArgSource::StagingDestination
+                } else {
+                    ArgSource::Output(0)
+                },
             )?;
             if let Some(desc) = scratchpad.as_ref().map(|(desc, _)| desc) {
                 push_arg(
@@ -933,10 +1236,12 @@ impl OneDnnEngine {
                 weights: Some(prepacked),
                 bias: bias_buffer,
                 scratchpad: scratchpad.map(|(_, buffer)| buffer),
+                staging,
             });
         }
         Ok(PreparedSegment {
             kind: "conv",
+            split: Some(summary),
             blocks: prepared,
         })
     }
@@ -1065,10 +1370,12 @@ impl OneDnnEngine {
                 weights: None,
                 bias: None,
                 scratchpad: scratchpad.map(|(_, buffer)| buffer),
+                staging: None,
             });
         }
         Ok(PreparedSegment {
             kind: "pool",
+            split: None,
             blocks: prepared,
         })
     }
@@ -1190,13 +1497,15 @@ impl OneDnnEngine {
                 memories,
                 args,
                 sources,
-                weights: Some(prepacked),
+                weights: Some(Arc::new(prepacked)),
                 bias: None,
                 scratchpad: scratchpad.map(|(_, buffer)| buffer),
+                staging: None,
             });
         }
         Ok(PreparedSegment {
             kind: "matmul",
+            split: None,
             blocks: prepared,
         })
     }
@@ -1207,7 +1516,7 @@ impl OneDnnEngine {
     /// submemory of it, and `expected` the descriptor the primitive wants. The
     /// reorder runs once here, on the prep stream, and never again.
     fn repack(
-        &self,
+        &mut self,
         staged: &AlignedBuffer,
         source: &Desc,
         expected: &Desc,
@@ -1216,6 +1525,10 @@ impl OneDnnEngine {
         let reformatted = !expected.equal(plain);
         let bytes = expected.size();
         let destination = AlignedBuffer::zeroed(bytes)?;
+        // Account for the engine-owned copy here, where it is created: a
+        // prepacked buffer shared by several row blocks is one allocation and
+        // must be counted once.
+        self.prepacked_bytes += bytes;
         // A reorder has no scratchpad and runs on this thread; the library's
         // default scratchpad policy is the right one here.
         let attr = PrimitiveAttrHandle::library_default()?;

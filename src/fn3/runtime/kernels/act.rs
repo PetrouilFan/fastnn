@@ -267,6 +267,73 @@ mod tests {
     }
 
     #[test]
+    fn sigmoid_is_bitwise_identical_serially_and_on_the_pool() {
+        // 100 000 elements over the 64 KiB parallel floor, with values that
+        // span both exponential tails.
+        let values: Vec<f32> = (0..100_000)
+            .map(|index| (index as f32 / 1000.0) - 50.0)
+            .collect();
+        let shape = Shape::from_dims([100, 1000]);
+        let input = Tensor::from_f32(shape.clone(), &values).unwrap();
+        let mut serial = zeros(&[100, 1000]);
+        let params = OpParams::new();
+        {
+            let view = input.as_view().unwrap();
+            let mut out = serial.as_mut_view().unwrap();
+            run(
+                OpId::Sigmoid,
+                std::slice::from_ref(&view),
+                std::slice::from_mut(&mut out),
+                &params,
+                None,
+            )
+            .unwrap();
+        }
+        let threads = SessionThreads::new(crate::inference::runtime::Threading::Fixed(4)).unwrap();
+        for _ in 0..3 {
+            let mut parallel = zeros(&[100, 1000]);
+            let view = input.as_view().unwrap();
+            let mut out = parallel.as_mut_view().unwrap();
+            run(
+                OpId::Sigmoid,
+                std::slice::from_ref(&view),
+                std::slice::from_mut(&mut out),
+                &params,
+                Some(&threads),
+            )
+            .unwrap();
+            drop(out);
+            assert_eq!(
+                parallel
+                    .as_f32_slice()
+                    .unwrap()
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                serial
+                    .as_f32_slice()
+                    .unwrap()
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "the chunked sigmoid changed a bit"
+            );
+        }
+        // And the same expression as the documented scalar loop.
+        for (index, (&value, &got)) in values
+            .iter()
+            .zip(serial.as_f32_slice().unwrap().iter())
+            .enumerate()
+        {
+            assert_eq!(
+                got.to_bits(),
+                (1.0 / (1.0 + (-value).exp())).to_bits(),
+                "element {index}"
+            );
+        }
+    }
+
+    #[test]
     fn a_reversed_clip_interval_is_rejected_before_writing() {
         let x = tensor(&[1.0], &[1]);
         let mut out = zeros(&[1]);

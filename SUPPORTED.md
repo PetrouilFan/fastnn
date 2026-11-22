@@ -198,8 +198,8 @@ Capability gaps:
   the plan is a specialized instruction list executed per op (#98).
 - The optional oneDNN CPU engine (`cpu-onednn`) is the first provider: 4-D
   `f32` convolution, the pool family and 2-D matmul, with explicit-pad
-  resolution and output-channel block threading. MLAS/XNNPACK are not
-  implemented; no provider fuses activations yet (#101, #106).
+  resolution and output-channel or output-row block threading. MLAS/XNNPACK
+  are not implemented; no provider fuses activations yet (#101, #106).
 
 Runtime and packaging gaps:
 

@@ -577,6 +577,30 @@ impl Desc {
         unsafe { dnnl_memory_desc_get_size(self.0) }
     }
 
+    /// An owned copy of this descriptor.
+    ///
+    /// Used when a prepared block must remember the layout oneDNN chose after
+    /// the primitive descriptor that owns the original is dropped.
+    pub(crate) fn duplicate(&self) -> Result<Desc, Fn3Error> {
+        let mut owned: MemoryDesc = std::ptr::null_mut();
+        // SAFETY: `self.0` is a live descriptor owned by this wrapper; the
+        // clone API reads it only for the duration of the call and writes a new
+        // owned descriptor to `owned`.
+        check(
+            unsafe { dnnl_memory_desc_clone(&mut owned, self.0) },
+            "dnnl_memory_desc_clone",
+        )?;
+        if owned.is_null() {
+            return Err(Fn3Error::ProviderFailure {
+                provider: PROVIDER,
+                call: "dnnl_memory_desc_clone",
+                status: STATUS_SUCCESS,
+                detail: "the cloned descriptor is null after success".to_string(),
+            });
+        }
+        Ok(Desc(owned))
+    }
+
     /// Whether two descriptors describe the same logical and physical layout.
     pub(crate) fn equal(&self, other: &Desc) -> bool {
         // SAFETY: both handles are live and owned by their wrappers.

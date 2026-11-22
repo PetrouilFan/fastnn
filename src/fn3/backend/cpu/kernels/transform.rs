@@ -290,7 +290,7 @@ pub(crate) fn transpose(
         return Ok(());
     }
     let element_bytes = input.dtype().size_bytes();
-    if let Some(()) = transpose_last_two(op, input, out, &permutation, elements, element_bytes)? {
+    if transpose_tiled(op, input, out, &permutation, elements, element_bytes)? {
         return Ok(());
     }
     let source = input.storage_bytes();
@@ -319,85 +319,77 @@ pub(crate) fn transpose(
     Ok(())
 }
 
-/// Cache-friendly fast path for a transpose that swaps exactly the last two
-/// axes.
+/// Elements per tile edge in the cache-blocked transpose paths.
 ///
-/// # Why
+/// 32 `f32` cells is 128 bytes: two cache lines, which is the largest tile whose
+/// column fits one L1 write-combining window while the source rows are still
+/// prefetched as ascending 128-byte runs.
+const TRANSPOSE_TILE: usize = 32;
+
+/// A permutation this module can move as a matrix transpose of contiguous
+/// cells.
 ///
-/// The pinned graph ties `lm_head` to the token-embedding table, so every step
-/// transposes a `[50257, 128]` `f32` weight into `[128, 50257]`. The scalar
-/// loop in [`transpose`] walks the output in row-major order and, for every
-/// element, recomputes a checked index whose source is `50257 * 4` bytes away:
-/// measured at 196 ms for a 10-token prefill and 212 ms for a decode step
-/// (FN3-25 / #71). That is one cache miss plus one full index computation per
-/// element for a pure data movement.
+/// Every variant is an identity outer dimension and one matrix transpose whose
+/// source and destination columns are contiguous runs of `cell_bytes`. That
+/// covers the two transposes in the pinned YOLOv8n graph and the three shapes
+/// the v3 contract names, and leaves every other permutation to
+/// [`transpose`]'s element loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TilePlan {
+    /// `outer` independent `[rows][cols]` slabs, both contiguous:
+    /// `dst[o, c, r] = src[o, r, c]`.
+    Slabs {
+        outer: usize,
+        rows: usize,
+        cols: usize,
+        cell_bytes: usize,
+    },
+    /// `[batch, rows, fixed, cols] -> [batch, cols, fixed, rows]` with the
+    /// middle `fixed` axis held constant: for each `(batch, fixed)`, one
+    /// strided `[rows][cols] -> [cols][rows]` transpose. The pinned graph's
+    /// DFL `[0, 3, 2, 1]` transpose has this shape.
+    FixedOuter {
+        batch: usize,
+        fixed: usize,
+        rows: usize,
+        cols: usize,
+        cell_bytes: usize,
+    },
+}
+
+impl TilePlan {
+    fn cell_bytes(self) -> usize {
+        match self {
+            TilePlan::Slabs { cell_bytes, .. } | TilePlan::FixedOuter { cell_bytes, .. } => {
+                cell_bytes
+            }
+        }
+    }
+}
+
+/// Try the cache-blocked paths; `Ok(false)` means "not one of them".
 ///
-/// This path finds the corresponding source index with two multiplications and
-/// walks the source ascending, which is the access pattern the prefetcher and
-/// the store buffers handle best (see [`TRANSPOSE_COLUMNS_PER_PASS`] for the
-/// measured comparison with a tiled version).
-///
-/// # Scope and exactness
-///
-/// Only taken when the permutation is the identity on every axis but the last
-/// two, both views are contiguous, and the element is 4 or 8 bytes (`f32`,
-/// `i64`/`f64`/`i32`). It moves each element unchanged and never reorders
-/// *within* an element, so the result is byte-exact by construction; every
-/// other permutation, dtype and non-contiguous view keeps the scalar path.
-/// Returns `Ok(None)` when the shape is not one of those cases.
-fn transpose_last_two(
+/// The fast paths require both views contiguous (the arena always is) and an
+/// element width that permits aligned typed slices; anything else keeps the
+/// generic element loop. Every fast path moves each cell unchanged, so the
+/// result is byte-exact: only the order of the stores differs, which no caller
+/// can observe.
+fn transpose_tiled(
     op: OpId,
     input: &TensorView<'_>,
     out: &mut TensorMut<'_>,
     permutation: &[usize],
     elements: u64,
     element_bytes: usize,
-) -> Result<Option<()>, Fn3Error> {
-    let rank = permutation.len();
-    if rank < 2 {
-        return Ok(None);
-    }
-    let swapped = permutation[rank - 2] == rank - 1 && permutation[rank - 1] == rank - 2;
-    let prefix_identity = permutation[..rank - 2]
-        .iter()
-        .enumerate()
-        .all(|(axis, &moved)| moved == axis);
-    if !swapped || !prefix_identity {
-        return Ok(None);
-    }
+) -> Result<bool, Fn3Error> {
     if !input.is_contiguous() || !out.is_contiguous() {
-        return Ok(None);
+        return Ok(false);
     }
-    if !matches!(element_bytes, 4 | 8) {
-        return Ok(None);
-    }
-
-    let dims = input.shape().dims();
-    let rows = usize::try_from(dims[rank - 2]).map_err(|_| Fn3Error::ShapeOverflow {
-        context: "cpu transpose rows",
-        axis: Some(rank - 2),
-        detail: "extent does not fit in usize".to_string(),
-    })?;
-    let columns = usize::try_from(dims[rank - 1]).map_err(|_| Fn3Error::ShapeOverflow {
-        context: "cpu transpose columns",
-        axis: Some(rank - 1),
-        detail: "extent does not fit in usize".to_string(),
-    })?;
-    let outer = usize::try_from(checked_product(
-        &dims[..rank - 2],
-        "cpu transpose outer slabs",
-    )?)
-    .map_err(|_| Fn3Error::ShapeOverflow {
-        context: "cpu transpose outer slabs",
-        axis: None,
-        detail: "outer slab count does not fit in usize".to_string(),
-    })?;
-    if elements == 0 || rows == 0 || columns == 0 {
-        return Ok(None);
-    }
-
+    let dims = checked_usizes(op, input.shape().dims())?;
+    let Some(plan) = tile_plan(permutation, &dims, element_bytes)? else {
+        return Ok(false);
+    };
     let source = view_window_bytes(op, input)?;
-    let destination = out_window_bytes(op, out)?;
     let expected_bytes =
         elements
             .checked_mul(element_bytes as u64)
@@ -406,6 +398,7 @@ fn transpose_last_two(
                 axis: None,
                 detail: "element count times element size overflows u64".to_string(),
             })?;
+    let destination = out_window_bytes(op, out)?;
     if source.len() as u64 != expected_bytes || destination.len() as u64 != expected_bytes {
         return Err(kernel_bounds_error(
             op,
@@ -413,74 +406,276 @@ fn transpose_last_two(
             source.len(),
         ));
     }
-
-    if element_bytes == 4 {
-        tiled_swap_last_two(
-            bytemuck::cast_slice::<u8, u32>(source),
-            bytemuck::cast_slice_mut::<u8, u32>(destination),
-            outer,
-            rows,
-            columns,
-        );
-    } else {
-        tiled_swap_last_two(
-            bytemuck::cast_slice::<u8, u64>(source),
-            bytemuck::cast_slice_mut::<u8, u64>(destination),
-            outer,
-            rows,
-            columns,
-        );
+    let destination_len = destination.len();
+    match plan.cell_bytes() {
+        4 => apply_plan(
+            &plan,
+            bytemuck::try_cast_slice::<u8, u32>(source).map_err(|error| Fn3Error::StorageCast {
+                element: "u32 transpose cell",
+                byte_len: source.len(),
+                detail: format!("{error:?}"),
+            })?,
+            bytemuck::try_cast_slice_mut::<u8, u32>(destination).map_err(|error| {
+                Fn3Error::StorageCast {
+                    element: "u32 transpose cell",
+                    byte_len: destination_len,
+                    detail: format!("{error:?}"),
+                }
+            })?,
+        ),
+        8 => apply_plan(
+            &plan,
+            bytemuck::try_cast_slice::<u8, u64>(source).map_err(|error| Fn3Error::StorageCast {
+                element: "u64 transpose cell",
+                byte_len: source.len(),
+                detail: format!("{error:?}"),
+            })?,
+            bytemuck::try_cast_slice_mut::<u8, u64>(destination).map_err(|error| {
+                Fn3Error::StorageCast {
+                    element: "u64 transpose cell",
+                    byte_len: destination_len,
+                    detail: format!("{error:?}"),
+                }
+            })?,
+        ),
+        _ => apply_plan_bytes(&plan, source, destination),
     }
-    Ok(Some(()))
+    Ok(true)
 }
 
-/// How many destination rows one pass writes at a time.
-///
-/// The fastest shape for this transpose (measured in FN3-25 / #71 on the
-/// `[50257, 128]` tied-embedding table) is a **sequential source read** with one
-/// destination stream per source column: 128 streams of `ROWS` growing
-/// elements each, which is 3.2-4.2 ms against 6.0 ms for a squarer tiled
-/// version and 196 ms for the per-element checked loop. The reason is that the
-/// source read can be prefetched as a single ascending stream while each of the
-/// 128 destination streams is still touched in ascending order, so the store
-/// buffers keep every one of them write-combining.
-///
-/// That advantage depends on the stream count staying modest, so the loop caps
-/// it: a transpose of `[128, 50257]` (50 257 destination rows) would otherwise
-/// ask for 50 257 interleaved streams. One pass covers at most this many
-/// columns, and the source read inside a pass is still `columns_per_pass`
-/// contiguous elements of a row.
-const TRANSPOSE_COLUMNS_PER_PASS: usize = 128;
+/// Resolve a permutation to a [`TilePlan`], or `None`.
+fn tile_plan(
+    permutation: &[usize],
+    dims: &[usize],
+    element_bytes: usize,
+) -> Result<Option<TilePlan>, Fn3Error> {
+    let rank = permutation.len();
+    let product = |values: &[usize], what: &'static str| -> Result<usize, Fn3Error> {
+        let mut product = 1usize;
+        for &value in values {
+            product = product
+                .checked_mul(value)
+                .ok_or_else(|| Fn3Error::ShapeOverflow {
+                    context: what,
+                    axis: None,
+                    detail: "extents exceed usize::MAX elements".to_string(),
+                })?;
+        }
+        Ok(product)
+    };
+    // Identity prefix, then a swap of the last two axes. This is the plain
+    // matrix transpose for any rank, including the tied-embedding table.
+    if rank >= 2
+        && permutation[..rank - 2]
+            .iter()
+            .enumerate()
+            .all(|(axis, &moved)| moved == axis)
+        && permutation[rank - 2] == rank - 1
+        && permutation[rank - 1] == rank - 2
+    {
+        return Ok(Some(TilePlan::Slabs {
+            outer: product(&dims[..rank - 2], "cpu transpose outer")?,
+            rows: dims[rank - 2],
+            cols: dims[rank - 1],
+            cell_bytes: element_bytes,
+        }));
+    }
+    if rank != 4 {
+        return Ok(None);
+    }
+    let plan = match permutation {
+        // NCHW -> NHWC: input viewed as `[N, C, H*W]`.
+        [0, 2, 3, 1] => TilePlan::Slabs {
+            outer: dims[0],
+            rows: dims[1],
+            cols: product(&dims[2..], "cpu transpose NHWC columns")?,
+            cell_bytes: element_bytes,
+        },
+        // NCHW -> NWCH: input viewed as `[N, C*H, W]`.
+        [0, 3, 1, 2] => TilePlan::Slabs {
+            outer: dims[0],
+            rows: product(&dims[1..3], "cpu transpose NWCH rows")?,
+            cols: dims[3],
+            cell_bytes: element_bytes,
+        },
+        // NCHW -> NHCW: a `[C][H]` transpose whose cells are the W runs.
+        [0, 2, 1, 3] => TilePlan::Slabs {
+            outer: dims[0],
+            rows: dims[1],
+            cols: dims[2],
+            cell_bytes: dims[3].checked_mul(element_bytes).ok_or_else(|| {
+                Fn3Error::ShapeOverflow {
+                    context: "cpu transpose NHCW cell",
+                    axis: Some(3),
+                    detail: "one W run exceeds usize::MAX bytes".to_string(),
+                }
+            })?,
+        },
+        // N A C B -> N B C A: the DFL transpose. `rows` and `cols` are A and
+        // B; `fixed` is C.
+        [0, 3, 2, 1] => TilePlan::FixedOuter {
+            batch: dims[0],
+            fixed: dims[2],
+            rows: dims[1],
+            cols: dims[3],
+            cell_bytes: element_bytes,
+        },
+        _ => return Ok(None),
+    };
+    Ok(Some(plan))
+}
 
-/// `dst[o, c, r] = src[o, r, c]` for every outer slab.
+fn checked_usizes(op: OpId, dims: &[u64]) -> Result<Vec<usize>, Fn3Error> {
+    dims.iter()
+        .enumerate()
+        .map(|(axis, &extent)| {
+            usize::try_from(extent).map_err(|_| Fn3Error::ShapeOverflow {
+                context: "cpu transpose extent",
+                axis: Some(axis),
+                detail: format!("extent {extent} does not fit in usize (op {op})"),
+            })
+        })
+        .collect()
+}
+
+/// Apply a plan to typed cells, 32 x 32 cells per tile.
 ///
-/// Each pass reads the source in ascending `(row, column)` order and writes the
-/// matching destination rows, so every source cache line is fetched once and
-/// every destination element is written once. See
-/// [`TRANSPOSE_COLUMNS_PER_PASS`] for why this beats a tiled loop here.
-fn tiled_swap_last_two<T: Copy>(
-    source: &[T],
-    destination: &mut [T],
-    outer: usize,
-    rows: usize,
-    columns: usize,
-) {
-    let slab = rows * columns;
-    debug_assert_eq!(source.len(), outer * slab);
-    debug_assert_eq!(destination.len(), outer * slab);
-    for slab_index in 0..outer {
-        let from = &source[slab_index * slab..(slab_index + 1) * slab];
-        let to = &mut destination[slab_index * slab..(slab_index + 1) * slab];
-        let mut column = 0;
-        while column < columns {
-            let column_end = (column + TRANSPOSE_COLUMNS_PER_PASS).min(columns);
-            for row in 0..rows {
-                let source_row = &from[row * columns + column..row * columns + column_end];
-                for (offset, &value) in source_row.iter().enumerate() {
-                    to[(column + offset) * rows + row] = value;
+/// Each tile is read as `height` contiguous source runs into a stack tile, then
+/// written as `width` contiguous destination runs of `height` cells. The
+/// destination run is the `copy_from_slice`; the source run is the other.
+fn apply_plan<T: Copy + Default>(plan: &TilePlan, source: &[T], destination: &mut [T]) {
+    match *plan {
+        TilePlan::Slabs {
+            outer, rows, cols, ..
+        } => {
+            let slab = rows * cols;
+            debug_assert_eq!(source.len(), outer * slab);
+            debug_assert_eq!(destination.len(), outer * slab);
+            for slab_index in 0..outer {
+                let from = &source[slab_index * slab..(slab_index + 1) * slab];
+                let to = &mut destination[slab_index * slab..(slab_index + 1) * slab];
+                tiled_transpose(from, to, rows, cols, cols, rows);
+            }
+        }
+        TilePlan::FixedOuter {
+            batch,
+            fixed,
+            rows,
+            cols,
+            ..
+        } => {
+            debug_assert_eq!(source.len(), batch * rows * fixed * cols);
+            debug_assert_eq!(destination.len(), batch * cols * fixed * rows);
+            for batch_index in 0..batch {
+                for fixed_index in 0..fixed {
+                    let from = (batch_index * rows * fixed + fixed_index) * cols;
+                    let to = (batch_index * cols * fixed + fixed_index) * rows;
+                    tiled_transpose(
+                        &source[from..],
+                        &mut destination[to..],
+                        rows,
+                        cols,
+                        fixed * cols,
+                        fixed * rows,
+                    );
                 }
             }
-            column = column_end;
+        }
+    }
+}
+
+/// The byte-cell form of [`apply_plan`], for a cell wider than 8 bytes (the
+/// `[0, 2, 1, 3]` W run). The cell itself is the innermost `copy_from_slice`.
+fn apply_plan_bytes(plan: &TilePlan, source: &[u8], destination: &mut [u8]) {
+    let cell = plan.cell_bytes();
+    let mut copy_matrix = |from: usize,
+                           to: usize,
+                           rows: usize,
+                           cols: usize,
+                           source_stride: usize,
+                           destination_stride: usize| {
+        for row_start in (0..rows).step_by(TRANSPOSE_TILE) {
+            let row_end = (row_start + TRANSPOSE_TILE).min(rows);
+            for col_start in (0..cols).step_by(TRANSPOSE_TILE) {
+                let col_end = (col_start + TRANSPOSE_TILE).min(cols);
+                for col in col_start..col_end {
+                    let destination_base = (to + (col * destination_stride + row_start)) * cell;
+                    for row in row_start..row_end {
+                        let source_base = (from + (row * source_stride + col)) * cell;
+                        destination[destination_base + (row - row_start) * cell
+                            ..destination_base + (row - row_start + 1) * cell]
+                            .copy_from_slice(&source[source_base..source_base + cell]);
+                    }
+                }
+            }
+        }
+    };
+    match *plan {
+        TilePlan::Slabs {
+            outer, rows, cols, ..
+        } => {
+            let slab = rows * cols;
+            for slab_index in 0..outer {
+                copy_matrix(slab_index * slab, slab_index * slab, rows, cols, cols, rows);
+            }
+        }
+        TilePlan::FixedOuter {
+            batch,
+            fixed,
+            rows,
+            cols,
+            ..
+        } => {
+            for batch_index in 0..batch {
+                for fixed_index in 0..fixed {
+                    copy_matrix(
+                        (batch_index * rows * fixed + fixed_index) * cols,
+                        (batch_index * cols * fixed + fixed_index) * rows,
+                        rows,
+                        cols,
+                        fixed * cols,
+                        fixed * rows,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// `dst[c, r] = src[r, c]` for a `[rows][cols]` matrix, 32 x 32 cells a tile.
+///
+/// `source_row_stride` and `destination_row_stride` are in cells and are at
+/// least `cols` and `rows`; the columns themselves are contiguous.
+fn tiled_transpose<T: Copy + Default>(
+    source: &[T],
+    destination: &mut [T],
+    rows: usize,
+    cols: usize,
+    source_row_stride: usize,
+    destination_row_stride: usize,
+) {
+    debug_assert!(source_row_stride >= cols);
+    debug_assert!(destination_row_stride >= rows);
+    let mut tile = [T::default(); TRANSPOSE_TILE * TRANSPOSE_TILE];
+    let mut run = [T::default(); TRANSPOSE_TILE];
+    for row_start in (0..rows).step_by(TRANSPOSE_TILE) {
+        let row_end = (row_start + TRANSPOSE_TILE).min(rows);
+        let height = row_end - row_start;
+        for col_start in (0..cols).step_by(TRANSPOSE_TILE) {
+            let col_end = (col_start + TRANSPOSE_TILE).min(cols);
+            let width = col_end - col_start;
+            for (tile_row, row) in (row_start..row_end).enumerate() {
+                let from = row * source_row_stride + col_start;
+                tile[tile_row * TRANSPOSE_TILE..tile_row * TRANSPOSE_TILE + width]
+                    .copy_from_slice(&source[from..from + width]);
+            }
+            for (tile_col, col) in (col_start..col_end).enumerate() {
+                for (tile_row, slot) in run.iter_mut().enumerate().take(height) {
+                    *slot = tile[tile_row * TRANSPOSE_TILE + tile_col];
+                }
+                let to = col * destination_row_stride + row_start;
+                destination[to..to + height].copy_from_slice(&run[..height]);
+            }
         }
     }
 }
@@ -997,6 +1192,16 @@ pub(crate) fn split(
         require_output_shape(op, &expected, out)?;
     }
 
+    // The arena's views are contiguous, so a split is `outer` contiguous runs
+    // of `size * inner` elements per output: one memcpy per run instead of one
+    // checked `copy_element` per element. For YOLOv8n's channel splits that is
+    // one memcpy per output (`outer` is the batch extent, 1); on the [1, 32,
+    // 80, 80] split the per-element path measured 22.9 ms of a 76 ms forward,
+    // which is why this path exists. A strided view keeps the element loop.
+    if input.is_contiguous() && outputs.iter().all(|out| out.is_contiguous()) {
+        return split_contiguous(op, input, outputs, &sizes, axis, element_bytes);
+    }
+
     for (index, out) in outputs.iter_mut().enumerate() {
         let mut expected_dims = input.shape().dims().to_vec();
         expected_dims[axis] = sizes[index];
@@ -1029,6 +1234,78 @@ pub(crate) fn split(
             copy_element(op, source, from, destination, to, element_bytes)?;
         }
         axis_offset += sizes[index];
+    }
+    Ok(())
+}
+
+/// The contiguous `Split`: one `copy_from_slice` per `(output, outer block)`.
+///
+/// The input is `outer x axis_extent x inner`; output `i` is
+/// `outer x sizes[i] x inner`, and its run for one outer block starts at input
+/// element `(block * axis_extent + offset) * inner`, so both sides of every copy
+/// are contiguous. `outer`, `inner`, the source block stride and each run
+/// length are computed once, before the loop; the loop itself does no division
+/// and no per-element index arithmetic.
+fn split_contiguous(
+    op: OpId,
+    input: &TensorView<'_>,
+    outputs: &mut [TensorMut<'_>],
+    sizes: &[u64],
+    axis: usize,
+    element_bytes: usize,
+) -> Result<(), Fn3Error> {
+    let dims = input.shape().dims();
+    let inner = checked_usize(
+        checked_product(&dims[axis + 1..], "cpu split inner")?,
+        "cpu split inner",
+        "inner block extent",
+    )?;
+    let outer = checked_usize(
+        checked_product(&dims[..axis], "cpu split outer")?,
+        "cpu split outer",
+        "outer block count",
+    )?;
+    let axis_extent = checked_usize(dims[axis], "cpu split axis", "axis extent")?;
+    let inner_bytes = inner
+        .checked_mul(element_bytes)
+        .ok_or_else(|| Fn3Error::ShapeOverflow {
+            context: "cpu split run",
+            axis: Some(axis),
+            detail: "one inner row exceeds usize::MAX bytes".to_string(),
+        })?;
+    let source_slab_bytes =
+        axis_extent
+            .checked_mul(inner_bytes)
+            .ok_or_else(|| Fn3Error::ShapeOverflow {
+                context: "cpu split source block",
+                axis: Some(axis),
+                detail: "one input outer block exceeds usize::MAX bytes".to_string(),
+            })?;
+    let source = view_window_bytes(op, input)?;
+    let mut axis_offset = 0usize;
+    for (index, out) in outputs.iter_mut().enumerate() {
+        let size = checked_usize(sizes[index], "cpu split size", "output axis extent")?;
+        let run_bytes = size
+            .checked_mul(inner_bytes)
+            .ok_or_else(|| Fn3Error::ShapeOverflow {
+                context: "cpu split output block",
+                axis: Some(axis),
+                detail: "one output outer block exceeds usize::MAX bytes".to_string(),
+            })?;
+        let destination = out_window_bytes(op, out)?;
+        // `run_bytes * outer` is the output's window, which the view validated;
+        // the source block plus this output's offset is inside the input window
+        // because the split sizes sum to the axis extent.
+        debug_assert_eq!(Some(destination.len()), run_bytes.checked_mul(outer));
+        if run_bytes != 0 {
+            let axis_offset_bytes = axis_offset * inner_bytes;
+            for block in 0..outer {
+                let from = block * source_slab_bytes + axis_offset_bytes;
+                let to = block * run_bytes;
+                destination[to..to + run_bytes].copy_from_slice(&source[from..from + run_bytes]);
+            }
+        }
+        axis_offset += size;
     }
     Ok(())
 }
@@ -1543,6 +1820,114 @@ mod tests {
         assert!(Shape::validate_permutation(&[0, 0], shape.rank()).is_err());
     }
 
+    /// The old element loop, written independently: read the output in
+    /// row-major order and address the input through its own metadata.
+    fn naive_transpose(
+        input: &TensorView<'_>,
+        permutation: &[usize],
+        out_dims: &[u64],
+    ) -> Vec<f32> {
+        let values = input
+            .storage_slice::<f32>()
+            .expect("the test storage is aligned f32");
+        let elements: u64 = out_dims.iter().product();
+        let mut out = Vec::with_capacity(elements as usize);
+        let mut out_coordinates = vec![0u64; out_dims.len()];
+        let mut in_coordinates = vec![0u64; out_dims.len()];
+        for linear in 0..elements {
+            decompose(linear, out_dims, &mut out_coordinates);
+            for (out_axis, &in_axis) in permutation.iter().enumerate() {
+                in_coordinates[in_axis] = out_coordinates[out_axis];
+            }
+            let index = input
+                .meta()
+                .checked_index(&in_coordinates)
+                .expect("a transposed coordinate addresses the input");
+            out.push(values[index]);
+        }
+        out
+    }
+
+    fn assert_transpose_matches_reference(dims: &[u64], permutation: &[usize]) {
+        let elements: usize = dims.iter().map(|&d| d as usize).product();
+        let values: Vec<f32> = (0..elements).map(|value| value as f32).collect();
+        let input = Tensor::from_f32(Shape::from_dims(dims.iter().copied()), &values).unwrap();
+        let out_dims: Vec<u64> = permutation.iter().map(|&axis| dims[axis]).collect();
+        let mut out = Tensor::zeros(
+            Shape::from_dims(out_dims.iter().copied()),
+            DType::F32,
+            DeviceId::Cpu,
+        )
+        .unwrap();
+        transpose(
+            OpId::Transpose,
+            &input.as_view().unwrap(),
+            &mut out.as_mut_view().unwrap(),
+            &OpParams::new().with_axes(permutation.iter().map(|&axis| axis as i64)),
+        )
+        .unwrap();
+        let expected = naive_transpose(&input.as_view().unwrap(), permutation, &out_dims);
+        assert_eq!(out.as_f32_slice().unwrap(), expected.as_slice());
+    }
+
+    #[test]
+    fn transpose_tiles_match_the_element_loop_for_every_fast_path() {
+        // NCHW -> NHWC.
+        assert_transpose_matches_reference(&[2, 3, 4, 5], &[0, 2, 3, 1]);
+        // NCHW -> NWCH (the DFL input transpose in the pinned graph).
+        assert_transpose_matches_reference(&[2, 3, 4, 5], &[0, 3, 1, 2]);
+        // NCHW -> NHCW: the cell is the W run.
+        assert_transpose_matches_reference(&[2, 3, 4, 5], &[0, 2, 1, 3]);
+        assert_transpose_matches_reference(&[1, 4, 16, 2100], &[0, 2, 1, 3]);
+        // N A C B -> N B C A (the DFL output transpose).
+        assert_transpose_matches_reference(&[2, 3, 4, 5], &[0, 3, 2, 1]);
+        assert_transpose_matches_reference(&[1, 2100, 4, 16], &[0, 3, 2, 1]);
+        // The plain last-two swap, at rank 2 and rank 3.
+        assert_transpose_matches_reference(&[3, 5], &[1, 0]);
+        assert_transpose_matches_reference(&[2, 3, 5], &[0, 2, 1]);
+        // A permutation outside every fast path keeps the generic loop.
+        assert_transpose_matches_reference(&[2, 3, 2, 4, 3], &[2, 0, 3, 1, 4]);
+    }
+
+    #[test]
+    fn transpose_of_an_eight_byte_element_uses_the_typed_tile() {
+        let input = Tensor::from_i64(Shape::from_dims([2, 3]), &[1, 2, 3, 4, 5, 6]).unwrap();
+        let mut out = Tensor::zeros(Shape::from_dims([3, 2]), DType::I64, DeviceId::Cpu).unwrap();
+        transpose(
+            OpId::Transpose,
+            &input.as_view().unwrap(),
+            &mut out.as_mut_view().unwrap(),
+            &OpParams::new().with_axes([1, 0]),
+        )
+        .unwrap();
+        assert_eq!(out.as_i64_slice().unwrap(), &[1, 4, 2, 5, 3, 6]);
+    }
+
+    #[test]
+    fn transpose_of_a_strided_view_keeps_the_element_path() {
+        let source =
+            Tensor::from_f32(Shape::from_dims([2, 3]), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let meta = TensorMeta::strided(
+            Shape::from_dims([3, 2]),
+            Strides::from_elements(vec![1, 3]),
+            0,
+            DType::F32,
+            DeviceId::Cpu,
+        )
+        .unwrap();
+        let transposed = TensorView::new(source.storage(), meta).unwrap();
+        let mut out = Tensor::zeros(Shape::from_dims([2, 3]), DType::F32, DeviceId::Cpu).unwrap();
+        transpose(
+            OpId::Transpose,
+            &transposed,
+            &mut out.as_mut_view().unwrap(),
+            &OpParams::new().with_axes([1, 0]),
+        )
+        .unwrap();
+        let expected = naive_transpose(&transposed, &[1, 0], &[2, 3]);
+        assert_eq!(out.as_f32_slice().unwrap(), expected.as_slice());
+    }
+
     #[test]
     fn concat_moves_each_contiguous_block_once() {
         // Axis 1: two outer rows per input, one element of `inner`.
@@ -1607,5 +1992,158 @@ mod tests {
             out.as_f32_slice().unwrap(),
             &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0, 7.0, 8.0]
         );
+    }
+
+    /// The pre-fast-path `Split` semantics, written independently of the
+    /// kernel: output `i` element `coordinate` is input element `coordinate`
+    /// with `sizes[..i]` added on `axis`, in the input's *logical* row-major
+    /// order.
+    fn naive_split(
+        input: &TensorView<'_>,
+        axis: usize,
+        sizes: &[u64],
+    ) -> Vec<(Vec<u64>, Vec<f32>)> {
+        let dims = input.shape().dims();
+        let values = input
+            .storage_slice::<f32>()
+            .expect("the test storage is aligned f32");
+        let mut outputs = Vec::with_capacity(sizes.len());
+        let mut offset = 0u64;
+        for &size in sizes {
+            let mut out_dims = dims.to_vec();
+            out_dims[axis] = size;
+            let elements: u64 = out_dims.iter().product();
+            let mut out = Vec::with_capacity(elements as usize);
+            let mut coordinates = vec![0u64; out_dims.len()];
+            for linear in 0..elements {
+                decompose(linear, &out_dims, &mut coordinates);
+                coordinates[axis] += offset;
+                let index = input
+                    .meta()
+                    .checked_index(&coordinates)
+                    .expect("a logical output coordinate addresses the input");
+                out.push(values[index]);
+                coordinates[axis] -= offset;
+            }
+            outputs.push((out_dims, out));
+            offset += size;
+        }
+        outputs
+    }
+
+    fn run_split(input: &TensorView<'_>, axis: usize, sizes: Option<&[u64]>) -> Vec<Tensor> {
+        let dims = input.shape().dims();
+        let count = sizes.map_or(2, <[u64]>::len);
+        let split_sizes: Vec<u64> =
+            sizes.map_or_else(|| vec![dims[axis] / count as u64; count], <[u64]>::to_vec);
+        let mut outputs: Vec<Tensor> = split_sizes
+            .iter()
+            .map(|&size| {
+                let mut out_dims = dims.to_vec();
+                out_dims[axis] = size;
+                Tensor::zeros(Shape::from_dims(out_dims), DType::F32, DeviceId::Cpu).unwrap()
+            })
+            .collect();
+        let sizes_tensor = sizes.map(|values| {
+            Tensor::from_i64(
+                Shape::from_dims([values.len() as u64]),
+                &values.iter().map(|&value| value as i64).collect::<Vec<_>>(),
+            )
+            .unwrap()
+        });
+        let sizes_view = sizes_tensor
+            .as_ref()
+            .map(|tensor| tensor.as_view().unwrap());
+        let mut views: Vec<_> = outputs
+            .iter_mut()
+            .map(|out| out.as_mut_view().unwrap())
+            .collect();
+        split(
+            OpId::Split,
+            input,
+            sizes_view.as_ref(),
+            &mut views,
+            &OpParams::new().with_axes([axis as i64]),
+        )
+        .unwrap();
+        drop(views);
+        outputs
+    }
+
+    fn assert_split_matches_reference(input: &Tensor, axis: usize, sizes: Option<&[u64]>) {
+        let view = input.as_view().unwrap();
+        let got = run_split(&view, axis, sizes);
+        let expected_sizes = sizes.map_or_else(
+            || {
+                let dimension = input.shape().dims()[axis];
+                vec![dimension / 2; 2]
+            },
+            <[u64]>::to_vec,
+        );
+        let expected = naive_split(&view, axis, &expected_sizes);
+        assert_eq!(got.len(), expected.len());
+        for (out, (dims, values)) in got.iter().zip(expected) {
+            assert_eq!(out.shape().dims(), dims.as_slice());
+            assert_eq!(out.as_f32_slice().unwrap(), values.as_slice());
+        }
+    }
+
+    #[test]
+    fn split_matches_the_old_semantics_on_every_axis_and_size_shape() {
+        let values: Vec<f32> = (0..60).map(|value| value as f32).collect();
+        // Axis 0, uneven sizes, a zero-size head, and a rank whose outer extent
+        // is not one.
+        let input = Tensor::from_f32(Shape::from_dims([6, 10]), &values[..60]).unwrap();
+        assert_split_matches_reference(&input, 0, Some(&[0, 2, 3, 1]));
+        assert_split_matches_reference(&input, 0, Some(&[2, 3, 1]));
+        // Axis 1, uneven sizes.
+        let input = Tensor::from_f32(Shape::from_dims([3, 4, 5]), &values[..60]).unwrap();
+        assert_split_matches_reference(&input, 1, Some(&[1, 2, 1]));
+        // The last axis.
+        assert_split_matches_reference(&input, 2, Some(&[1, 4]));
+        // An equal split into two parts on an evenly divisible axis.
+        let input = Tensor::from_f32(Shape::from_dims([3, 4, 4]), &values[..48]).unwrap();
+        assert_split_matches_reference(&input, 2, None);
+        // A rank-1 split and a split into one part (the whole tensor).
+        let line = Tensor::from_f32(Shape::from_dims([7]), &values[..7]).unwrap();
+        assert_split_matches_reference(&line, 0, Some(&[3, 4]));
+        assert_split_matches_reference(&line, 0, Some(&[7]));
+    }
+
+    #[test]
+    fn split_of_a_strided_view_keeps_the_element_path() {
+        let source =
+            Tensor::from_f32(Shape::from_dims([2, 3]), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let meta = TensorMeta::strided(
+            Shape::from_dims([3, 2]),
+            Strides::from_elements(vec![1, 3]),
+            0,
+            DType::F32,
+            DeviceId::Cpu,
+        )
+        .unwrap();
+        let transposed = TensorView::new(source.storage(), meta).unwrap();
+        // The view's logical order is [1, 4, 2, 5, 3, 6].
+        let expected = naive_split(&transposed, 0, &[1, 2]);
+        let mut outputs = [
+            Tensor::zeros(Shape::from_dims([1, 2]), DType::F32, DeviceId::Cpu).unwrap(),
+            Tensor::zeros(Shape::from_dims([2, 2]), DType::F32, DeviceId::Cpu).unwrap(),
+        ];
+        let sizes = Tensor::from_i64(Shape::from_dims([2]), &[1, 2]).unwrap();
+        let mut views: Vec<_> = outputs
+            .iter_mut()
+            .map(|out| out.as_mut_view().unwrap())
+            .collect();
+        split(
+            OpId::Split,
+            &transposed,
+            Some(&sizes.as_view().unwrap()),
+            &mut views,
+            &OpParams::new().with_axes([0]),
+        )
+        .unwrap();
+        drop(views);
+        assert_eq!(outputs[0].as_f32_slice().unwrap(), expected[0].1.as_slice());
+        assert_eq!(outputs[1].as_f32_slice().unwrap(), expected[1].1.as_slice());
     }
 }

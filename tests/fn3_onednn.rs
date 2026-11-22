@@ -34,7 +34,7 @@ use std::sync::Arc;
 use fastnn::inference::backend::SegmentEngine;
 use fastnn::inference::import::{import_onnx_graph, ImportedGraph};
 use fastnn::inference::ops::OpId;
-use fastnn::inference::runtime::{EngineChoice, Session, Threading};
+use fastnn::inference::runtime::{ConvBlockAxis, EngineChoice, Session, Threading};
 
 const YOLOV8N: &str = "/home/petrouil/.hermes/yolov8n.onnx";
 
@@ -224,8 +224,9 @@ fn the_plan_says_which_segments_onednn_took() {
         .expect("an Auto session on a CNN must have oneDNN segments");
     println!(
         "[fn3onednn][measure] plan: {} segments ({} oneDNN, {} scalar), {} fallbacks, \
-         oneDNN {}, cpu runtime {}, {} prepared segments ({} conv, {} pool, {} matmul), \
-         {} prepacked bytes, {} reordered weight blocks, parallel blocks {}",
+         oneDNN {}, cpu runtime {}, {} prepared segments ({} conv: {} row-split, {} \
+         channel-split; {} pool, {} matmul), {} prepacked bytes, {} reordered weight blocks, \
+         parallel blocks {}",
         counts.total(),
         counts.one_dnn,
         counts.scalar,
@@ -234,12 +235,84 @@ fn the_plan_says_which_segments_onednn_took() {
         report.cpu_runtime,
         report.segments,
         report.conv_segments,
+        report.conv_row_segments,
+        report.conv_channel_segments,
         report.pool_segments,
         report.matmul_segments,
         report.prepacked_bytes,
         report.reordered_blocks,
         report.parallel_blocks,
     );
+    assert_eq!(
+        report.conv_row_segments + report.conv_channel_segments,
+        report.conv_segments,
+        "every prepared convolution records exactly one split dimension"
+    );
+    let splits = session.one_dnn_splits();
+    assert_eq!(splits.len(), report.conv_segments);
+    for split in &splits {
+        assert_eq!(
+            split.ranges.iter().map(|&(_, count)| count).sum::<usize>(),
+            split.out_extent,
+            "segment {} blocks must cover the split dimension",
+            split.segment
+        );
+        let mut next = 0;
+        for &(start, count) in &split.ranges {
+            assert_eq!(
+                start, next,
+                "segment {} ranges are contiguous",
+                split.segment
+            );
+            next += count;
+        }
+        assert!(split.blocks >= 1);
+    }
+    println!(
+        "[fn3onednn][measure] conv splits at {} workers: {} row-split ({} blocks), {} \
+         channel-split ({} blocks)",
+        *worker_counts().last().unwrap(),
+        report.conv_row_segments,
+        splits
+            .iter()
+            .filter(|split| split.axis == ConvBlockAxis::Rows)
+            .map(|split| split.blocks)
+            .sum::<usize>(),
+        report.conv_channel_segments,
+        splits
+            .iter()
+            .filter(|split| split.axis == ConvBlockAxis::Channels)
+            .map(|split| split.blocks)
+            .sum::<usize>(),
+    );
+    for split in splits
+        .iter()
+        .filter(|split| split.axis == ConvBlockAxis::Rows)
+    {
+        let segment = &plan.segments[split.segment];
+        let input = plan
+            .shape(segment.inputs[0])
+            .map(|shape| shape.to_string())
+            .unwrap_or_else(|_| "?".to_string());
+        let output = plan
+            .shape(segment.outputs[0])
+            .map(|shape| shape.to_string())
+            .unwrap_or_else(|_| "?".to_string());
+        println!(
+            "[fn3onednn][measure] row-split segment {} ({}): {} -> {} kernel {:?} stride {:?} \
+             pads {:?} group {}, {} blocks, {} source rows",
+            split.segment,
+            segment.loc.describe(),
+            input,
+            output,
+            segment.params.kernel_shape,
+            segment.params.strides,
+            segment.params.pads,
+            segment.params.group,
+            split.blocks,
+            split.source_rows,
+        );
+    }
     assert_eq!(
         report.cpu_runtime, "seq",
         "the engine requires a sequential oneDNN"

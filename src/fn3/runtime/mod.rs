@@ -92,11 +92,16 @@ pub mod exec;
 pub mod kernels;
 pub mod plan;
 pub mod threads;
+/// Per-segment timings, compiled only with the `segment-timing` feature.
+#[cfg(feature = "segment-timing")]
+pub mod timing;
 
 pub use arena::Arena;
-pub use exec::{EngineChoice, HostTensor, OneDnnReport, Session};
+pub use exec::{ConvBlockAxis, ConvSplitReport, EngineChoice, HostTensor, OneDnnReport, Session};
 pub use plan::{
     EngineCounts, EngineFallback, Plan, Segment, SegmentOp, Slot, SlotId, SlotSource,
     SLOT_ALIGNMENT,
 };
 pub use threads::{physical_core_count, SessionThreads, Threading};
+#[cfg(feature = "segment-timing")]
+pub use timing::{SegmentTiming, SegmentTimings};
