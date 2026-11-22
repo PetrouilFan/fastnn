@@ -1,16 +1,9 @@
-"""Pytest configuration with memory-pool isolation."""
+"""Pytest configuration for the v3 inference runtime.
 
-import pytest
-import fastnn
+The 2.x Python facade this file used to isolate (a process-global storage pool)
+is gone: sessions own their arena and threads, so a test that completes leaves
+nothing behind for the next one. The file is kept because the test directory is
+shared with the fn3 Python bindings, and a future fixture belongs here.
+"""
 
-
-@pytest.fixture(autouse=True)
-def isolate_memory_pool():
-    """Clear the Rust storage pool after each test to prevent cross-test pollution.
-
-    This prevents memory corruption issues that can occur when the static Rust
-    storage pool holds onto recycled memory blocks during test teardown, especially
-    when other libraries (like PyTorch) are also loaded in the same pytest process.
-    """
-    yield
-    fastnn._core.clear_storage_pool()
+import fastnn  # noqa: F401  (the extension must import before any test collects)

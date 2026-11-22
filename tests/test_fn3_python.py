@@ -145,8 +145,9 @@ def test_error_hierarchy_is_catchable_at_every_level():
         "Fn3ExecutionError",
     ]:
         assert issubclass(getattr(fn3, name), fn3.Fn3Error)
-    # The 2.x base class is unrelated: 3.0 is its own surface.
-    assert not issubclass(fn3.Fn3Error, fastnn.FastnnError)
+    # 3.0 is its own surface: there is one error base and no legacy one.
+    assert issubclass(fn3.Fn3Error, Exception)
+    assert not hasattr(fastnn, "FastnnError")
 
 
 def test_documented_surface_has_docstrings():

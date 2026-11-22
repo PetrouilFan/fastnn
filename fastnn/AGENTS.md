@@ -21,7 +21,7 @@ behavior may be simplified whenever a cleaner surface warrants it.
 - `pyproject.toml` owns distribution metadata and the `fastnn._core` extension
   module configuration.
 - Do not reintroduce a 2.x facade module, a `.fnn` loader or an
-  `AotExecutor`-style class. The archived surface lives at tag `archive/3.0`.
+  `AotExecutor`-style class. The archived surface lives at tag `archive/the archived surface`.
 - Remove aliases and lazy `__getattr__` names that do not justify their
   maintenance cost.
 

@@ -10,3 +10,5 @@ There is no autograd, optimizer, training loop, data loader or wgpu backend.
 from fastnn import inference
 
 __all__ = ["inference"]
+
+__version__ = "3.0.0"

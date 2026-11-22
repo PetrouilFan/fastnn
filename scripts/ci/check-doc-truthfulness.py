@@ -66,8 +66,11 @@ def docs_have_resolvable_local_markdown_links() -> None:
     failures: list[str] = []
 
     for markdown_path in sorted(ROOT.rglob("*.md")):
+        # docs/archive/ is frozen evidence: those files describe a tree that
+        # no longer exists and are labelled "not instructions", so their
+        # relative links are allowed to rot rather than being maintained.
         if any(
-            part in {".git", "target", ".venv", "node_modules", ".kilo"}
+            part in {".git", "target", ".venv", "node_modules", ".kilo", "archive"}
             for part in markdown_path.parts
         ):
             continue

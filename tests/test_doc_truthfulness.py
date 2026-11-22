@@ -2,7 +2,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-DOC_FILE = "docs/guides/getting-started.md"
+DOC_FILE = "docs/quickstart-fn3.md"
 
 
 def _run_doc_truthfulness(repo_root: Path) -> subprocess.CompletedProcess[str]:
@@ -40,7 +40,7 @@ def test_doc_truthfulness_script_rejects_missing_local_markdown_anchor():
 
     try:
         doc_path.write_text(
-            original + "\n[Broken local doc anchor](getting-started.md#missing-anchor-for-guardrail)\n",
+            original + "\n[Broken local doc anchor](quickstart-fn3.md#missing-anchor-for-guardrail)\n",
             encoding="utf-8",
         )
         result = _run_doc_truthfulness(repo_root)
@@ -49,7 +49,7 @@ def test_doc_truthfulness_script_rejects_missing_local_markdown_anchor():
 
     assert result.returncode != 0
     assert DOC_FILE in result.stderr
-    assert "getting-started.md#missing-anchor-for-guardrail" in result.stderr
+    assert "quickstart-fn3.md#missing-anchor-for-guardrail" in result.stderr
 
 
 def test_doc_truthfulness_script_rejects_missing_same_doc_anchor():
