@@ -55,7 +55,9 @@
 
 use std::fmt;
 
-use crate::inference::backend::OpParams;
+use crate::inference::backend::{
+    Claim, OpParams, ScalarOnly, SegmentEngine, SegmentOperand, SegmentProvider,
+};
 use crate::inference::error::Fn3Error;
 use crate::inference::import::{ImportedGraph, WeightId, WeightSet};
 use crate::inference::ir::{Graph, SourceLoc, TensorType, ValueId};
@@ -164,6 +166,12 @@ impl fmt::Display for SegmentOp {
 pub struct Segment {
     /// What to run.
     pub op: SegmentOp,
+    /// Which engine the plan assigned to this segment.
+    ///
+    /// [`SegmentEngine::Scalar`] unless a [`SegmentProvider`] claimed the
+    /// segment when the plan was built. The executor dispatches on this value;
+    /// it never re-decides per forward.
+    pub engine: SegmentEngine,
     /// Operand slots, in the op's operand order.
     pub inputs: Vec<SlotId>,
     /// Result slots, in the op's result order.
@@ -183,7 +191,39 @@ impl Segment {
 
 impl fmt::Display for Segment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ({})", self.loc.describe(), self.op)
+        write!(f, "{} ({}) [{}]", self.loc.describe(), self.op, self.engine)
+    }
+}
+
+/// One segment a provider declined, and why.
+///
+/// A fallback is a plan decision, not a runtime failure: the segment runs on the
+/// scalar kernels and its result is exactly the scalar result. It is recorded
+/// so a session can report how much of a model the optional engine did not
+/// take, instead of leaving that invisible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineFallback {
+    /// Position of the segment in [`Plan::segments`].
+    pub segment: usize,
+    /// The op that fell back.
+    pub op: OpId,
+    /// The provider's reason: the property that disqualified the segment.
+    pub reason: String,
+}
+
+/// How many segments each engine runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EngineCounts {
+    /// Segments on the portable scalar kernels.
+    pub scalar: usize,
+    /// Segments on the optional oneDNN CPU engine.
+    pub one_dnn: usize,
+}
+
+impl EngineCounts {
+    /// Total segments counted.
+    pub fn total(&self) -> usize {
+        self.scalar + self.one_dnn
     }
 }
 
@@ -202,6 +242,12 @@ pub struct Plan {
     pub arena_bytes: usize,
     /// Largest number of payload bytes live at one instant (`<= arena_bytes`).
     pub peak_bytes: usize,
+    /// Segments the offered provider declined, in segment order.
+    ///
+    /// Empty for a plan built with [`ScalarOnly`]. A session reports this so a
+    /// partial engine take is visible; the segments themselves are scalar and
+    /// produce the scalar result.
+    pub fallbacks: Vec<EngineFallback>,
 }
 
 impl Plan {
@@ -222,7 +268,7 @@ impl Plan {
     /// payload disagrees with its declared shape, or when byte arithmetic
     /// overflows.
     pub fn from_graph(graph: &Graph, weights: &WeightSet) -> Result<Plan, Fn3Error> {
-        Plan::build(graph, weights, None, None)
+        Plan::build(graph, weights, None, None, &ScalarOnly)
     }
 
     /// Build a plan for an imported model, using its declared inputs and
@@ -233,6 +279,38 @@ impl Plan {
             imported.weights(),
             Some(imported.inputs()),
             Some(imported.outputs()),
+            &ScalarOnly,
+        )
+    }
+
+    /// Build a plan from a graph, offering every segment to `provider`.
+    ///
+    /// The provider is asked once per segment, before any memory is reserved.
+    /// A segment it claims records the provider's [`SegmentEngine`]; one it
+    /// declines runs on [`SegmentEngine::Scalar`] and is recorded in
+    /// [`Plan::fallbacks`] with the provider's reason. The planner contains no
+    /// feature test and no provider-specific rule: the same graph therefore
+    /// builds the same scalar plan whatever build it is in, and only the
+    /// answer the session passes in decides where a segment runs.
+    pub fn from_graph_with(
+        graph: &Graph,
+        weights: &WeightSet,
+        provider: &dyn SegmentProvider,
+    ) -> Result<Plan, Fn3Error> {
+        Plan::build(graph, weights, None, None, provider)
+    }
+
+    /// Build a plan for an imported model, offering segments to `provider`.
+    pub fn from_imported_with(
+        imported: &ImportedGraph,
+        provider: &dyn SegmentProvider,
+    ) -> Result<Plan, Fn3Error> {
+        Plan::build(
+            imported.graph(),
+            imported.weights(),
+            Some(imported.inputs()),
+            Some(imported.outputs()),
+            provider,
         )
     }
 
@@ -241,12 +319,14 @@ impl Plan {
         weights: &WeightSet,
         declared_inputs: Option<&[ValueId]>,
         declared_outputs: Option<&[ValueId]>,
+        provider: &dyn SegmentProvider,
     ) -> Result<Plan, Fn3Error> {
-        let segments = graph
+        let mut segments = graph
             .nodes()
             .iter()
             .map(|node| Segment {
                 op: SegmentOp::Op(node.op),
+                engine: SegmentEngine::Scalar,
                 inputs: node.inputs.iter().copied().map(slot_of).collect(),
                 outputs: node.outputs.iter().copied().map(slot_of).collect(),
                 params: node.params.clone(),
@@ -365,6 +445,46 @@ impl Plan {
 
         let (arena_bytes, peak_bytes) = assign_offsets(&segments, &mut slots, &inputs, &outputs)?;
 
+        // Offer every segment to the provider, now that the slot types are
+        // resolved. The answer is plan data: the executor dispatches on
+        // `segment.engine` and never re-decides.
+        let mut fallbacks = Vec::new();
+        for (index, segment) in segments.iter_mut().enumerate() {
+            let operand = |id: &SlotId| -> Result<SegmentOperand, Fn3Error> {
+                let slot = &slots[id.index()];
+                let shape = slot.ty.static_shape().ok_or_else(|| {
+                    value_error(
+                        slot.name.as_deref(),
+                        slot.value,
+                        &slot.ty,
+                        "its type is not fully static",
+                    )
+                })?;
+                Ok(SegmentOperand {
+                    shape,
+                    dtype: slot.ty.dtype,
+                    constant: slot.is_weight(),
+                })
+            };
+            let mut operands = Vec::with_capacity(segment.inputs.len());
+            for id in &segment.inputs {
+                operands.push(operand(id)?);
+            }
+            let mut results = Vec::with_capacity(segment.outputs.len());
+            for id in &segment.outputs {
+                results.push(operand(id)?);
+            }
+            match provider.claim(segment.op.op(), &operands, &results, &segment.params) {
+                Claim::Accepted => segment.engine = provider.engine(),
+                Claim::NotMine => {}
+                Claim::Declined(reason) => fallbacks.push(EngineFallback {
+                    segment: index,
+                    op: segment.op.op(),
+                    reason,
+                }),
+            }
+        }
+
         Ok(Plan {
             segments,
             slots,
@@ -372,7 +492,25 @@ impl Plan {
             outputs,
             arena_bytes,
             peak_bytes,
+            fallbacks,
         })
+    }
+
+    /// How many segments each engine runs.
+    pub fn engine_counts(&self) -> EngineCounts {
+        let mut counts = EngineCounts::default();
+        for segment in &self.segments {
+            match segment.engine {
+                SegmentEngine::Scalar => counts.scalar += 1,
+                SegmentEngine::OneDnn => counts.one_dnn += 1,
+            }
+        }
+        counts
+    }
+
+    /// The segments the offered provider declined, in segment order.
+    pub fn fallbacks(&self) -> &[EngineFallback] {
+        &self.fallbacks
     }
 
     /// One slot by id.
@@ -783,6 +921,47 @@ mod tests {
             assert_eq!(slot.offset % SLOT_ALIGNMENT, 0, "{slot:?}");
             assert!(slot.offset + slot.bytes <= plan.arena_bytes, "{slot:?}");
         }
+    }
+
+    /// A provider that declines every `Relu` and ignores everything else.
+    #[derive(Debug)]
+    struct DeclinesRelu;
+
+    impl SegmentProvider for DeclinesRelu {
+        fn engine(&self) -> SegmentEngine {
+            SegmentEngine::OneDnn
+        }
+
+        fn claim(
+            &self,
+            op: OpId,
+            _inputs: &[SegmentOperand],
+            _outputs: &[SegmentOperand],
+            _params: &OpParams,
+        ) -> Claim {
+            if op == OpId::Relu {
+                Claim::Declined("the test provider does not run Relu".to_string())
+            } else {
+                Claim::NotMine
+            }
+        }
+    }
+
+    #[test]
+    fn a_declined_segment_is_scalar_and_recorded_while_another_op_is_not() {
+        let (graph, weights) = chain();
+        let plan = Plan::from_graph_with(&graph, &weights, &DeclinesRelu).unwrap();
+        // The Relu is declined and reported; the Mul is NotMine, so it is scalar
+        // without a fallback entry.
+        assert_eq!(plan.segments[0].engine, SegmentEngine::Scalar);
+        assert_eq!(plan.segments[1].engine, SegmentEngine::Scalar);
+        assert_eq!(plan.fallbacks().len(), 1);
+        assert_eq!(plan.fallbacks()[0].segment, 0);
+        assert_eq!(plan.fallbacks()[0].op, OpId::Relu);
+        assert!(plan.fallbacks()[0].reason.contains("does not run Relu"));
+        assert_eq!(plan.engine_counts().scalar, 2);
+        assert_eq!(plan.engine_counts().one_dnn, 0);
+        assert_eq!(plan.engine_counts().total(), 2);
     }
 
     #[test]

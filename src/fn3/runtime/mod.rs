@@ -25,7 +25,7 @@
 //! | [`plan`] | [`Plan`], [`Segment`], [`Slot`], liveness-based offsets |
 //! | [`arena`] | [`Arena`]: one allocation, disjoint windows, allocation counter |
 //! | [`threads`] | [`Threading`], [`SessionThreads`]: a session's own pool |
-//! | [`exec`] | [`Session`]: validate inputs, walk segments, read outputs |
+//! | [`exec`] | [`Session`]: validate inputs, walk segments, dispatch per engine, read outputs |
 //! | `kernels` | scalar NCHW kernels for the twelve CNN op ids |
 //!
 //! # What is deliberately not here
@@ -33,9 +33,14 @@
 //! - **No fusion.** [`SegmentOp`] has one variant, `Op(OpId)`. A `Fused(..)`
 //!   variant without a provider that claims it would be a contract nothing can
 //!   satisfy; phase 3 adds it together with the provider.
-//! - **No library.** Nothing in [`Plan`], [`Arena`], [`Session`] or the kernels
-//!   names a compute library. oneDNN arrives as a provider behind
-//!   [`Session`], and the plan stays the same plan.
+//! - **No library in the plan.** Nothing in [`Plan`], [`Arena`] or the scalar
+//!   kernels names a compute library. A provider (`cpu-onednn`) is selected by
+//!   the session through [`crate::inference::backend::SegmentProvider`], the
+//!   plan records the decision per segment ([`SegmentEngine`]), and a segment
+//!   the provider declines stays on the scalar kernels with its reason in
+//!   [`Plan::fallbacks`].
+//!
+//! [`SegmentEngine`]: crate::inference::backend::SegmentEngine
 //! - **No global state.** No `static` thread pool, no `lazy_static`, no import-time
 //!   pinning. A pool exists only while a session exists.
 //! - **No `HashMap`.** Every table is a `Vec` and every walk is in index order, so
@@ -89,6 +94,9 @@ pub mod plan;
 pub mod threads;
 
 pub use arena::Arena;
-pub use exec::{HostTensor, Session};
-pub use plan::{Plan, Segment, SegmentOp, Slot, SlotId, SlotSource, SLOT_ALIGNMENT};
+pub use exec::{EngineChoice, HostTensor, OneDnnReport, Session};
+pub use plan::{
+    EngineCounts, EngineFallback, Plan, Segment, SegmentOp, Slot, SlotId, SlotSource,
+    SLOT_ALIGNMENT,
+};
 pub use threads::{physical_core_count, SessionThreads, Threading};

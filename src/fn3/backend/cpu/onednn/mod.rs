@@ -1,0 +1,1490 @@
+//! The optional oneDNN CPU engine.
+//!
+//! # What this engine is
+//!
+//! A [`SegmentProvider`] that claims `f32` 2-D NCHW convolution, the pool
+//! family and 2-D matmul, and runs them on oneDNN 3.14.1 (one `dnnl_engine`,
+//! one sequential stream, and one prepared primitive per output-channel block).
+//! Everything else stays on the scalar kernels; the planner records the split
+//! in [`Plan::fallbacks`](crate::inference::runtime::Plan::fallbacks).
+//!
+//! # oneDNN is sequential here, on purpose
+//!
+//! The build is pinned to `ONEDNN_CPU_RUNTIME=SEQ` (`.cargo/config.toml` and
+//! `tools/cmake/onednn-seq.cmake`). A threaded oneDNN would spawn its own team
+//! inside every call, on top of the session's pool, and the two would
+//! oversubscribe the machine. The engine reads
+//! `dnnl_version()->cpu_runtime` and, if a foreign build reports a threaded
+//! runtime, still produces correct output but runs its blocks serially instead
+//! of nesting teams.
+//!
+//! # Threading: blocks, not oneDNN
+//!
+//! A segment is split into contiguous **output-channel blocks** at plan time,
+//! from the session's worker count:
+//!
+//! ```text
+//! plain conv:      channels 0..8 | 8..16 | 16..24 | ...        (one submemory each)
+//! grouped conv:    whole groups only; a boundary inside a group would
+//!                  need a weight submemory oneDNN cannot express
+//! depthwise conv:  one channel (one group) per block
+//! pooling:         channels 0..c | c..2c | ...
+//! matmul:          result columns 0..n | n..2n | ...
+//! ```
+//!
+//! The block count is `min(workers, units / min_units)`, where `min_units`
+//! enforces at least [`MIN_BLOCK_CHANNELS`] channels and
+//! [`MIN_BLOCK_ELEMENTS`] output elements per block; a problem below either
+//! floor stays one block. The split is deterministic because the only host
+//! input is the session's worker count, which the plan/build arguments record.
+//!
+//! Each block describes its slice with `dnnl_memory_desc_create_submemory`:
+//!
+//! - **weights**: a submemory of the ONNX payload, `[o0, 0, 0, 0]`, i.e. the
+//!   element offset `o0 * (C/group) * kh * kw`. It is read **once**, at session
+//!   open, by the prepack reorder.
+//! - **destination**: a submemory of the output slot, `[0, o0, 0, 0]`, i.e. the
+//!   element offset `o0 * H_out * W_out` per batch row.
+//! - **source**: the full input slot for a plain convolution (no halo, no
+//!   spatial split), or a channel submemory `[0, g0 * C/group, 0, 0]` for a
+//!   grouped block (groups change which input channels are read; there is still
+//!   no spatial halo).
+//!
+//! Blocks are independent: each owns its primitive, its stream and its
+//! scratchpad, and writes a disjoint destination range. The executor runs them
+//! through [`SessionThreads`](crate::inference::runtime::SessionThreads) when
+//! oneDNN is sequential.
+//!
+//! # What is prepacked, and when
+//!
+//! At **session construction**, once per segment and block:
+//!
+//! 1. the weight payload is copied into a 64-byte-aligned staging buffer (the
+//!    importer promises no alignment);
+//! 2. the primitive descriptor is created with the weight descriptor `any`, so
+//!    oneDNN chooses the layout its kernel wants;
+//! 3. the descriptor oneDNN chose is queried and **cloned**;
+//! 4. the block's weights are reordered into an engine-owned buffer of exactly
+//!    that descriptor, and the staging copy is dropped.
+//!
+//! The result is one session-owned buffer per block, reused unchanged by every
+//! forward. No forward calls a reorder, and no forward touches the ONNX weight
+//! payload. `PreparedSegment`/`Block` are a `Vec` indexed by plan position, so
+//! the "cache" is deterministic and has no hash iteration order.
+//!
+//! The bias (when present) is copied per block into an aligned buffer in the
+//! same step; it is small and constant, which the planner guarantees by
+//! claiming only segments whose weight and bias slots are read-only.
+//!
+//! # Buffers and lifetimes
+//!
+//! oneDNN borrows a host pointer only for the duration of
+//! `dnnl_primitive_execute`. A block's memories are created with
+//! `DNNL_MEMORY_NONE`; immediately before each execute the engine installs the
+//! pointers for that call:
+//!
+//! - source and destination are the executor's live arena windows
+//!   (`&[u8]`/`&mut [u8]`, disjoint by the plan);
+//! - weights and bias are the block's own prepacked buffers;
+//! - the scratchpad is the block's own buffer.
+//!
+//! Nothing caches an arena pointer between forwards, so the arena may move in
+//! address space (it does not, but nothing depends on it) and there is no
+//! long-lived `&mut` provenance for a later write to invalidate. The arena and
+//! the prepacked buffers outlive the `dnnl_primitive_execute` call by
+//! construction: the engine is a field of the session and the buffers are
+//! fields of the engine.
+//!
+//! # Scratchpads
+//!
+//! Primitives are created with `dnnl_scratchpad_mode_user`, and every block
+//! owns one scratchpad buffer. oneDNN's default library scratchpad is shared
+//! per primitive and, with `DNNL_ENABLE_CONCURRENT_EXEC=OFF`, tied to the
+//! creating thread; a block executes on whichever worker the pool assigns, so
+//! the engine supplies the scratchpad instead. Different blocks use different
+//! buffers, which is the documented condition for executing them concurrently.
+
+pub(crate) mod ffi;
+pub(crate) mod geometry;
+
+use crate::inference::backend::{Claim, OpParams, SegmentEngine, SegmentOperand, SegmentProvider};
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Error;
+use crate::inference::ops::OpId;
+use crate::inference::shape::Shape;
+use crate::inference::storage::AlignedBuffer;
+
+use self::ffi::{
+    context, Desc, EngineHandle, ExecArg, MemoryHandle, PrimitiveAttrHandle, PrimitiveDescHandle,
+    PrimitiveHandle, StreamHandle, Version, ARG_BIAS, ARG_DST, ARG_SCRATCHPAD, ARG_SRC,
+    ARG_WEIGHTS, FORMAT_TAG_A, FORMAT_TAG_ABCD, FORMAT_TAG_ABCDE, FORMAT_TAG_ANY, QUERY_WEIGHTS_MD,
+};
+use self::geometry::{Conv, MatMul, Pool};
+
+/// Provider name in errors.
+const BACKEND: &str = "oneDNN";
+
+/// The planner-facing capability: it owns no oneDNN object.
+///
+/// A plan is built before a session (and therefore before an engine) exists, so
+/// the claim must be a pure function of the segment. [`OneDnnEngine`] is built
+/// afterwards and prepares exactly the segments this claimed.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct OneDnnCapability;
+
+impl SegmentProvider for OneDnnCapability {
+    fn engine(&self) -> SegmentEngine {
+        SegmentEngine::OneDnn
+    }
+
+    fn claim(
+        &self,
+        op: OpId,
+        inputs: &[SegmentOperand],
+        outputs: &[SegmentOperand],
+        params: &OpParams,
+    ) -> Claim {
+        if !is_claimed_op(op) {
+            return Claim::NotMine;
+        }
+        match claimed_geometry(op, inputs, outputs, params) {
+            Ok(()) => Claim::Accepted,
+            Err(error) => Claim::Declined(error.to_string()),
+        }
+    }
+}
+
+fn unsupported(op: OpId, reason: impl Into<String>) -> Fn3Error {
+    Fn3Error::UnsupportedOp {
+        op,
+        backend: BACKEND,
+        reason: reason.into(),
+    }
+}
+
+fn shape_of(operand: &SegmentOperand) -> &Shape {
+    &operand.shape
+}
+
+fn require_f32(op: OpId, operands: &[&SegmentOperand]) -> Result<(), Fn3Error> {
+    for (index, operand) in operands.iter().enumerate() {
+        if operand.dtype != DType::F32 {
+            return Err(Fn3Error::UnsupportedDType {
+                op: Some(op),
+                dtype: operand.dtype,
+                context: if index == 0 {
+                    "the oneDNN CPU engine computes f32 only"
+                } else {
+                    "the oneDNN CPU engine computes f32 only on this operand"
+                },
+            });
+        }
+    }
+    Ok(())
+}
+
+/// `true` for the ops this engine implements at all.
+fn is_claimed_op(op: OpId) -> bool {
+    matches!(
+        op,
+        OpId::Conv | OpId::MaxPool | OpId::AveragePool | OpId::GlobalAveragePool | OpId::MatMul
+    )
+}
+
+/// The claim: pure `(op, operands, params) -> yes/reason`.
+fn claimed_geometry(
+    op: OpId,
+    inputs: &[SegmentOperand],
+    outputs: &[SegmentOperand],
+    params: &OpParams,
+) -> Result<(), Fn3Error> {
+    match op {
+        OpId::Conv => {
+            if outputs.len() != 1 || !(2..=3).contains(&inputs.len()) {
+                return Err(unsupported(
+                    op,
+                    format!(
+                        "expected 2 or 3 inputs and one output, found {} and {}",
+                        inputs.len(),
+                        outputs.len()
+                    ),
+                ));
+            }
+            require_f32(op, &[&inputs[0], &inputs[1], &outputs[0]])?;
+            // The weight and bias must be read-only payloads: they are
+            // prepacked at session open, so a value computed by an earlier
+            // segment would not exist yet.
+            if !inputs[1].constant {
+                return Err(unsupported(
+                    op,
+                    "the weight is produced at run time; the oneDNN engine prepacks constant \
+                     weights at session open",
+                ));
+            }
+            let conv = Conv::new(
+                shape_of(&inputs[0]),
+                shape_of(&inputs[1]),
+                shape_of(&outputs[0]),
+                params,
+            )?;
+            if let Some(bias) = inputs.get(2) {
+                require_f32(op, &[bias])?;
+                if !bias.constant {
+                    return Err(unsupported(
+                        op,
+                        "the bias is produced at run time; the oneDNN engine prepacks constant \
+                         biases at session open",
+                    ));
+                }
+                let dims = bias.shape.dims();
+                if dims.len() != 1 || dims[0] != conv.out_channels as u64 {
+                    return Err(unsupported(
+                        op,
+                        format!(
+                            "the bias is {:?}, but a 1-D [{}] bias is required",
+                            dims, conv.out_channels
+                        ),
+                    ));
+                }
+            }
+            Ok(())
+        }
+        OpId::MaxPool | OpId::AveragePool | OpId::GlobalAveragePool => {
+            if inputs.len() != 1 || outputs.len() != 1 {
+                return Err(unsupported(
+                    op,
+                    format!(
+                        "expected 1 input and one output, found {} and {}",
+                        inputs.len(),
+                        outputs.len()
+                    ),
+                ));
+            }
+            require_f32(op, &[&inputs[0], &outputs[0]])?;
+            Pool::new(op, shape_of(&inputs[0]), shape_of(&outputs[0]), params).map(|_| ())
+        }
+        OpId::MatMul => {
+            if inputs.len() != 2 || outputs.len() != 1 {
+                return Err(unsupported(
+                    op,
+                    format!(
+                        "expected 2 inputs and one output, found {} and {}",
+                        inputs.len(),
+                        outputs.len()
+                    ),
+                ));
+            }
+            require_f32(op, &[&inputs[0], &inputs[1], &outputs[0]])?;
+            if !inputs[1].constant {
+                return Err(unsupported(
+                    op,
+                    "the right operand is produced at run time; the oneDNN engine prepacks \
+                     constant weights at session open",
+                ));
+            }
+            MatMul::new(
+                shape_of(&inputs[0]),
+                shape_of(&inputs[1]),
+                shape_of(&outputs[0]),
+            )
+            .map(|_| ())
+        }
+        other => Err(unsupported(
+            other,
+            "the oneDNN engine implements Conv, MaxPool, AveragePool, GlobalAveragePool and \
+             2-D MatMul",
+        )),
+    }
+}
+
+/// One segment, described by the executor for preparation.
+///
+/// Shapes and payloads rather than `Plan` slots: this module sits under
+/// `backend` and must not import the runtime.
+pub(crate) struct SegmentSpec<'a> {
+    /// The op to prepare.
+    pub op: OpId,
+    /// Input extents, in operand order.
+    pub inputs: Vec<Shape>,
+    /// Input element types, in operand order.
+    pub input_dtypes: Vec<DType>,
+    /// Whether each input is read-only model data, in operand order.
+    pub input_constants: Vec<bool>,
+    /// Output extents, in operand order.
+    pub outputs: Vec<Shape>,
+    /// Output element types, in operand order.
+    pub output_dtypes: Vec<DType>,
+    /// The op's attributes.
+    pub params: &'a OpParams,
+    /// Weight payload for a constant `inputs[1]`, in the ONNX layout.
+    pub weights: Option<&'a [u8]>,
+    /// Bias payload for a constant `inputs[2]`, in the ONNX layout.
+    pub bias: Option<&'a [u8]>,
+    /// The session's worker count, which fixes the block split.
+    pub workers: usize,
+}
+
+impl SegmentSpec<'_> {
+    fn operands(&self) -> Vec<SegmentOperand> {
+        self.inputs
+            .iter()
+            .cloned()
+            .zip(self.input_dtypes.iter().copied())
+            .zip(self.input_constants.iter().copied())
+            .map(|((shape, dtype), constant)| SegmentOperand {
+                shape,
+                dtype,
+                constant,
+            })
+            .collect()
+    }
+
+    fn results(&self) -> Vec<SegmentOperand> {
+        self.outputs
+            .iter()
+            .cloned()
+            .zip(self.output_dtypes.iter().copied())
+            .map(|(shape, dtype)| SegmentOperand {
+                shape,
+                dtype,
+                constant: false,
+            })
+            .collect()
+    }
+}
+
+/// One prepared block: a primitive, the streams/buffers it needs, and the
+/// argument list rebuilt from live pointers on every call.
+#[derive(Debug)]
+struct Block {
+    /// The compiled kernel.
+    primitive: PrimitiveHandle,
+    /// This block's own stream; a block runs on one pool worker at a time.
+    stream: StreamHandle,
+    /// One memory object per argument, created without a buffer.
+    memories: Vec<MemoryHandle>,
+    /// The `(argument, memory)` list handed to `dnnl_primitive_execute`.
+    args: Vec<ExecArg>,
+    /// Where each argument's pointer comes from at run time.
+    sources: Vec<ArgSource>,
+    /// The block's prepacked weights, when the op has weights.
+    weights: Option<AlignedBuffer>,
+    /// The block's bias slice, when the op has a constant bias.
+    bias: Option<AlignedBuffer>,
+    /// The user-managed scratchpad, when the primitive needs one.
+    scratchpad: Option<AlignedBuffer>,
+}
+
+/// Where a block argument's data handle comes from at execute time.
+#[derive(Debug, Clone, Copy)]
+enum ArgSource {
+    /// The executor's input window at this operand index.
+    Input(usize),
+    /// The executor's output window at this operand index.
+    Output(usize),
+    /// The block's prepacked weights.
+    Weights,
+    /// The block's bias slice.
+    Bias,
+    /// The block's scratchpad.
+    Scratchpad,
+}
+
+impl Block {
+    fn run(&self, inputs: &[usize], outputs: &[usize]) -> Result<(), Fn3Error> {
+        for (memory, source) in self.memories.iter().zip(self.sources.iter()) {
+            let address = match *source {
+                ArgSource::Input(index) => *inputs
+                    .get(index)
+                    .ok_or_else(|| segment_error(format!("missing input window {index}")))?,
+                ArgSource::Output(index) => *outputs
+                    .get(index)
+                    .ok_or_else(|| segment_error(format!("missing output window {index}")))?,
+                ArgSource::Weights => buffer_address(self.weights.as_ref())?,
+                ArgSource::Bias => buffer_address(self.bias.as_ref())?,
+                ArgSource::Scratchpad => buffer_address(self.scratchpad.as_ref())?,
+            };
+            if address == 0 {
+                return Err(segment_error(
+                    "an argument has a null data handle".to_string(),
+                ));
+            }
+            // SAFETY: the address is either a live arena window the executor
+            // holds for this call (`Input`/`Output`) or the start of a buffer
+            // owned by this block (`Weights`/`Bias`/`Scratchpad`). Both outlive
+            // the `dnnl_primitive_execute` call below; the descriptor they are
+            // installed on requires at most `desc.size()` bytes, which the
+            // prepared shape provides. oneDNN borrows the pointer only for the
+            // duration of the execute call.
+            unsafe { memory.set_data_handle(address as *mut u8) }?;
+            debug_assert!(
+                memory
+                    .data_handle()
+                    .is_ok_and(|handle| handle as usize == address),
+                "oneDNN did not keep the data handle this call installed"
+            );
+        }
+        self.primitive.execute(&self.stream, &self.args)?;
+        // The sequential CPU stream completes inside `execute`; the wait is a
+        // no-op today and the fence that keeps a future threaded runtime
+        // correct.
+        self.stream.wait()
+    }
+}
+
+fn buffer_address(buffer: Option<&AlignedBuffer>) -> Result<usize, Fn3Error> {
+    buffer
+        .map(|buffer| buffer.as_ptr() as usize)
+        .ok_or_else(|| Fn3Error::ProviderFailure {
+            provider: BACKEND,
+            call: "dnnl_memory_set_data_handle",
+            status: ffi::STATUS_SUCCESS,
+            detail: "a prepared block is missing a buffer it needs".to_string(),
+        })
+}
+
+fn segment_error(detail: String) -> Fn3Error {
+    Fn3Error::ProviderFailure {
+        provider: BACKEND,
+        call: "dnnl_primitive_execute",
+        status: ffi::STATUS_SUCCESS,
+        detail,
+    }
+}
+
+/// A segment's prepared blocks.
+#[derive(Debug)]
+pub(crate) struct PreparedSegment {
+    /// `"conv"`, `"pool"` or `"matmul"`, for diagnostics.
+    kind: &'static str,
+    blocks: Vec<Block>,
+}
+
+impl PreparedSegment {
+    /// The number of blocks the planner split this segment into.
+    pub(crate) fn block_count(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// Execute one block.
+    ///
+    /// `inputs` and `outputs` are the addresses of the segment's arena windows
+    /// (zero for a weight operand, which the block does not read from the
+    /// window). Each block reads only inputs[0] and writes only outputs[0] for
+    /// the three claimed op families; `ArgSource` decides which.
+    pub(crate) fn run_block(
+        &self,
+        index: usize,
+        inputs: &[usize],
+        outputs: &[usize],
+    ) -> Result<(), Fn3Error> {
+        let block = self.blocks.get(index).ok_or(Fn3Error::OutOfBounds {
+            what: "oneDNN block index",
+            index: index as u64,
+            len: self.blocks.len() as u64,
+        })?;
+        block.run(inputs, outputs)
+    }
+}
+
+/// The session-owned oneDNN engine.
+#[derive(Debug)]
+pub(crate) struct OneDnnEngine {
+    /// The one CPU engine every primitive is created on.
+    engine: EngineHandle,
+    /// The stream used for prepack reorders at session open.
+    prep_stream: StreamHandle,
+    /// The library version actually linked.
+    version: Version,
+    /// `prepared[i]` is the prepared segment for plan segment `i`.
+    prepared: Vec<Option<PreparedSegment>>,
+    /// Bytes of engine-owned prepacked weights and biases.
+    prepacked_bytes: usize,
+    /// Prepared segments per kind, for the session report.
+    conv_segments: usize,
+    pool_segments: usize,
+    matmul_segments: usize,
+    /// Weight blocks whose layout oneDNN did not choose as plain on the ONNX
+    /// payload, i.e. blocks that needed a real reorder (not just a copy).
+    reordered_blocks: usize,
+}
+
+// SAFETY: `OneDnnEngine` is `Send` because a session may be moved between
+// threads (one forward at a time; `Session` is deliberately `!Sync`). Its
+// fields are oneDNN handles in the sequential runtime, which have no thread
+// affinity, plus `Vec`/`AlignedBuffer` data. `PreparedSegment` is additionally
+// `Sync` because the executor shares `&PreparedSegment` across its pool while
+// executing disjoint blocks; see `Block`'s impls.
+unsafe impl Send for OneDnnEngine {}
+
+// SAFETY: a `Block` is shared by reference across Rayon tasks. Each block owns
+// its primitive, stream, memories and scratchpad, all of which are distinct from
+// every other block's; `run` only writes through `&self` to oneDNN objects that
+// are not shared, and to arena windows the plan proved disjoint. The raw
+// pointers inside the wrapper types are never mutated by `&self` Rust code.
+unsafe impl Sync for Block {}
+unsafe impl Send for Block {}
+
+impl OneDnnEngine {
+    /// Create the engine, its prep stream and its (empty) prepared table.
+    pub(crate) fn new(segments: usize) -> Result<OneDnnEngine, Fn3Error> {
+        let version = ffi::runtime_version()?;
+        if version.major != 3 {
+            return Err(Fn3Error::ProviderFailure {
+                provider: BACKEND,
+                call: "dnnl_version",
+                status: ffi::STATUS_SUCCESS,
+                detail: format!(
+                    "the linked oneDNN is {}, but this engine's hand-written ABI is for 3.x",
+                    version.number()
+                ),
+            });
+        }
+        let engine = EngineHandle::cpu()?;
+        let prep_stream = StreamHandle::new(&engine)?;
+        Ok(OneDnnEngine {
+            engine,
+            prep_stream,
+            version,
+            prepared: (0..segments).map(|_| None).collect(),
+            prepacked_bytes: 0,
+            conv_segments: 0,
+            pool_segments: 0,
+            matmul_segments: 0,
+            reordered_blocks: 0,
+        })
+    }
+
+    /// The linked oneDNN version.
+    pub(crate) fn version(&self) -> &Version {
+        &self.version
+    }
+
+    /// Bytes of prepacked weights and biases this session owns.
+    pub(crate) fn prepacked_bytes(&self) -> usize {
+        self.prepacked_bytes
+    }
+
+    /// Prepared segments by kind: `(conv, pool, matmul)`.
+    pub(crate) fn segment_kinds(&self) -> (usize, usize, usize) {
+        (self.conv_segments, self.pool_segments, self.matmul_segments)
+    }
+
+    /// Weight blocks that needed a reorder rather than a plain copy.
+    pub(crate) fn reordered_blocks(&self) -> usize {
+        self.reordered_blocks
+    }
+
+    /// `true` when blocks may run concurrently.
+    ///
+    /// Only a sequential oneDNN makes "the session's pool is the only
+    /// parallelism" true. A build that reports OMP/TBB/threadpool executes its
+    /// blocks serially and lets the library use its own threads; the results
+    /// are identical, the structure is not.
+    pub(crate) fn blocks_run_in_parallel(&self) -> bool {
+        self.version.is_sequential()
+    }
+
+    /// Prepare one segment and store it at `index`.
+    ///
+    /// The segment must have been claimed for [`SegmentEngine::OneDnn`] by
+    /// [`OneDnnCapability`]; preparation re-runs the same geometry checks, so a
+    /// claim/prepare disagreement is a loud error rather than a mis-run.
+    pub(crate) fn prepare_segment(
+        &mut self,
+        index: usize,
+        spec: &SegmentSpec<'_>,
+    ) -> Result<(), Fn3Error> {
+        let inputs = spec.operands();
+        let outputs = spec.results();
+        match OneDnnCapability.claim(spec.op, &inputs, &outputs, spec.params) {
+            Claim::Accepted => {}
+            Claim::NotMine => {
+                return Err(unsupported(
+                    spec.op,
+                    "preparation was asked for an op the engine does not implement",
+                ))
+            }
+            Claim::Declined(reason) => {
+                return Err(Fn3Error::ProviderFailure {
+                    provider: BACKEND,
+                    call: "prepare_segment",
+                    status: ffi::STATUS_SUCCESS,
+                    detail: format!(
+                        "segment {index} was planned for oneDNN, but preparation declined it: \
+                         {reason}"
+                    ),
+                })
+            }
+        }
+        let prepared = match spec.op {
+            OpId::Conv => self.prepare_conv(spec)?,
+            OpId::MaxPool | OpId::AveragePool | OpId::GlobalAveragePool => {
+                self.prepare_pool(spec)?
+            }
+            OpId::MatMul => self.prepare_matmul(spec)?,
+            other => {
+                return Err(unsupported(
+                    other,
+                    "the oneDNN engine implements Conv, the pool family and 2-D MatMul",
+                ))
+            }
+        };
+        self.prepacked_bytes += prepared
+            .blocks
+            .iter()
+            .map(|block| {
+                block.weights.as_ref().map_or(0, AlignedBuffer::len)
+                    + block.bias.as_ref().map_or(0, AlignedBuffer::len)
+            })
+            .sum::<usize>();
+        match prepared.kind {
+            "conv" => self.conv_segments += 1,
+            "pool" => self.pool_segments += 1,
+            _ => self.matmul_segments += 1,
+        }
+        let len = self.prepared.len();
+        let slot = self.prepared.get_mut(index).ok_or(Fn3Error::OutOfBounds {
+            what: "oneDNN prepared segment index",
+            index: index as u64,
+            len: len as u64,
+        })?;
+        *slot = Some(prepared);
+        Ok(())
+    }
+
+    /// The prepared segment at a plan position, if one was built.
+    pub(crate) fn prepared(&self, index: usize) -> Option<&PreparedSegment> {
+        self.prepared.get(index).and_then(Option::as_ref)
+    }
+
+    fn prepare_conv(&mut self, spec: &SegmentSpec<'_>) -> Result<PreparedSegment, Fn3Error> {
+        let conv = Conv::new(
+            &spec.inputs[0],
+            &spec.inputs[1],
+            &spec.outputs[0],
+            spec.params,
+        )?;
+        let weights = spec.weights.ok_or_else(|| {
+            unsupported(OpId::Conv, "preparation needs the constant weight payload")
+        })?;
+        let weight_parent_dims: Vec<i64> = if conv.group == 1 {
+            vec![
+                conv.out_channels as i64,
+                conv.in_channels as i64,
+                conv.kernel[0] as i64,
+                conv.kernel[1] as i64,
+            ]
+        } else {
+            vec![
+                conv.group as i64,
+                (conv.out_channels / conv.group) as i64,
+                conv.in_per_group as i64,
+                conv.kernel[0] as i64,
+                conv.kernel[1] as i64,
+            ]
+        };
+        let weight_tag = if conv.group == 1 {
+            FORMAT_TAG_ABCD
+        } else {
+            FORMAT_TAG_ABCDE
+        };
+        let weight_parent = Desc::with_tag(&weight_parent_dims, weight_tag)?;
+        // One aligned copy of the whole payload, so every submemory read (and
+        // every reorder) sees a 64-byte-aligned base. Dropped after the blocks
+        // exist; the prepacked buffers are what a forward uses.
+        let expected_weight_bytes = conv.out_channels
+            * conv.in_per_group
+            * conv.kernel[0]
+            * conv.kernel[1]
+            * std::mem::size_of::<f32>();
+        if weights.len() != expected_weight_bytes {
+            return Err(Fn3Error::ProviderFailure {
+                provider: BACKEND,
+                call: "prepare Conv",
+                status: ffi::STATUS_SUCCESS,
+                detail: format!(
+                    "weight payload is {} bytes, expected {expected_weight_bytes} for {}x{}x{}x{}",
+                    weights.len(),
+                    conv.out_channels,
+                    conv.in_per_group,
+                    conv.kernel[0],
+                    conv.kernel[1]
+                ),
+            });
+        }
+        let staged_weights = AlignedBuffer::from_bytes(weights)?;
+
+        let src_parent_dims = vec![
+            conv.batch as i64,
+            conv.in_channels as i64,
+            conv.in_hw[0] as i64,
+            conv.in_hw[1] as i64,
+        ];
+        let src_parent = Desc::with_tag(&src_parent_dims, FORMAT_TAG_ABCD)?;
+        let dst_parent_dims = vec![
+            conv.batch as i64,
+            conv.out_channels as i64,
+            conv.out_hw[0] as i64,
+            conv.out_hw[1] as i64,
+        ];
+        let dst_parent = Desc::with_tag(&dst_parent_dims, FORMAT_TAG_ABCD)?;
+
+        let bias_values = spec
+            .bias
+            .map(|bytes| {
+                if bytes.len() != conv.out_channels * std::mem::size_of::<f32>() {
+                    Err(Fn3Error::ProviderFailure {
+                        provider: BACKEND,
+                        call: "prepare Conv",
+                        status: ffi::STATUS_SUCCESS,
+                        detail: format!(
+                            "bias payload is {} bytes, expected {} for {} channels",
+                            bytes.len(),
+                            conv.out_channels * 4,
+                            conv.out_channels
+                        ),
+                    })
+                } else {
+                    Ok(bytes)
+                }
+            })
+            .transpose()?;
+
+        let blocks = conv.blocks(spec.workers);
+        let single_block = blocks.len() == 1;
+        let mut prepared = Vec::with_capacity(blocks.len());
+        for block in blocks {
+            let block_dims: Vec<i64> = if conv.group == 1 {
+                vec![
+                    block.out_channels as i64,
+                    conv.in_channels as i64,
+                    conv.kernel[0] as i64,
+                    conv.kernel[1] as i64,
+                ]
+            } else {
+                vec![
+                    block.groups as i64,
+                    (conv.out_channels / conv.group) as i64,
+                    conv.in_per_group as i64,
+                    conv.kernel[0] as i64,
+                    conv.kernel[1] as i64,
+                ]
+            };
+            let block_offsets: Vec<i64> = if conv.group == 1 {
+                vec![block.out_start as i64, 0, 0, 0]
+            } else {
+                vec![block.group_start as i64, 0, 0, 0, 0]
+            };
+            // The submemory oneDNN reads the block's ONNX weights through.
+            // Its element offset is `o0 * (C/group) * kh * kw` (plain) or
+            // `g0 * (O/group) * (C/group) * kh * kw` (grouped); both are the
+            // contiguous range the parent payload stores for the block.
+            let weight_source = Desc::submemory(&weight_parent, &block_dims, &block_offsets)?;
+            // What oneDNN may choose for the weights.
+            let weight_any = Desc::with_tag(&block_dims, FORMAT_TAG_ANY)?;
+
+            let src = if single_block {
+                Desc::with_tag(&src_parent_dims, FORMAT_TAG_ABCD)?
+            } else if conv.group == 1 {
+                // The full input: no spatial split, no halo.
+                Desc::with_tag(&src_parent_dims, FORMAT_TAG_ABCD)?
+            } else {
+                let dims = vec![
+                    conv.batch as i64,
+                    block.in_channels as i64,
+                    conv.in_hw[0] as i64,
+                    conv.in_hw[1] as i64,
+                ];
+                let offsets = vec![0, block.in_start as i64, 0, 0];
+                Desc::submemory(&src_parent, &dims, &offsets)?
+            };
+            let dst = if single_block {
+                Desc::with_tag(&dst_parent_dims, FORMAT_TAG_ABCD)?
+            } else {
+                let dims = vec![
+                    conv.batch as i64,
+                    block.out_channels as i64,
+                    conv.out_hw[0] as i64,
+                    conv.out_hw[1] as i64,
+                ];
+                let offsets = vec![0, block.out_start as i64, 0, 0];
+                Desc::submemory(&dst_parent, &dims, &offsets)?
+            };
+
+            let bias_desc = bias_values
+                .map(|_| Desc::with_tag(&[block.out_channels as i64], FORMAT_TAG_A))
+                .transpose()?;
+            let bias_buffer = bias_values
+                .map(|bytes| {
+                    let start = block.out_start * 4;
+                    AlignedBuffer::from_bytes(&bytes[start..start + block.out_channels * 4])
+                })
+                .transpose()?;
+
+            let attr = PrimitiveAttrHandle::user_scratchpad()?;
+            let strides: Vec<i64> = conv.strides.iter().map(|&value| value as i64).collect();
+            // oneDNN's `dilates` array is "dilation minus one" (0 means no
+            // dilation), unlike ONNX's dilation of 1.
+            let dilates: Vec<i64> = conv
+                .dilations
+                .iter()
+                .map(|&value| value as i64 - 1)
+                .collect();
+            let padding_l = vec![conv.pads[0].0, conv.pads[1].0];
+            let padding_r = vec![conv.pads[0].1, conv.pads[1].1];
+            let pd = PrimitiveDescHandle::convolution(
+                &self.engine,
+                ffi::ALG_CONVOLUTION_DIRECT,
+                &src,
+                &weight_any,
+                bias_desc.as_ref(),
+                &dst,
+                &strides,
+                &dilates,
+                &padding_l,
+                &padding_r,
+                &attr,
+            )
+            .map_err(|error| {
+                context(error, || {
+                    format!(
+                        "conv segment: {}x{}, {} of {} output channels, groups {}",
+                        conv.in_hw[0],
+                        conv.in_hw[1],
+                        block.out_channels,
+                        conv.out_channels,
+                        conv.group
+                    )
+                })
+            })?;
+            let expected_weights = pd.query_md(QUERY_WEIGHTS_MD, 0)?;
+            let weight_plain = Desc::with_tag(&block_dims, weight_tag)?;
+            let (prepacked, reformatted) = self.repack(
+                &staged_weights,
+                &weight_source,
+                &expected_weights,
+                &weight_plain,
+            )?;
+            if reformatted {
+                self.reordered_blocks += 1;
+            }
+            let scratchpad = prepare_scratchpad(&pd)?;
+            let primitive = PrimitiveHandle::new(&pd)?;
+
+            let mut memories = Vec::with_capacity(5);
+            let mut args = Vec::with_capacity(5);
+            let mut sources = Vec::with_capacity(5);
+            push_arg(
+                &mut memories,
+                &mut args,
+                &mut sources,
+                &src,
+                &self.engine,
+                ARG_SRC,
+                ArgSource::Input(0),
+            )?;
+            push_arg(
+                &mut memories,
+                &mut args,
+                &mut sources,
+                &expected_weights,
+                &self.engine,
+                ARG_WEIGHTS,
+                ArgSource::Weights,
+            )?;
+            if let Some(desc) = &bias_desc {
+                push_arg(
+                    &mut memories,
+                    &mut args,
+                    &mut sources,
+                    desc,
+                    &self.engine,
+                    ARG_BIAS,
+                    ArgSource::Bias,
+                )?;
+            }
+            push_arg(
+                &mut memories,
+                &mut args,
+                &mut sources,
+                &dst,
+                &self.engine,
+                ARG_DST,
+                ArgSource::Output(0),
+            )?;
+            if let Some(desc) = scratchpad.as_ref().map(|(desc, _)| desc) {
+                push_arg(
+                    &mut memories,
+                    &mut args,
+                    &mut sources,
+                    desc,
+                    &self.engine,
+                    ARG_SCRATCHPAD,
+                    ArgSource::Scratchpad,
+                )?;
+            }
+            prepared.push(Block {
+                primitive,
+                stream: StreamHandle::new(&self.engine)?,
+                memories,
+                args,
+                sources,
+                weights: Some(prepacked),
+                bias: bias_buffer,
+                scratchpad: scratchpad.map(|(_, buffer)| buffer),
+            });
+        }
+        Ok(PreparedSegment {
+            kind: "conv",
+            blocks: prepared,
+        })
+    }
+
+    fn prepare_pool(&mut self, spec: &SegmentSpec<'_>) -> Result<PreparedSegment, Fn3Error> {
+        let pool = Pool::new(spec.op, &spec.inputs[0], &spec.outputs[0], spec.params)?;
+        let src_parent_dims = vec![
+            pool.batch as i64,
+            pool.channels as i64,
+            pool.in_hw[0] as i64,
+            pool.in_hw[1] as i64,
+        ];
+        let src_parent = Desc::with_tag(&src_parent_dims, FORMAT_TAG_ABCD)?;
+        let dst_parent_dims = vec![
+            pool.batch as i64,
+            pool.channels as i64,
+            pool.out_hw[0] as i64,
+            pool.out_hw[1] as i64,
+        ];
+        let dst_parent = Desc::with_tag(&dst_parent_dims, FORMAT_TAG_ABCD)?;
+        let alg = match spec.op {
+            OpId::MaxPool => ffi::ALG_POOLING_MAX,
+            OpId::GlobalAveragePool => ffi::ALG_POOLING_AVG_EXCLUDE_PADDING,
+            OpId::AveragePool if pool.count_include_pad => ffi::ALG_POOLING_AVG_INCLUDE_PADDING,
+            OpId::AveragePool => ffi::ALG_POOLING_AVG_EXCLUDE_PADDING,
+            other => {
+                return Err(unsupported(other, "not a pooling op"));
+            }
+        };
+        let blocks = pool.blocks(spec.workers);
+        let single_block = blocks.len() == 1;
+        let kernel: Vec<i64> = pool.kernel.iter().map(|&value| value as i64).collect();
+        let strides: Vec<i64> = pool.strides.iter().map(|&value| value as i64).collect();
+        // oneDNN's `dilation` array is "dilation minus one"; the engine claims
+        // undilated pooling only, so every entry is zero.
+        let dilates = vec![0i64, 0i64];
+        let padding_l = vec![pool.pads[0].0, pool.pads[1].0];
+        let padding_r = vec![pool.pads[0].1, pool.pads[1].1];
+        let mut prepared = Vec::with_capacity(blocks.len());
+        for (channel_start, channels) in blocks {
+            let src = if single_block {
+                Desc::with_tag(&src_parent_dims, FORMAT_TAG_ABCD)?
+            } else {
+                let dims = vec![
+                    pool.batch as i64,
+                    channels as i64,
+                    pool.in_hw[0] as i64,
+                    pool.in_hw[1] as i64,
+                ];
+                let offsets = vec![0, channel_start as i64, 0, 0];
+                Desc::submemory(&src_parent, &dims, &offsets)?
+            };
+            let dst = if single_block {
+                Desc::with_tag(&dst_parent_dims, FORMAT_TAG_ABCD)?
+            } else {
+                let dims = vec![
+                    pool.batch as i64,
+                    channels as i64,
+                    pool.out_hw[0] as i64,
+                    pool.out_hw[1] as i64,
+                ];
+                let offsets = vec![0, channel_start as i64, 0, 0];
+                Desc::submemory(&dst_parent, &dims, &offsets)?
+            };
+            let attr = PrimitiveAttrHandle::user_scratchpad()?;
+            let pd = PrimitiveDescHandle::pooling(
+                &self.engine,
+                alg,
+                &src,
+                &dst,
+                &strides,
+                &kernel,
+                &dilates,
+                &padding_l,
+                &padding_r,
+                &attr,
+            )
+            .map_err(|error| {
+                context(error, || {
+                    format!(
+                        "pool segment: {} channels from {channel_start}, {}x{} window",
+                        channels, pool.kernel[0], pool.kernel[1]
+                    )
+                })
+            })?;
+            let scratchpad = prepare_scratchpad(&pd)?;
+            let primitive = PrimitiveHandle::new(&pd)?;
+            let mut memories = Vec::with_capacity(3);
+            let mut args = Vec::with_capacity(3);
+            let mut sources = Vec::with_capacity(3);
+            push_arg(
+                &mut memories,
+                &mut args,
+                &mut sources,
+                &src,
+                &self.engine,
+                ARG_SRC,
+                ArgSource::Input(0),
+            )?;
+            push_arg(
+                &mut memories,
+                &mut args,
+                &mut sources,
+                &dst,
+                &self.engine,
+                ARG_DST,
+                ArgSource::Output(0),
+            )?;
+            if let Some(desc) = scratchpad.as_ref().map(|(desc, _)| desc) {
+                push_arg(
+                    &mut memories,
+                    &mut args,
+                    &mut sources,
+                    desc,
+                    &self.engine,
+                    ARG_SCRATCHPAD,
+                    ArgSource::Scratchpad,
+                )?;
+            }
+            prepared.push(Block {
+                primitive,
+                stream: StreamHandle::new(&self.engine)?,
+                memories,
+                args,
+                sources,
+                weights: None,
+                bias: None,
+                scratchpad: scratchpad.map(|(_, buffer)| buffer),
+            });
+        }
+        Ok(PreparedSegment {
+            kind: "pool",
+            blocks: prepared,
+        })
+    }
+
+    fn prepare_matmul(&mut self, spec: &SegmentSpec<'_>) -> Result<PreparedSegment, Fn3Error> {
+        let matmul = MatMul::new(&spec.inputs[0], &spec.inputs[1], &spec.outputs[0])?;
+        let weights = spec.weights.ok_or_else(|| {
+            unsupported(OpId::MatMul, "preparation needs the constant right operand")
+        })?;
+        let weight_parent_dims = vec![matmul.k as i64, matmul.n as i64];
+        let weight_parent = Desc::with_tag(&weight_parent_dims, ffi::FORMAT_TAG_AB)?;
+        let expected_weight_bytes = matmul.k * matmul.n * std::mem::size_of::<f32>();
+        if weights.len() != expected_weight_bytes {
+            return Err(Fn3Error::ProviderFailure {
+                provider: BACKEND,
+                call: "prepare MatMul",
+                status: ffi::STATUS_SUCCESS,
+                detail: format!(
+                    "right operand is {} bytes, expected {expected_weight_bytes} for {}x{}",
+                    weights.len(),
+                    matmul.k,
+                    matmul.n
+                ),
+            });
+        }
+        let staged_weights = AlignedBuffer::from_bytes(weights)?;
+        let src_dims = vec![matmul.m as i64, matmul.k as i64];
+        let src = Desc::with_tag(&src_dims, ffi::FORMAT_TAG_AB)?;
+        let dst_parent_dims = vec![matmul.m as i64, matmul.n as i64];
+        let dst_parent = Desc::with_tag(&dst_parent_dims, ffi::FORMAT_TAG_AB)?;
+        let blocks = matmul.blocks(spec.workers);
+        let single_block = blocks.len() == 1;
+        let mut prepared = Vec::with_capacity(blocks.len());
+        for (column_start, columns) in blocks {
+            let weight_dims = vec![matmul.k as i64, columns as i64];
+            let weight_offsets = vec![0i64, column_start as i64];
+            let weight_source = Desc::submemory(&weight_parent, &weight_dims, &weight_offsets)?;
+            let weight_any = Desc::with_tag(&weight_dims, ffi::FORMAT_TAG_AB)?;
+            let dst = if single_block {
+                Desc::with_tag(&dst_parent_dims, ffi::FORMAT_TAG_AB)?
+            } else {
+                let dims = vec![matmul.m as i64, columns as i64];
+                let offsets = vec![0i64, column_start as i64];
+                Desc::submemory(&dst_parent, &dims, &offsets)?
+            };
+            let attr = PrimitiveAttrHandle::user_scratchpad()?;
+            let pd =
+                PrimitiveDescHandle::matmul(&self.engine, &src, &weight_any, None, &dst, &attr)
+                    .map_err(|error| {
+                        context(error, || {
+                            format!(
+                                "matmul segment: {}x{} times {}x{}, columns {}..{}",
+                                matmul.m,
+                                matmul.k,
+                                matmul.k,
+                                matmul.n,
+                                column_start,
+                                column_start + columns
+                            )
+                        })
+                    })?;
+            let expected_weights = pd.query_md(QUERY_WEIGHTS_MD, 0)?;
+            let weight_plain = Desc::with_tag(&weight_dims, ffi::FORMAT_TAG_AB)?;
+            let (prepacked, reformatted) = self.repack(
+                &staged_weights,
+                &weight_source,
+                &expected_weights,
+                &weight_plain,
+            )?;
+            if reformatted {
+                self.reordered_blocks += 1;
+            }
+            let scratchpad = prepare_scratchpad(&pd)?;
+            let primitive = PrimitiveHandle::new(&pd)?;
+            let mut memories = Vec::with_capacity(4);
+            let mut args = Vec::with_capacity(4);
+            let mut sources = Vec::with_capacity(4);
+            push_arg(
+                &mut memories,
+                &mut args,
+                &mut sources,
+                &src,
+                &self.engine,
+                ARG_SRC,
+                ArgSource::Input(0),
+            )?;
+            push_arg(
+                &mut memories,
+                &mut args,
+                &mut sources,
+                &expected_weights,
+                &self.engine,
+                ARG_WEIGHTS,
+                ArgSource::Weights,
+            )?;
+            push_arg(
+                &mut memories,
+                &mut args,
+                &mut sources,
+                &dst,
+                &self.engine,
+                ARG_DST,
+                ArgSource::Output(0),
+            )?;
+            if let Some(desc) = scratchpad.as_ref().map(|(desc, _)| desc) {
+                push_arg(
+                    &mut memories,
+                    &mut args,
+                    &mut sources,
+                    desc,
+                    &self.engine,
+                    ARG_SCRATCHPAD,
+                    ArgSource::Scratchpad,
+                )?;
+            }
+            prepared.push(Block {
+                primitive,
+                stream: StreamHandle::new(&self.engine)?,
+                memories,
+                args,
+                sources,
+                weights: Some(prepacked),
+                bias: None,
+                scratchpad: scratchpad.map(|(_, buffer)| buffer),
+            });
+        }
+        Ok(PreparedSegment {
+            kind: "matmul",
+            blocks: prepared,
+        })
+    }
+
+    /// Reorder one block's weights into an engine-owned buffer.
+    ///
+    /// `staged` is the aligned copy of the whole payload, `source` the block's
+    /// submemory of it, and `expected` the descriptor the primitive wants. The
+    /// reorder runs once here, on the prep stream, and never again.
+    fn repack(
+        &self,
+        staged: &AlignedBuffer,
+        source: &Desc,
+        expected: &Desc,
+        plain: &Desc,
+    ) -> Result<(AlignedBuffer, bool), Fn3Error> {
+        let reformatted = !expected.equal(plain);
+        let bytes = expected.size();
+        let destination = AlignedBuffer::zeroed(bytes)?;
+        // A reorder has no scratchpad and runs on this thread; the library's
+        // default scratchpad policy is the right one here.
+        let attr = PrimitiveAttrHandle::library_default()?;
+        let pd = PrimitiveDescHandle::reorder(&self.engine, source, expected, &attr)?;
+        let primitive = PrimitiveHandle::new(&pd)?;
+        let src_memory = MemoryHandle::new(source, &self.engine)?;
+        let dst_memory = MemoryHandle::new(expected, &self.engine)?;
+        // SAFETY: both handles are 64-byte-aligned buffers owned by the caller
+        // and this function; each is at least as large as the descriptor
+        // requires (`staged` holds the whole payload the submemory addresses,
+        // `destination` was allocated with `expected.size()`). Both outlive the
+        // execute and wait calls below.
+        unsafe { src_memory.set_data_handle(staged.as_ptr() as *mut u8) }?;
+        // SAFETY: as above for `destination`.
+        unsafe { dst_memory.set_data_handle(destination.as_ptr() as *mut u8) }?;
+        let args = [
+            ExecArg {
+                arg: ARG_SRC,
+                memory: src_memory.raw(),
+            },
+            ExecArg {
+                arg: ARG_DST,
+                memory: dst_memory.raw(),
+            },
+        ];
+        primitive.execute(&self.prep_stream, &args)?;
+        self.prep_stream.wait()?;
+        Ok((destination, reformatted))
+    }
+}
+
+/// The scratchpad descriptor and its buffer, when the primitive needs one.
+fn prepare_scratchpad(pd: &PrimitiveDescHandle) -> Result<Option<(Desc, AlignedBuffer)>, Fn3Error> {
+    match pd.scratchpad()? {
+        Some(desc) => {
+            let buffer = AlignedBuffer::zeroed(desc.size())?;
+            Ok(Some((desc, buffer)))
+        }
+        None => Ok(None),
+    }
+}
+
+fn push_arg(
+    memories: &mut Vec<MemoryHandle>,
+    args: &mut Vec<ExecArg>,
+    sources: &mut Vec<ArgSource>,
+    desc: &Desc,
+    engine: &EngineHandle,
+    arg: i32,
+    source: ArgSource,
+) -> Result<(), Fn3Error> {
+    let memory = MemoryHandle::new(desc, engine)?;
+    args.push(ExecArg {
+        arg,
+        memory: memory.raw(),
+    });
+    memories.push(memory);
+    sources.push(source);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn operand(dims: &[u64], constant: bool) -> SegmentOperand {
+        SegmentOperand {
+            shape: Shape::from_dims(dims.iter().copied()),
+            dtype: DType::F32,
+            constant,
+        }
+    }
+
+    #[test]
+    fn the_claim_names_what_it_cannot_take() {
+        let params = OpParams::new()
+            .with_kernel_shape([3, 3])
+            .with_strides([1, 1])
+            .with_pads([1, 1, 1, 1]);
+        let inputs = [
+            operand(&[1, 8, 16, 16], false),
+            operand(&[8, 8, 3, 3], true),
+        ];
+        let outputs = [operand(&[1, 8, 16, 16], false)];
+        assert!(claimed_geometry(OpId::Conv, &inputs, &outputs, &params).is_ok());
+        // A dynamic weight is rejected by name.
+        let mut dynamic = inputs.clone();
+        dynamic[1] = operand(&[8, 8, 3, 3], false);
+        let error = claimed_geometry(OpId::Conv, &dynamic, &outputs, &params).unwrap_err();
+        assert!(error.to_string().contains("prepacks constant"), "{error}");
+        // An op outside the vocabulary is NotMine, not a fallback report.
+        assert_eq!(
+            OneDnnCapability.claim(OpId::Relu, &inputs[..1], &outputs, &params),
+            Claim::NotMine
+        );
+    }
+
+    #[test]
+    fn the_capability_reports_the_onednn_engine() {
+        let capability = OneDnnCapability;
+        assert_eq!(capability.engine(), SegmentEngine::OneDnn);
+    }
+
+    #[test]
+    fn the_linked_library_is_sequential() {
+        let engine = OneDnnEngine::new(0).unwrap();
+        let version = engine.version();
+        println!(
+            "[fn3onednn][measure] oneDNN {} (hash {:?}), cpu runtime {}, parallel blocks {}",
+            version.number(),
+            version.hash,
+            version.cpu_runtime_name(),
+            engine.blocks_run_in_parallel()
+        );
+        assert_eq!(version.major, 3, "the hand-written ABI is for oneDNN 3.x");
+        assert!(
+            version.is_sequential(),
+            "the oneDNN build is {}; this engine requires the sequential CPU runtime so the \
+             session's pool is the only parallelism (see tools/cmake/onednn-seq.cmake)",
+            version.cpu_runtime_name()
+        );
+    }
+
+    fn f32_bytes(values: &[f32]) -> Vec<u8> {
+        bytemuck::cast_slice(values).to_vec()
+    }
+
+    fn run_one(spec: &SegmentSpec<'_>, input: &[f32], outputs: usize) -> Vec<f32> {
+        let mut engine = OneDnnEngine::new(1).unwrap();
+        engine.prepare_segment(0, spec).unwrap();
+        let prepared = engine.prepared(0).unwrap();
+        assert_eq!(prepared.block_count(), 1);
+        let input_buffer = AlignedBuffer::from_bytes(bytemuck::cast_slice(input)).unwrap();
+        let output_buffer = AlignedBuffer::zeroed(outputs * std::mem::size_of::<f32>()).unwrap();
+        prepared
+            .run_block(
+                0,
+                &[input_buffer.as_ptr() as usize],
+                &[output_buffer.as_ptr() as usize],
+            )
+            .unwrap();
+        bytemuck::cast_slice::<u8, f32>(output_buffer.as_bytes()).to_vec()
+    }
+
+    fn close(got: &[f32], expected: &[f32]) {
+        assert_eq!(got.len(), expected.len());
+        for (index, (&got, &expected)) in got.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - expected).abs() <= 1e-6 + 1e-6 * expected.abs(),
+                "element {index}: got {got}, expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_grouped_dilated_strided_convolution_with_bias_runs_on_onednn() {
+        // Two groups, one output channel each, a 2x2 kernel dilated to 3x3 on a
+        // 3x3 input: exactly one output element per group.
+        let params = OpParams::new()
+            .with_kernel_shape([2, 2])
+            .with_dilations([2, 2])
+            .with_group(2);
+        let weights = f32_bytes(&[1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0]);
+        let bias = f32_bytes(&[0.5, -0.5]);
+        let input: Vec<f32> = (1..=18).map(|value| value as f32).collect();
+        let spec = SegmentSpec {
+            op: OpId::Conv,
+            inputs: vec![
+                Shape::from_dims([1, 2, 3, 3]),
+                Shape::from_dims([2, 1, 2, 2]),
+                Shape::from_dims([2]),
+            ],
+            input_dtypes: vec![DType::F32, DType::F32, DType::F32],
+            input_constants: vec![false, true, true],
+            outputs: vec![Shape::from_dims([1, 2, 1, 1])],
+            output_dtypes: vec![DType::F32],
+            params: &params,
+            weights: Some(&weights),
+            bias: Some(&bias),
+            workers: 1,
+        };
+        let got = run_one(&spec, &input, 2);
+        // Group 0 sees 1, 3, 7, 9 -> 64; group 1 sees 10, 12, 16, 18 -> 154.
+        close(&got, &[64.5, 153.5]);
+    }
+
+    #[test]
+    fn strided_max_pooling_runs_on_onednn() {
+        let params = OpParams::new()
+            .with_kernel_shape([2, 2])
+            .with_strides([2, 2]);
+        let input: Vec<f32> = (1..=16).map(|value| value as f32).collect();
+        let spec = SegmentSpec {
+            op: OpId::MaxPool,
+            inputs: vec![Shape::from_dims([1, 1, 4, 4])],
+            input_dtypes: vec![DType::F32],
+            input_constants: vec![false],
+            outputs: vec![Shape::from_dims([1, 1, 2, 2])],
+            output_dtypes: vec![DType::F32],
+            params: &params,
+            weights: None,
+            bias: None,
+            workers: 1,
+        };
+        let got = run_one(&spec, &input, 4);
+        close(&got, &[6.0, 8.0, 14.0, 16.0]);
+    }
+
+    #[test]
+    fn average_pooling_counts_padding_when_asked() {
+        let params = OpParams::new()
+            .with_kernel_shape([2, 2])
+            .with_strides([1, 1])
+            .with_pads([1, 1, 1, 1])
+            .with_count_include_pad(true);
+        let input = [1.0f32, 2.0, 3.0, 4.0];
+        let spec = SegmentSpec {
+            op: OpId::AveragePool,
+            inputs: vec![Shape::from_dims([1, 1, 2, 2])],
+            input_dtypes: vec![DType::F32],
+            input_constants: vec![false],
+            outputs: vec![Shape::from_dims([1, 1, 3, 3])],
+            output_dtypes: vec![DType::F32],
+            params: &params,
+            weights: None,
+            bias: None,
+            workers: 1,
+        };
+        let got = run_one(&spec, &input, 9);
+        close(&got, &[0.25, 0.75, 0.5, 1.0, 2.5, 1.5, 0.75, 1.75, 1.0]);
+    }
+
+    #[test]
+    fn a_two_dimensional_matmul_runs_on_onednn() {
+        let params = OpParams::new();
+        let weights = f32_bytes(&[7.0, 8.0, 9.0, 10.0, 11.0, 12.0]);
+        let input = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let spec = SegmentSpec {
+            op: OpId::MatMul,
+            inputs: vec![Shape::from_dims([2, 3]), Shape::from_dims([3, 2])],
+            input_dtypes: vec![DType::F32, DType::F32],
+            input_constants: vec![false, true],
+            outputs: vec![Shape::from_dims([2, 2])],
+            output_dtypes: vec![DType::F32],
+            params: &params,
+            weights: Some(&weights),
+            bias: None,
+            workers: 1,
+        };
+        let got = run_one(&spec, &input, 4);
+        close(&got, &[58.0, 64.0, 139.0, 154.0]);
+    }
+
+    #[test]
+    fn a_memory_object_starts_empty_and_takes_the_installed_handle() {
+        let engine = EngineHandle::cpu().unwrap();
+        let desc = Desc::with_tag(&[4], FORMAT_TAG_A).unwrap();
+        let memory = MemoryHandle::new(&desc, &engine).unwrap();
+        assert!(
+            memory.data_handle().unwrap().is_null(),
+            "a block must not cache a data handle between forwards"
+        );
+        let buffer = AlignedBuffer::zeroed(16).unwrap();
+        // SAFETY: `buffer` is a 64-byte-aligned, 16-byte allocation, exactly the
+        // descriptor's `4 * f32`, and it outlives the memory object.
+        unsafe { memory.set_data_handle(buffer.as_ptr() as *mut u8) }.unwrap();
+        assert_eq!(
+            memory.data_handle().unwrap() as usize,
+            buffer.as_ptr() as usize
+        );
+    }
+}

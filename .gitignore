@@ -70,8 +70,12 @@ simple_test.json
 docs/_build/
 docs/plans/
 
-# .cargo config (machine-specific paths)
+# .cargo config (machine-specific paths). The repository's own config is
+# portable (a relative CMake toolchain file that pins oneDNN to its sequential
+# CPU runtime); it is re-included below so `--features cpu-onednn` builds the
+# same way on every checkout.
 .cargo/config.toml
+!.cargo/config.toml
 
 # Misc
 MANIFEST

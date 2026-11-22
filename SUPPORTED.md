@@ -6,13 +6,17 @@ contract it measures against is [docs/v3/scope.md](docs/v3/scope.md); the
 architecture decision is [docs/v3/adr-0001-one-runtime.md](docs/v3/adr-0001-one-runtime.md).
 
 The headline is deliberately blunt: **the runtime executes the decoder operator
-set only.** The frontend now maps and shapes the CNN operator set (`Conv`, the
-pool family, `BatchNormalization`, `Resize`, `Pad`, `Clip`, `Sigmoid`, `Max`,
-`Min`, `TopK`) into the typed IR, so an Ultralytics YOLOv8 graph imports with
-every extent resolved; **no backend executes those ops yet**, and there is no
-W8A8 execution path. In the vocabulary of this file the twelve new ops are
-`imports`, not `runs`, and every CNN family stays `planned` until a pinned zoo
-entry and an executor exist.
+set and the CNN operator set, and the CNN families stay `planned` until a
+prepared-model artifact round trip exists.** The frontend maps and shapes
+`Conv`, the pool family, `BatchNormalization`, `Resize`, `Pad`, `Clip`,
+`Sigmoid`, `Max`, `Min` and `TopK` into the typed IR, and the v3 segment runtime
+executes all twelve on scalar NCHW kernels. An optional oneDNN CPU engine
+(`--features cpu-onednn`) additionally executes 4-D convolution, the pool family
+and 2-D matmul; see [docs/v3/backends.md](docs/v3/backends.md). There is no W8A8
+execution path. In the vocabulary of this file the twelve CNN ops are `runs` on
+the CPU, while a model *family* still needs a pinned zoo entry and an artifact
+round trip before it may be called `imports` (see §2 of
+[scope.md](docs/v3/scope.md#2-what-supported-means)).
 
 Legend:
 
@@ -21,6 +25,11 @@ Legend:
   error, never approximated.
 - `partial` — a named subset is implemented; requests outside it are rejected.
 - `—` — not implemented on that backend.
+- `runs` — the engine a CPU session selects by default executes the op: the
+  optional oneDNN engine for the rows it claims, the scalar kernels otherwise
+  (the scalar result is the reference in both cases).
+- `runs (scalar)` — the scalar CPU kernels execute the op; no optional engine
+  claims it yet.
 - Model status is `planned`, `imports`, `runs` or `gated`, defined in
   [scope.md §2](docs/v3/scope.md#2-what-supported-means). The mode table uses
   the same words applied to execution.
@@ -50,7 +59,7 @@ em-dash means the id exists in the IR but no ONNX node maps to it.
 | `OpId` | Code | ONNX input | CPU | Vulkan | Notes |
 |---|---:|---|:--:|:--:|---|
 | `Gather` | 1 | `Gather` | full | full | Embedding lookup and shape indexing; `batch_dims = 0` only |
-| `MatMul` | 2 | `MatMul`, `Gemm`\* | full | full | Rank ≥ 2, batched with broadcast batch dims |
+| `MatMul` | 2 | `MatMul`, `Gemm`\* | full | full | Rank ≥ 2, batched with broadcast batch dims; the optional oneDNN engine also runs the 2-D `f32` form |
 | `Add` | 3 | `Add`, `Gemm`\* | full | full | Broadcasting |
 | `Sub` | 4 | `Sub` | full | full | Broadcasting |
 | `Mul` | 5 | `Mul` | full | full | Broadcasting |
@@ -89,18 +98,18 @@ em-dash means the id exists in the IR but no ONNX node maps to it.
 | `Cos` | 38 | `Cos` | full | full | RoPE building block |
 | `ScatterND` | 39 | `ScatterND` | full | — | Indexed scatter into a copy |
 | `MaskedAttention` | 40 | — | — | full | Reserved fused id; CPU composes attention from primitives, Vulkan has the fused kernel. ONNX `Attention`, `MultiHeadAttention` and `GroupQueryAttention` are rejected, not mapped |
-| `Conv` | 41 | `Conv` | — | — | `imports`. N-dimensional NCHW/NCDHW, `group`, `dilations`, `strides`, `pads`, `auto_pad`; `kernel_shape` is required by the shape rule |
-| `MaxPool` | 42 | `MaxPool` | — | — | `imports`. `kernel_shape`, `strides`, `pads`, `dilations`, `auto_pad`, `ceil_mode`; the optional indices output is rejected |
-| `AveragePool` | 43 | `AveragePool` | — | — | `imports`. As `MaxPool`, plus `count_include_pad` |
-| `GlobalAveragePool` | 44 | `GlobalAveragePool` | — | — | `imports`. Spatial axes collapse to extent 1 |
-| `BatchNorm` | 45 | `BatchNormalization` | — | — | `imports`. Inference form only: one output, 1-D `scale`/`B`/`mean`/`var`, `epsilon`; `training_mode = 1` is rejected |
-| `Resize` | 46 | `Resize` | — | — | `imports`. 4-D nearest/linear, constant `scales` or `sizes`; the `roi` operand must be empty and `tf_crop_and_resize`/cubic are rejected |
-| `Pad` | 47 | `Pad` | — | — | `imports`. Constant/reflect/edge, attribute or constant input pads, negative pads crop; `wrap` is rejected |
-| `Clip` | 48 | `Clip` | — | — | `imports`. Attribute or constant min/max; a runtime bound is rejected |
-| `Sigmoid` | 49 | `Sigmoid` | — | — | `imports` |
-| `Maximum` | 50 | `Max` | — | — | `imports`. Two operands with broadcasting; the variadic ONNX form is rejected |
-| `Minimum` | 51 | `Min` | — | — | `imports`. As `Maximum` |
-| `TopK` | 52 | `TopK` | — | — | `imports`. Axis, `largest`/`sorted`, attribute or constant k; two outputs (values and i64 indices) |
+| `Conv` | 41 | `Conv` | runs | — | N-dimensional NCHW/NCDHW scalar kernels; the optional oneDNN engine (`cpu-onednn`) additionally runs 4-D `f32` with `group`, `dilations`, `strides`, explicit pads and bias |
+| `MaxPool` | 42 | `MaxPool` | runs | — | Scalar kernels; the oneDNN engine runs 4-D `f32` with `kernel_shape`, `strides` and explicit pads (`ceil_mode = 1` and dilation fall back). The optional indices output is rejected |
+| `AveragePool` | 43 | `AveragePool` | runs | — | As `MaxPool`, plus `count_include_pad` (mapped to oneDNN's include/exclude-padding algorithms) |
+| `GlobalAveragePool` | 44 | `GlobalAveragePool` | runs | — | Spatial axes collapse to extent 1; the oneDNN engine expresses it as average pooling over the full input plane |
+| `BatchNorm` | 45 | `BatchNormalization` | runs (scalar) | — | Inference form only: one output, 1-D `scale`/`B`/`mean`/`var`, `epsilon`; `training_mode = 1` is rejected |
+| `Resize` | 46 | `Resize` | runs (scalar) | — | 4-D nearest/linear, constant `scales` or `sizes`; the `roi` operand must be empty and `tf_crop_and_resize`/cubic are rejected |
+| `Pad` | 47 | `Pad` | runs (scalar) | — | Constant/reflect/edge, attribute or constant input pads, negative pads crop; `wrap` is rejected |
+| `Clip` | 48 | `Clip` | runs (scalar) | — | Attribute or constant min/max; a runtime bound is rejected |
+| `Sigmoid` | 49 | `Sigmoid` | runs (scalar) | — | |
+| `Maximum` | 50 | `Max` | runs (scalar) | — | Two operands with broadcasting; the variadic ONNX form is rejected |
+| `Minimum` | 51 | `Min` | runs (scalar) | — | As `Maximum` |
+| `TopK` | 52 | `TopK` | runs (scalar) | — | Axis, `largest`/`sorted`, attribute or constant k; two outputs (values and i64 indices) |
 
 \* `Gemm` is not an op id. It is accepted only in the identity form
 (`alpha = beta = 1`, `transA = transB = 0`) and composed as `MatMul` + `Add`.
@@ -130,10 +139,11 @@ set the target families need next: `ConvTranspose`, `GatherElements`,
 operators. External tensor data, sparse initializers and local functions are
 rejected by name as well.
 
-The CNN operators are mapped and shaped under #102/#104 but have no execution
-kernel: every CPU and Vulkan cell above is `—`, and `Backend::supports` returns
-`Unsupported` naming phase 2. Import is not execution, and no row above claims
-otherwise.
+The CNN operators are mapped and shaped under #102/#104 and execute on the CPU:
+the twelve scalar NCHW kernels in `src/fn3/runtime/kernels/` are the reference,
+and the optional oneDNN engine executes the 4-D convolution, pooling and 2-D
+matmul rows. The Vulkan column stays `—`; a Vulkan session rejects those ops
+instead of staging them to the CPU.
 
 ## Dtypes and execution modes
 
@@ -162,11 +172,11 @@ The rules behind the table:
 
 Capability gaps:
 
-- No CNN/vision executor: `Conv`, the pool family, `BatchNormalization`,
-  `Resize`, `Pad`, `Clip`, `Sigmoid`, `Max`, `Min` and `TopK` import into the
-  typed IR, but no backend has a kernel. YOLO, EfficientViT, ResNet/MobileNet and
-  ViT cannot run, and a family is not `imports` until its pinned zoo entry
-  round-trips through an artifact.
+- The CNN operator set executes on the CPU, but no model family is `imports`
+  yet: a family needs a pinned zoo entry and a prepared-model artifact round
+  trip, and the 3.0 artifact does not carry a CNN graph (`OpParams` format
+  version 1 stores only `axes`, `keep_dims` and `epsilon`). See
+  [docs/v3/backends.md](docs/v3/backends.md) for the oneDNN engine's subset.
 - `ConvTranspose`, `GatherElements` and `LeakyRelu` remain unmapped.
 - The typed-IR import requires every extent to be provable. A model whose
   intermediate shape depends on a runtime value is rejected by name; the
@@ -186,8 +196,10 @@ Capability gaps:
   import is not implemented.
 - No fused-segment planner, no layout assignment and no precision assignment:
   the plan is a specialized instruction list executed per op (#98).
-- No CPU kernel provider: the CNN execution path does not exist at all; oneDNN/
-  MLAS/XNNPACK are planned (#101).
+- The optional oneDNN CPU engine (`cpu-onednn`) is the first provider: 4-D
+  `f32` convolution, the pool family and 2-D matmul, with explicit-pad
+  resolution and output-channel block threading. MLAS/XNNPACK are not
+  implemented; no provider fuses activations yet (#101, #106).
 
 Runtime and packaging gaps:
 

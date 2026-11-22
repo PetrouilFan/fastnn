@@ -9,6 +9,7 @@
 //! | [`Plan`] | the session | nothing: a plan is plain data and can be cloned |
 //! | [`Arena`] | the session | nothing: one allocation per session |
 //! | [`SessionThreads`] | the session | nothing: its own `fn3-worker` pool |
+//! | the oneDNN engine (`cpu-onednn`) | the session | nothing: one engine, one prep stream, its prepacked weights and blocks |
 //! | weights | the session | read-only, via `Arc<ImportedGraph>`; two sessions on one model share the payload bytes |
 //!
 //! Two sessions opened on the same `Arc<ImportedGraph>` therefore have isolated
@@ -24,10 +25,12 @@
 //! 2. for each segment, in plan order, asks the arena for one *disjoint* window
 //!    per operand and per result (`Arena::frame` — a `split_at_mut` walk, so
 //!    the aliasing rule is the borrow checker's, not a comment);
-//! 3. binds each window to the slot's precomputed [`TensorMeta`] and calls the
-//!    one dispatch table (`crate::inference::backend::cpu::dispatch_kernels`
-//!    for the forty legacy ops, [`crate::inference::runtime::kernels`] for the
-//!    twelve CNN ops);
+//! 3. dispatches on the segment's engine ([`SegmentEngine::Scalar`] binds each
+//!    window to the slot's precomputed [`TensorMeta`] and calls the one
+//!    dispatch table — `backend::cpu::dispatch_kernels` for the forty legacy
+//!    ops, [`crate::inference::runtime::kernels`] for the twelve CNN ops;
+//!    [`SegmentEngine::OneDnn`] hands the segment's arena windows to the
+//!    prepared blocks and runs them on this pool);
 //! 4. reads the graph outputs back into owned [`HostTensor`]s on request.
 //!
 //! No step allocates from the arena: the plan's offsets are fixed, so
@@ -54,16 +57,20 @@
 use std::sync::Arc;
 
 use crate::inference::backend::cpu::dispatch_kernels;
+use crate::inference::backend::{ScalarOnly, SegmentEngine, SegmentProvider};
 use crate::inference::dtype::DType;
 use crate::inference::error::Fn3Error;
 use crate::inference::import::ImportedGraph;
 use crate::inference::ops::OpId;
 use crate::inference::runtime::arena::Arena;
 use crate::inference::runtime::kernels;
-use crate::inference::runtime::plan::{Plan, SlotId, SlotSource};
+use crate::inference::runtime::plan::{EngineCounts, Plan, SlotId, SlotSource};
 use crate::inference::runtime::threads::{SessionThreads, Threading};
 use crate::inference::storage::{AlignedBuffer, DTypeAlignment};
 use crate::inference::tensor::{TensorMeta, TensorMut, TensorView};
+
+#[cfg(feature = "cpu-onednn")]
+use crate::inference::backend::cpu::onednn::{OneDnnCapability, OneDnnEngine, SegmentSpec};
 
 /// One graph output, materialised on the host.
 ///
@@ -125,6 +132,54 @@ impl HostTensor {
     }
 }
 
+/// Which provider a new session should plan with.
+///
+/// The choice is made **once, at plan build time**, and recorded per segment in
+/// [`Plan::segments`]. It is not re-decided per forward.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EngineChoice {
+    /// The best engine this build has: the optional oneDNN CPU engine for the
+    /// segments it claims (`cpu-onednn`), scalar for everything else. Without
+    /// the feature this is exactly [`EngineChoice::Scalar`].
+    #[default]
+    Auto,
+    /// The portable scalar kernels for every segment.
+    ///
+    /// This is the reference a oneDNN session is compared against, and the only
+    /// choice in a build without `cpu-onednn`.
+    Scalar,
+}
+
+/// What the oneDNN engine covers in one session.
+///
+/// A report, not a control surface: it says how many segments the engine
+/// received, how much weight data it prepacked, and whether its blocks run in
+/// parallel. Empty (`None` from [`Session::one_dnn_report`]) when the session
+/// has no oneDNN segment or the feature is off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OneDnnReport {
+    /// Linked oneDNN version, `"3.14.1"`.
+    pub version: String,
+    /// CPU threading runtime the library was built with (`"seq"` expected).
+    pub cpu_runtime: &'static str,
+    /// Segments prepared on the engine.
+    pub segments: usize,
+    /// Convolution segments prepared.
+    pub conv_segments: usize,
+    /// Pooling segments prepared.
+    pub pool_segments: usize,
+    /// Matmul segments prepared.
+    pub matmul_segments: usize,
+    /// Engine-owned prepacked weight and bias bytes.
+    pub prepacked_bytes: usize,
+    /// Weight blocks oneDNN wanted in a layout other than the ONNX payload's,
+    /// i.e. blocks that needed a real reorder at session open.
+    pub reordered_blocks: usize,
+    /// `true` when blocks are executed on the session's pool; `false` when a
+    /// non-sequential oneDNN build forced serial block execution.
+    pub parallel_blocks: bool,
+}
+
 /// A session: an immutable plan over one mutable arena.
 ///
 /// `Send` but deliberately not `Sync`: a forward borrows the arena mutably, so
@@ -134,8 +189,13 @@ impl HostTensor {
 #[derive(Debug)]
 pub struct Session {
     plan: Plan,
-    arena: Arena,
     threads: SessionThreads,
+    /// The optional oneDNN engine, present only when the plan has a segment it
+    /// prepared. Declared before the arena and the weights so it is dropped
+    /// first: its memory objects borrow those buffers for the session's life.
+    #[cfg(feature = "cpu-onednn")]
+    onednn: Option<OneDnnEngine>,
+    arena: Arena,
     source: Arc<ImportedGraph>,
     /// One contiguous, offset-zero metadata per slot, built once.
     slot_meta: Vec<TensorMeta>,
@@ -165,8 +225,36 @@ impl Session {
         imported: impl Into<Arc<ImportedGraph>>,
         threading: Threading,
     ) -> Result<Session, Fn3Error> {
+        Session::new_with(imported, threading, EngineChoice::Auto)
+    }
+
+    /// Open a session with an explicit engine choice.
+    ///
+    /// [`EngineChoice::Auto`] is what [`Session::new`] uses. The choice is
+    /// applied when the plan is built, so it decides which segments a provider
+    /// may claim; it cannot change afterwards.
+    ///
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use fastnn::inference::import::ImportedGraph;
+    /// # use fastnn::inference::runtime::{EngineChoice, Session, Threading};
+    /// # fn open(imported: &Arc<ImportedGraph>) -> fastnn::inference::Fn3Result<()> {
+    /// let reference = Session::new_with(
+    ///     Arc::clone(imported),
+    ///     Threading::Fixed(1),
+    ///     EngineChoice::Scalar,
+    /// )?;
+    /// # let _ = reference;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn new_with(
+        imported: impl Into<Arc<ImportedGraph>>,
+        threading: Threading,
+        choice: EngineChoice,
+    ) -> Result<Session, Fn3Error> {
         let source = imported.into();
-        let plan = Plan::from_imported(&source)?;
+        let plan = Plan::from_imported_with(&source, provider_for(choice))?;
         Session::from_plan(plan, source, threading)
     }
 
@@ -174,6 +262,9 @@ impl Session {
     ///
     /// `plan` must have been built from `source`; a mismatch is not detected
     /// here, but the first forward would name a slot the model does not have.
+    /// A plan whose segments name [`SegmentEngine::OneDnn`] is rejected by a
+    /// build without the `cpu-onednn` feature instead of being run on the
+    /// scalar kernels behind the caller's back.
     pub fn from_plan(
         plan: Plan,
         imported: impl Into<Arc<ImportedGraph>>,
@@ -224,11 +315,23 @@ impl Session {
                 }
             });
         }
+        if plan.engine_counts().one_dnn > 0 {
+            #[cfg(not(feature = "cpu-onednn"))]
+            return Err(Fn3Error::NotImplemented {
+                what: "a plan with a segment assigned to the oneDNN engine, in a build without \
+                       the `cpu-onednn` feature",
+                owner: "phase 3a (oneDNN CPU engine)",
+            });
+        }
+        #[cfg(feature = "cpu-onednn")]
+        let onednn = prepare_onednn(&plan, &source, &aligned_weights, threads.worker_count())?;
         let arena = Arena::new(&plan)?;
         Ok(Session {
             plan,
-            arena,
             threads,
+            #[cfg(feature = "cpu-onednn")]
+            onednn,
+            arena,
             source,
             slot_meta,
             aligned_weights,
@@ -278,8 +381,10 @@ impl Session {
     pub fn execute(&mut self, inputs: &[(&str, &[f32])]) -> Result<(), Fn3Error> {
         let Session {
             plan,
-            arena,
             threads,
+            #[cfg(feature = "cpu-onednn")]
+            onednn,
+            arena,
             source,
             slot_meta,
             aligned_weights,
@@ -331,41 +436,135 @@ impl Session {
             arena.write_slot(id, values)?;
         }
 
-        for segment in &plan.segments {
-            let (input_windows, output_windows) =
-                arena.frame(plan, &segment.inputs, &segment.outputs)?;
-            let mut views = Vec::with_capacity(segment.inputs.len());
-            for (position, &id) in segment.inputs.iter().enumerate() {
-                let bytes = match input_windows[position] {
-                    Some(bytes) => bytes,
-                    None => weight_bytes(source, aligned_weights, plan, id)?,
-                };
-                views.push(TensorView::from_host_bytes(
-                    bytes,
-                    slot_meta[id.index()].clone(),
-                )?);
-            }
-            let mut results = Vec::with_capacity(segment.outputs.len());
-            for (&id, window) in segment.outputs.iter().zip(output_windows) {
-                results.push(TensorMut::from_host_bytes(
-                    window,
-                    slot_meta[id.index()].clone(),
-                )?);
-            }
-            let op = segment.op_id();
-            if kernels::is_cnn_op(op) {
-                kernels::dispatch(op, &views, &mut results, &segment.params, Some(threads))?;
-            } else {
-                // The legacy kernels take a thread budget and would otherwise ask
-                // Rayon's *global* pool. Running them inside this session's pool
-                // with a budget of one keeps them on one `fn3-worker` thread and
-                // makes the backend's nested-region guard (`in_worker`) report
-                // true, so no library call can reach the global pool.
-                threads
-                    .install(|| dispatch_kernels(op, &views, &mut results, &segment.params, 1))?;
+        for (segment_index, segment) in plan.segments.iter().enumerate() {
+            match segment.engine {
+                SegmentEngine::Scalar => {
+                    let (input_windows, output_windows) =
+                        arena.frame(plan, &segment.inputs, &segment.outputs)?;
+                    let mut views = Vec::with_capacity(segment.inputs.len());
+                    for (position, &id) in segment.inputs.iter().enumerate() {
+                        let bytes = match input_windows[position] {
+                            Some(bytes) => bytes,
+                            None => weight_bytes(source, aligned_weights, plan, id)?,
+                        };
+                        views.push(TensorView::from_host_bytes(
+                            bytes,
+                            slot_meta[id.index()].clone(),
+                        )?);
+                    }
+                    let mut results = Vec::with_capacity(segment.outputs.len());
+                    for (&id, window) in segment.outputs.iter().zip(output_windows) {
+                        results.push(TensorMut::from_host_bytes(
+                            window,
+                            slot_meta[id.index()].clone(),
+                        )?);
+                    }
+                    let op = segment.op_id();
+                    if kernels::is_cnn_op(op) {
+                        kernels::dispatch(
+                            op,
+                            &views,
+                            &mut results,
+                            &segment.params,
+                            Some(threads),
+                        )?;
+                    } else {
+                        // The legacy kernels take a thread budget and would otherwise ask
+                        // Rayon's *global* pool. Running them inside this session's pool
+                        // with a budget of one keeps them on one `fn3-worker` thread and
+                        // makes the backend's nested-region guard (`in_worker`) report
+                        // true, so no library call can reach the global pool.
+                        threads.install(|| {
+                            dispatch_kernels(op, &views, &mut results, &segment.params, 1)
+                        })?;
+                    }
+                }
+                SegmentEngine::OneDnn => {
+                    #[cfg(feature = "cpu-onednn")]
+                    {
+                        let engine = onednn.as_ref().ok_or_else(|| {
+                            engine_unavailable(segment_index, "the session has no oneDNN engine")
+                        })?;
+                        let prepared = engine.prepared(segment_index).ok_or_else(|| {
+                            engine_unavailable(
+                                segment_index,
+                                "the session prepared no blocks for this segment",
+                            )
+                        })?;
+                        // The arena windows are the live source/destination
+                        // pointers. A weight operand has no window (its bytes
+                        // are the block's prepacked copy); its address is zero
+                        // and the block never reads it from the window list.
+                        let (input_windows, mut output_windows) =
+                            arena.frame(plan, &segment.inputs, &segment.outputs)?;
+                        let mut addresses = Vec::with_capacity(input_windows.len());
+                        for window in &input_windows {
+                            addresses.push(match window {
+                                Some(bytes) => bytes.as_ptr() as usize,
+                                None => 0,
+                            });
+                        }
+                        let mut results = Vec::with_capacity(output_windows.len());
+                        for window in &mut output_windows {
+                            results.push(window.as_mut_ptr() as usize);
+                        }
+                        if engine.blocks_run_in_parallel() {
+                            threads.run_blocks(prepared.block_count(), |block| {
+                                prepared.run_block(block, &addresses, &results)
+                            })?;
+                        } else {
+                            // A non-sequential oneDNN build owns the threads
+                            // inside a call; nesting the pool would
+                            // oversubscribe. Same blocks, same results, serial.
+                            for block in 0..prepared.block_count() {
+                                prepared.run_block(block, &addresses, &results)?;
+                            }
+                        }
+                    }
+                    #[cfg(not(feature = "cpu-onednn"))]
+                    {
+                        return Err(engine_unavailable(
+                            segment_index,
+                            "this build has no `cpu-onednn` feature",
+                        ));
+                    }
+                }
             }
         }
         Ok(())
+    }
+
+    /// How many segments each engine runs in this session's plan.
+    pub fn engine_counts(&self) -> EngineCounts {
+        self.plan.engine_counts()
+    }
+
+    /// What the optional oneDNN engine covers, or `None`.
+    ///
+    /// `None` means the session has no oneDNN segment: either this build has no
+    /// `cpu-onednn` feature, the plan chose `EngineChoice::Scalar`, or no
+    /// segment was claimed (for example a graph of elementwise ops only).
+    pub fn one_dnn_report(&self) -> Option<OneDnnReport> {
+        #[cfg(feature = "cpu-onednn")]
+        {
+            let engine = self.onednn.as_ref()?;
+            let (conv, pool, matmul) = engine.segment_kinds();
+            Some(OneDnnReport {
+                version: engine.version().number(),
+                cpu_runtime: engine.version().cpu_runtime_name(),
+                segments: self.plan.engine_counts().one_dnn,
+                conv_segments: conv,
+                pool_segments: pool,
+                matmul_segments: matmul,
+                prepacked_bytes: engine.prepacked_bytes(),
+                reordered_blocks: engine.reordered_blocks(),
+                parallel_blocks: engine.blocks_run_in_parallel(),
+            })
+        }
+        #[cfg(not(feature = "cpu-onednn"))]
+        {
+            None
+        }
     }
 
     /// Run one forward and copy every graph output out.
@@ -473,6 +672,139 @@ impl Session {
             )),
         }
     }
+}
+
+/// The provider a new plan is built with.
+///
+/// The feature test lives here, at the session boundary, not in the planner: a
+/// plan built in either build is the same type with the same rules, and the
+/// segment engines are decided by the provider's answers.
+fn provider_for(choice: EngineChoice) -> &'static dyn SegmentProvider {
+    match choice {
+        EngineChoice::Scalar => &ScalarOnly,
+        EngineChoice::Auto => {
+            #[cfg(feature = "cpu-onednn")]
+            {
+                &OneDnnCapability
+            }
+            #[cfg(not(feature = "cpu-onednn"))]
+            {
+                &ScalarOnly
+            }
+        }
+    }
+}
+
+fn engine_unavailable(segment: usize, detail: &str) -> Fn3Error {
+    Fn3Error::ProviderFailure {
+        provider: "oneDNN",
+        call: "runtime Session::execute",
+        status: 0,
+        detail: format!("plan segment {segment} is assigned to the oneDNN engine, but {detail}"),
+    }
+}
+
+/// Prepare every oneDNN segment at session open.
+///
+/// All prepacking (weight layout, bias copy, scratchpads, primitives) happens
+/// here, once. A forward only binds pointers and calls `execute`.
+#[cfg(feature = "cpu-onednn")]
+fn prepare_onednn(
+    plan: &Plan,
+    source: &ImportedGraph,
+    aligned: &[Option<AlignedBuffer>],
+    workers: usize,
+) -> Result<Option<OneDnnEngine>, Fn3Error> {
+    if plan.engine_counts().one_dnn == 0 {
+        return Ok(None);
+    }
+    let mut engine = OneDnnEngine::new(plan.segments.len())?;
+    for (index, segment) in plan.segments.iter().enumerate() {
+        if segment.engine != SegmentEngine::OneDnn {
+            continue;
+        }
+        let spec = segment_spec(plan, source, aligned, segment, workers)?;
+        engine
+            .prepare_segment(index, &spec)
+            .map_err(|error| match error {
+                Fn3Error::ProviderFailure {
+                    provider,
+                    call,
+                    status,
+                    detail,
+                } => Fn3Error::ProviderFailure {
+                    provider,
+                    call,
+                    status,
+                    detail: format!("segment {index} ({}): {detail}", segment.loc.describe()),
+                },
+                other => other,
+            })?;
+    }
+    Ok(Some(engine))
+}
+
+/// Describe one segment to the engine in the terms it can use.
+#[cfg(feature = "cpu-onednn")]
+fn segment_spec<'a>(
+    plan: &'a Plan,
+    source: &'a ImportedGraph,
+    aligned: &'a [Option<AlignedBuffer>],
+    segment: &'a crate::inference::runtime::plan::Segment,
+    workers: usize,
+) -> Result<SegmentSpec<'a>, Fn3Error> {
+    let mut inputs = Vec::with_capacity(segment.inputs.len());
+    let mut input_dtypes = Vec::with_capacity(segment.inputs.len());
+    let mut input_constants = Vec::with_capacity(segment.inputs.len());
+    for &id in &segment.inputs {
+        let slot = plan.slot(id)?;
+        inputs.push(
+            slot.ty
+                .static_shape()
+                .ok_or_else(|| Fn3Error::InvalidShape {
+                    context: "runtime Session oneDNN preparation",
+                    detail: format!("input slot {id} has the symbolic type {}", slot.ty),
+                })?,
+        );
+        input_dtypes.push(slot.ty.dtype);
+        input_constants.push(slot.is_weight());
+    }
+    let mut outputs = Vec::with_capacity(segment.outputs.len());
+    let mut output_dtypes = Vec::with_capacity(segment.outputs.len());
+    for &id in &segment.outputs {
+        let slot = plan.slot(id)?;
+        outputs.push(
+            slot.ty
+                .static_shape()
+                .ok_or_else(|| Fn3Error::InvalidShape {
+                    context: "runtime Session oneDNN preparation",
+                    detail: format!("output slot {id} has the symbolic type {}", slot.ty),
+                })?,
+        );
+        output_dtypes.push(slot.ty.dtype);
+    }
+    let operand_bytes = |position: usize| -> Result<Option<&'a [u8]>, Fn3Error> {
+        match segment.inputs.get(position) {
+            Some(&id) if plan.slot(id)?.is_weight() => {
+                Ok(Some(weight_bytes(source, aligned, plan, id)?))
+            }
+            _ => Ok(None),
+        }
+    };
+    let weights = operand_bytes(1)?;
+    let bias = operand_bytes(2)?;
+    Ok(SegmentSpec {
+        op: segment.op_id(),
+        inputs,
+        input_dtypes,
+        input_constants,
+        outputs,
+        output_dtypes,
+        params: &segment.params,
+        weights,
+        bias,
+        workers,
+    })
 }
 
 /// The bytes of a weight slot: the importer's payload, or its aligned copy.

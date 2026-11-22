@@ -61,14 +61,25 @@ impl Threading {
     /// in which case the scheduler's affinity mask bounds the work anyway.
     pub fn resolve(self) -> Result<usize, Fn3Error> {
         match self {
-            Threading::Auto => Ok(physical_core_count()
-                .or_else(|| {
-                    std::thread::available_parallelism()
-                        .ok()
-                        .map(|value| value.get())
-                })
-                .unwrap_or(1)
-                .max(1)),
+            Threading::Auto => {
+                // Without Rayon there is no pool to size, so one worker is the
+                // only answer that matches what the session can actually run.
+                #[cfg(not(feature = "parallel"))]
+                {
+                    Ok(1)
+                }
+                #[cfg(feature = "parallel")]
+                {
+                    Ok(physical_core_count()
+                        .or_else(|| {
+                            std::thread::available_parallelism()
+                                .ok()
+                                .map(|value| value.get())
+                        })
+                        .unwrap_or(1)
+                        .max(1))
+                }
+            }
             Threading::Fixed(0) => Err(Fn3Error::InvalidShape {
                 context: "runtime Threading::Fixed",
                 detail: "a session needs at least one worker; Fixed(0) would never run a segment"
@@ -271,6 +282,31 @@ impl SessionThreads {
     {
         body()
     }
+
+    /// Run `count` independent blocks, in parallel when the session has a pool.
+    ///
+    /// Used by the optional oneDNN engine, whose blocks are already the unit of
+    /// independence (disjoint output-channel ranges). The body must be pure per
+    /// index: block `i` is executed exactly once, on one worker, and no two
+    /// indices share state. A build without `parallel`, or a session with one
+    /// worker, runs the loop inline so the same code path is used everywhere.
+    #[cfg_attr(not(feature = "cpu-onednn"), allow(dead_code))]
+    pub(crate) fn run_blocks<F>(&self, count: usize, body: F) -> Result<(), Fn3Error>
+    where
+        F: Fn(usize) -> Result<(), Fn3Error> + Sync + Send,
+    {
+        #[cfg(feature = "parallel")]
+        {
+            if self.worker_count() > 1 && count > 1 {
+                use rayon::prelude::*;
+                return self.install(|| (0..count).into_par_iter().try_for_each(body));
+            }
+        }
+        for index in 0..count {
+            body(index)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -285,6 +321,10 @@ mod tests {
         assert!(error.to_string().contains("at least one worker"), "{error}");
     }
 
+    /// Topology sizing only happens when a pool exists; without `parallel`
+    /// `Auto` is one worker by construction and the no-parallel test below
+    /// pins that instead.
+    #[cfg(feature = "parallel")]
     #[test]
     fn auto_resolves_to_the_topology_or_a_fallback() {
         let resolved = Threading::Auto.resolve().unwrap();

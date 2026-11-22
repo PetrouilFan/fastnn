@@ -1,0 +1,8 @@
+[env]
+# The optional oneDNN engine requires a **sequential** oneDNN: the session's
+# own pool is the only parallelism (see `src/fn3/backend/cpu/onednn/`). The
+# `cmake` crate reads this variable and passes it to `onednn-src`'s configure
+# step; `tools/cmake/onednn-seq.cmake` sets `ONEDNN_CPU_RUNTIME=SEQ`. An
+# existing environment value is not overridden, so a cross-compilation
+# toolchain keeps working; the engine checks the runtime it actually linked.
+CMAKE_TOOLCHAIN_FILE = { relative = true, value = "tools/cmake/onednn-seq.cmake" }

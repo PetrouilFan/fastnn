@@ -13,11 +13,18 @@ authority is `docs/archive/roadmap/fn3-architecture.md`.
   `infer.rs`, the one shape pass. It owns the reading of `OpParams` for shape
   rules; a rule that needs a constant reads it from `OpParams`, never from a
   tensor payload. `import/typed.rs` is the only converter into it.
-- `backend/mod.rs`: `Backend`, `Capabilities`, `Support`, `OpParams`.
-  `backend/cpu/` is the portable reference backend (`dispatch_kernels` is the
-  one table for the forty legacy ops); `backend/vulkan/` holds the
-  platform and kernel families, where `resident.rs` owns device-resident
-  storage, the persistent table and the residency counters (FN3-26 / #72).
+- `backend/mod.rs`: `Backend`, `Capabilities`, `Support`, `OpParams`, and the
+  plan-time provider contract (`SegmentEngine`, `SegmentOperand`,
+  `SegmentProvider`, `ScalarOnly`). `backend/window.rs` owns the pad/dilation/
+  output-extent rules shared by the scalar kernels and the oneDNN engine, so a
+  provider cannot disagree with `ir::infer` about a window. `backend/cpu/` is
+  the portable reference backend (`dispatch_kernels` is the one table for the
+  forty legacy ops); `backend/cpu/onednn/` is the opt-in oneDNN engine
+  (`cpu-onednn`), split into `ffi.rs` (hand-written C API + RAII handles),
+  `geometry.rs` (pure claim/prepare rules) and `mod.rs` (engine, prepack,
+  blocks). `backend/vulkan/` holds the platform and kernel families, where
+  `resident.rs` owns device-resident storage, the persistent table and the
+  residency counters (FN3-26 / #72).
 - `import/`: strict ONNX reader and graph construction. `import_onnx_model` adds
   the decoder geometry profile; `import_onnx_graph` stops at the typed graph, so
   a CNN imports without being forced through that profile.
@@ -29,10 +36,13 @@ authority is `docs/archive/roadmap/fn3-architecture.md`.
 - `runtime/`: the v3 segment executor. `plan.rs` builds one single-op segment
   per node, one slot per value (weights are read-only `SlotSource::Weight`
   slots backed by the importer's bytes, never copied) and a liveness-based
-  offset table; `arena.rs` owns the one 64-byte-aligned allocation and splits it
-  into disjoint windows per segment; `threads.rs` builds the session's own
-  `fn3-worker` Rayon pool (never the global one, never at import time);
-  `exec.rs` validates named inputs, walks the segments and reads outputs back;
+  offset table; every segment records the engine the plan chose (`Scalar` or
+  `OneDnn`) and `Plan::fallbacks` records what the offered provider declined;
+  `arena.rs` owns the one 64-byte-aligned allocation and splits it into
+  disjoint windows per segment; `threads.rs` builds the session's own
+  `fn3-worker` Rayon pool (never the global one, never at import time) and its
+  `run_blocks` drives oneDNN blocks; `exec.rs` validates named inputs, walks the
+  segments, dispatches per segment engine and reads outputs back;
   `runtime/kernels/` holds the scalar NCHW kernels for the twelve CNN op ids.
 - `model/specialize.rs`: shape resolution, constant folding, typed `OpParams`
   and the `Planner`.
@@ -65,6 +75,21 @@ authority is `docs/archive/roadmap/fn3-architecture.md`.
 - A backend that cannot run an op returns `UnsupportedOp`; it never returns an
   input, a zero or an approximation. `Support::Partial` names its subset and the
   op still rejects everything outside it.
+- The planner has no feature test: a session passes one `SegmentProvider`, the
+  provider's claim is a pure function of `(op, operand shapes, dtypes,
+  constant-ness, params)`, and a declined segment runs on the scalar kernels
+  with its reason in `Plan::fallbacks`. A plan naming `SegmentEngine::OneDnn` is
+  rejected by a build without `cpu-onednn`, never silently run scalar.
+- The oneDNN engine requires a **sequential** oneDNN
+  (`ONEDNN_CPU_RUNTIME=SEQ`, pinned by `tools/cmake/onednn-seq.cmake` through
+  `.cargo/config.toml`); the session's pool is the only parallelism. The engine
+  verifies `dnnl_version()->cpu_runtime` and falls back to serial block
+  execution if a foreign build reports a threaded runtime. Every weight and bias
+  it claims must be read-only model data and is prepacked at session open; a
+  forward never reorders a weight, installs a data handle only for the duration
+  of one `dnnl_primitive_execute`, and never touches a process-global oneDNN
+  setting or cache. Blocks are output-channel ranges split at group boundaries,
+  each with its own primitive, stream and user scratchpad.
 - Plan preflight asks `Backend::admits` for the plan's concrete operand shapes
   and dtypes; the default body is `supports`. An `admits` override may confirm
   a `Partial` subset, never widen `Unsupported`.
@@ -121,6 +146,8 @@ cargo test --test fn3_contracts
 cargo test --test fn3_cpu_reference
 cargo test --test fn3_cnn_import
 cargo test --test fn3_cnn_run
+cargo test --no-default-features --features cpu-onednn --test fn3_onednn
+cargo build --no-default-features --features cpu-onednn
 cargo doc --no-deps --no-default-features
 ```
 
@@ -128,6 +155,13 @@ cargo doc --no-deps --no-default-features
 Runtime dump; generate the latter with
 `python tools/parity/ort_reference.py <model> target/cnn-parity`. The test
 prints that command when the dump is absent and never `#[ignore]`s itself.
+
+The oneDNN engine is pinned to oneDNN's sequential CPU runtime by
+`tools/cmake/onednn-seq.cmake` through `.cargo/config.toml`; a tree that built
+oneDNN before that pin needs `cargo clean -p onednn-src`. The engine checks the
+runtime it linked and reports it, so a foreign threaded build still runs, with
+serial blocks. `tests/fn3_cnn_perf.rs` is opt-in (`FN3_CNN_PERF=scalar|onednn`,
+one process per configuration) and is the only place latency claims are made.
 
 `cargo test --lib` must also pass: it proves the 2.x tree still compiles beside
 `src/fn3/`. Contract changes need a new or updated `tests/fn3_contracts.rs` case.

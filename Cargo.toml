@@ -12,6 +12,8 @@ rust-version = "1.89"
 include = [
   "/src/**",
   "/tools/perf/**",
+  "/tools/cmake/**",
+  "/build.rs",
   "/Cargo.toml",
   "/README.md",
   "/CHANGELOG.md",
@@ -33,6 +35,10 @@ parking_lot = { version = "0.12", optional = true }
 # Raw Vulkan loader for the Vulkan backend. Optional so a default build never
 # touches the loader; enabled by `--features vulkan`.
 ash         = { version = "0.38", optional = true }
+# oneDNN 3.14.1 source. Built as a static library by CMake when the
+# `cpu-onednn` feature is on; the runtime declares its C API by hand in
+# `src/fn3/backend/cpu/onednn/ffi.rs` and adds no other dependency.
+onednn-src  = { version = "0.1.24", default-features = false, features = ["inference"], optional = true }
 
 [dev-dependencies]
 # Tests assert on JSON reports and fixture metadata; the library itself does not
@@ -51,6 +57,9 @@ python = ["dep:pyo3", "dep:parking_lot"]
 parallel = ["dep:rayon"]
 # The Vulkan compute backend.
 vulkan = ["dep:ash"]
+# The optional oneDNN CPU engine. Not in `default`: it adds a CMake-built
+# static library (three minutes on a cold cache) and libstdc++.
+cpu-onednn = ["dep:onednn-src"]
 # Deterministic fault injection for the runtime-hardening matrix. Non-default
 # and test-only: it adds no failure path unless a test arms one.
 vulkan-fault-injection = ["vulkan"]

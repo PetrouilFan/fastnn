@@ -50,7 +50,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use fastnn::inference::import::{import_onnx_graph, ImportedGraph};
-use fastnn::inference::runtime::{Session, Threading};
+use fastnn::inference::runtime::{EngineChoice, Session, Threading};
 
 const YOLOV8N: &str = "/home/petrouil/.hermes/yolov8n.onnx";
 
@@ -257,7 +257,14 @@ fn yolov8n_matches_the_onnxruntime_reference() {
         reference.model_sha256
     );
 
-    let mut session = Session::new(Arc::clone(&imported), Threading::Fixed(1)).expect("open");
+    // This file is the scalar-path gate: a build with `cpu-onednn` must not
+    // change what it measures. The provider choice is explicit.
+    let mut session = Session::new_with(
+        Arc::clone(&imported),
+        Threading::Fixed(1),
+        EngineChoice::Scalar,
+    )
+    .expect("open");
     let plan = session.plan();
     println!(
         "[fn3cnn][measure] plan: {} segments, {} slots, {} input slots, arena {} bytes \
@@ -293,8 +300,12 @@ fn every_thread_count_produces_the_same_bytes() {
 
     let mut baseline: Option<Vec<f32>> = None;
     for workers in [1usize, 4, 8] {
-        let mut session =
-            Session::new(Arc::clone(&imported), Threading::Fixed(workers)).expect("open");
+        let mut session = Session::new_with(
+            Arc::clone(&imported),
+            Threading::Fixed(workers),
+            EngineChoice::Scalar,
+        )
+        .expect("open");
         assert_eq!(
             session.worker_count(),
             workers,
@@ -339,7 +350,12 @@ fn repeated_forwards_do_not_grow_the_arena() {
     let Some(imported) = import_model() else {
         return;
     };
-    let mut session = Session::new(Arc::clone(&imported), Threading::Fixed(4)).expect("open");
+    let mut session = Session::new_with(
+        Arc::clone(&imported),
+        Threading::Fixed(4),
+        EngineChoice::Scalar,
+    )
+    .expect("open");
     let before = session.arena_allocation_count();
     let arena_bytes = session.plan().arena_bytes;
     let mut first: Option<Vec<f32>> = None;

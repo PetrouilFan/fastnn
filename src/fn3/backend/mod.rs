@@ -52,6 +52,8 @@ pub mod cpu;
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
 
+pub(crate) mod window;
+
 /// What a backend can execute.
 ///
 /// A backend reports these once at construction; plans validate against them
@@ -237,6 +239,135 @@ impl fmt::Display for Support {
             Support::Partial { reason } => write!(f, "partial ({reason})"),
             Support::Unsupported { reason } => write!(f, "unsupported ({reason})"),
         }
+    }
+}
+
+/// Which engine a plan segment runs on.
+///
+/// A plan fixes the provider per segment at build time, from a
+/// [`SegmentProvider`]'s answer. This is plan data, not a runtime `match`: the
+/// forward walks the plan and calls the engine the plan already chose.
+///
+/// [`SegmentEngine::Scalar`] always exists. [`SegmentEngine::OneDnn`] is only
+/// produced when the `cpu-onednn` feature is compiled in; a plan that names it
+/// in a build without that feature is rejected by the session, never silently
+/// executed by the other engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub enum SegmentEngine {
+    /// The portable scalar kernels in [`crate::inference::runtime::kernels`]
+    /// (and, for the forty legacy ids, `backend::cpu::kernels`).
+    #[default]
+    Scalar,
+    /// The optional oneDNN CPU engine (`cpu-onednn`).
+    OneDnn,
+}
+
+impl SegmentEngine {
+    /// Stable lowercase name used in diagnostics and plan reports.
+    pub const fn name(self) -> &'static str {
+        match self {
+            SegmentEngine::Scalar => "scalar",
+            SegmentEngine::OneDnn => "onednn",
+        }
+    }
+}
+
+impl fmt::Display for SegmentEngine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// One concrete operand of a candidate segment: extents, element type and
+/// whether its bytes exist before the first forward.
+///
+/// Shapes rather than tensors, because the planner runs before an arena
+/// exists. A provider answers from these values and the op's [`OpParams`]
+/// alone, so its claim is reproducible from the plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentOperand {
+    /// Fully static extents, outermost first.
+    pub shape: Shape,
+    /// Element type.
+    pub dtype: DType,
+    /// `true` when the slot is read-only model data (an initializer or a
+    /// folded `Constant`), i.e. its bytes exist at plan time and never change.
+    ///
+    /// A provider that prepacks an operand once, before the first forward,
+    /// must require this: an operand produced by an earlier segment has no
+    /// bytes yet and would be silently preprocessed as zeros.
+    pub constant: bool,
+}
+
+/// A provider's answer about one candidate segment.
+///
+/// The planner offers every segment to the provider once, before any memory is
+/// allocated or any primitive is created. The three answers are deliberately
+/// distinct: an op a provider never implements is not a *fallback*, it is
+/// simply outside the provider's vocabulary, and reporting every elementwise
+/// node as a fallback would drown the declaration-vs-shape distinction the
+/// report exists for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Claim {
+    /// The provider will execute exactly this segment.
+    Accepted,
+    /// The op is outside this provider's vocabulary. The planner assigns the
+    /// scalar engine and records nothing.
+    NotMine,
+    /// The op is one this provider implements, but this concrete segment is
+    /// outside its subset (rank, dtype, padding mode, a dynamic operand, ...).
+    ///
+    /// The reason is recorded in
+    /// [`crate::inference::runtime::Plan::fallbacks`], and the segment runs on
+    /// the scalar kernels.
+    Declined(String),
+}
+
+/// A provider's answer about one candidate segment.
+///
+/// Implementations must be pure: the same segment asked twice must get the same
+/// answer, and a claim must not depend on feature tests or process state.
+pub trait SegmentProvider: fmt::Debug {
+    /// The engine this provider claims segments for.
+    fn engine(&self) -> SegmentEngine;
+
+    /// Whether this provider can execute `op` with these concrete operands and
+    /// attributes.
+    ///
+    /// `inputs` and `outputs` are in the op's operand order and carry the
+    /// plan's static shapes. A [`Claim::Declined`] must name the property that
+    /// disqualified the segment (rank, dtype, `ceil_mode`, ...), because that
+    /// string is the plan's fallback report.
+    fn claim(
+        &self,
+        op: OpId,
+        inputs: &[SegmentOperand],
+        outputs: &[SegmentOperand],
+        params: &OpParams,
+    ) -> Claim;
+}
+
+/// The provider that claims nothing and leaves every segment scalar.
+///
+/// A plan built with this provider is exactly the plan the v3 runtime shipped
+/// before the oneDNN engine existed: all segments [`SegmentEngine::Scalar`],
+/// no fallbacks, no optional library linked.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScalarOnly;
+
+impl SegmentProvider for ScalarOnly {
+    fn engine(&self) -> SegmentEngine {
+        SegmentEngine::Scalar
+    }
+
+    fn claim(
+        &self,
+        _op: OpId,
+        _inputs: &[SegmentOperand],
+        _outputs: &[SegmentOperand],
+        _params: &OpParams,
+    ) -> Claim {
+        Claim::Accepted
     }
 }
 

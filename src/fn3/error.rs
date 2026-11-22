@@ -266,6 +266,24 @@ pub enum Fn3Error {
         /// Owning issue (`"FN3-07 (#53)"`).
         owner: &'static str,
     },
+    /// A provider (a compute-library-backed engine) reported a failure.
+    ///
+    /// The optional oneDNN CPU engine maps every non-success `dnnl_status_t`
+    /// here instead of unwrapping or ignoring it. `call` names the C entry
+    /// point, `status` is the library's own code (`0` for a failure that did
+    /// not come from a status return), and `detail` says what the engine was
+    /// doing. A provider failure is never retried on another engine behind the
+    /// caller's back: the plan chose the engine, so the error names it.
+    ProviderFailure {
+        /// Provider name (`"oneDNN"`).
+        provider: &'static str,
+        /// The library entry point that failed.
+        call: &'static str,
+        /// The library's status code, or zero when it was not a status.
+        status: i32,
+        /// What the engine was doing, including the segment or shape.
+        detail: String,
+    },
 }
 
 impl Fn3Error {
@@ -487,6 +505,15 @@ impl fmt::Display for Fn3Error {
             Fn3Error::NotImplemented { what, owner } => write!(
                 f,
                 "{what} is not implemented in FastNN 3.0 (owner: {owner})"
+            ),
+            Fn3Error::ProviderFailure {
+                provider,
+                call,
+                status,
+                detail,
+            } => write!(
+                f,
+                "{provider} provider failure in {call} (status {status}): {detail}"
             ),
         }
     }

@@ -55,6 +55,13 @@ use crate::inference::ops::OpId;
 use crate::inference::tensor::{TensorMut, TensorView};
 
 pub(crate) mod kernels;
+/// The optional oneDNN engine (`cpu-onednn`).
+///
+/// Kept out of the default build: it links a CMake-built static C++ archive
+/// and provides an alternative engine for a subset of the CNN ops, never a
+/// replacement for the scalar reference.
+#[cfg(feature = "cpu-onednn")]
+pub(crate) mod onednn;
 pub(crate) mod parallel;
 pub mod quant;
 pub(crate) mod simd;

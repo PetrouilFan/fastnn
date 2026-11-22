@@ -9,6 +9,7 @@ alone.
 Usage:
 
     python tools/parity/ort_reference.py MODEL.onnx OUTPUT_DIR
+    python tools/parity/ort_reference.py MODEL.onnx --time --threads 8
 
 Files written into OUTPUT_DIR:
 
@@ -23,9 +24,15 @@ ONNX Runtime build produce byte-identical files. Inputs whose dtype is not
 float32 are rejected: the v3 CNN path computes in f32 and the test asserts
 against f32 operands.
 
-Exit code 0 means the dump was written; anything else is an error with a
-message on stderr. ONNX Runtime's own logging is silenced to WARNING so a CI log
-stays readable.
+With `--time` the script measures instead of dumping: it opens the model with
+`SessionOptions.intra_op_num_threads = --threads`, warms `--warmup` forwards,
+times `--iterations` more, and prints one JSON line with the engine, the thread
+count, median/p95 milliseconds and the process's peak RSS. One process per
+configuration is the point: `ru_maxrss` is then that configuration's number.
+
+Exit code 0 means the dump was written (or the measurement ran); anything else
+is an error with a message on stderr. ONNX Runtime's own logging is silenced to
+WARNING so a CI log stays readable.
 """
 
 from __future__ import annotations
@@ -33,7 +40,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import platform
+import resource
+import statistics
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -77,15 +88,108 @@ def describe(values: list) -> list[dict]:
     ]
 
 
+def machine() -> str:
+    model = platform.processor() or "unknown CPU"
+    try:
+        for line in Path("/proc/cpuinfo").read_text().splitlines():
+            if line.startswith("model name"):
+                model = line.split(":", 1)[1].strip()
+                break
+    except OSError:
+        pass
+    return model
+
+
+def peak_rss_mib() -> float:
+    # Linux reports KiB; macOS reports bytes.
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return rss / 1024.0 if sys.platform != "darwin" else rss / (1024.0 * 1024.0)
+
+
+def time_mode(model: Path, threads: int, warmup: int, iterations: int) -> int:
+    graph = onnx.load(str(model)).graph
+    rng = np.random.default_rng(0)
+    feeds: dict[str, np.ndarray] = {}
+    for value_info in graph.input:
+        if any(initializer.name == value_info.name for initializer in graph.initializer):
+            continue
+        feeds[value_info.name] = rng.standard_normal(
+            size=tensor_shape(value_info), dtype=np.float64
+        ).astype(np.float32)
+    if not feeds:
+        raise SystemExit("the model declares no feedable inputs")
+
+    options = ort.SessionOptions()
+    options.log_severity_level = 2  # WARNING
+    options.intra_op_num_threads = threads
+    options.inter_op_num_threads = 1
+    session = ort.InferenceSession(
+        str(model), sess_options=options, providers=["CPUExecutionProvider"]
+    )
+    output_names = [output.name for output in session.get_outputs()]
+    for _ in range(warmup):
+        session.run(output_names, feeds)
+    samples: list[float] = []
+    for _ in range(iterations):
+        start = time.perf_counter()
+        session.run(output_names, feeds)
+        samples.append((time.perf_counter() - start) * 1000.0)
+    samples.sort()
+    median = statistics.median(samples)
+    p95 = samples[max(0, min(len(samples) - 1, int(np.ceil(0.95 * len(samples))) - 1))]
+    print(
+        json.dumps(
+            {
+                "engine": "ort",
+                "machine": machine(),
+                "threads": threads,
+                "median_ms": round(median, 2),
+                "p95_ms": round(p95, 2),
+                "min_ms": round(samples[0], 2),
+                "max_ms": round(samples[-1], 2),
+                "iterations": iterations,
+                "peak_rss_mib": round(peak_rss_mib(), 1),
+                "onnxruntime": ort.__version__,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model", type=Path, help="self-contained .onnx model")
-    parser.add_argument("output_dir", type=Path, help="directory to write the dump into")
+    parser.add_argument(
+        "output_dir",
+        type=Path,
+        nargs="?",
+        help="directory to write the dump into (omitted with --time)",
+    )
+    parser.add_argument(
+        "--time",
+        action="store_true",
+        help="measure instead of dumping: warm forwards, then median/p95 latency",
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=8,
+        help="SessionOptions.intra_op_num_threads for --time (default 8)",
+    )
+    parser.add_argument("--warmup", type=int, default=3, help="warm-up forwards (default 3)")
+    parser.add_argument(
+        "--iterations", type=int, default=30, help="timed forwards (default 30)"
+    )
     args = parser.parse_args(argv)
 
     if not args.model.is_file():
         print(f"model not found: {args.model}", file=sys.stderr)
         return 2
+    if args.time:
+        return time_mode(args.model, args.threads, args.warmup, args.iterations)
+    if args.output_dir is None:
+        parser.error("OUTPUT_DIR is required unless --time is given")
 
     graph = onnx.load(str(args.model)).graph
     inputs: list[tuple[object, np.ndarray]] = []
