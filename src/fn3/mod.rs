@@ -15,6 +15,7 @@
 //! device.rs       DeviceId, DeviceRequest, resolution (no silent fallback)
 //! storage.rs      AlignedBuffer (64-byte), Arc-shared Storage
 //! tensor.rs       TensorMeta, TensorView, TensorMut, Tensor
+//! ir/             typed graph: DimExpr, TensorType, SourceLoc, Graph
 //! ops/            OpId registry with stable discriminants
 //! backend/        Backend trait, Capabilities, Support; backend/cpu/ reference
 //! model/          ExecutionPlan, ModelWeights, PreparedModel, Session
@@ -59,6 +60,7 @@ pub(crate) mod digest;
 pub mod dtype;
 pub mod error;
 pub mod import;
+pub mod ir;
 pub mod model;
 pub mod ops;
 pub mod quant;

@@ -516,4 +516,3 @@ fn dequantize_into_requires_the_exact_buffer_length() {
         other => panic!("expected OutputTooSmall, got {other:?}"),
     }
 }
-
