@@ -1832,9 +1832,56 @@ pub type PreparedWeightKey = (usize, usize);
 /// loop falls back to the standard arena read.  Populate it via
 /// [`PersistentPreparedWeights::insert`] before calling
 /// [`GraphExecutor::execute_prepared_no_copy`](crate::backend::executor::GraphExecutor::execute_prepared_no_copy).
+/// One immutable f32 payload a persistent view can serve.
+///
+/// An fp32 constant registered in a [`PreparedConstantArena`] normally *shares*
+/// the immutable `WriteConst` bytes (`PackedWeightStore::SharedFp32Bytes`), so
+/// copying it into the view duplicated every weight in the model. The shared
+/// arm keeps that zero-copy and only the genuinely owned arm allocates.
+#[derive(Clone, Debug)]
+pub(crate) enum Fp32Payload {
+    /// A payload that already owned its storage.
+    Owned(Arc<Vec<f32>>),
+    /// A slice of an immutable byte buffer, validated as f32-aligned and
+    /// exactly `byte_len` long when it was registered.
+    SharedBytes {
+        /// Backing bytes, shared with the graph's constant.
+        data: Arc<[u8]>,
+        /// Byte offset of this tensor inside `data`.
+        offset: usize,
+        /// Length of this tensor in bytes.
+        byte_len: usize,
+    },
+}
+
+impl Fp32Payload {
+    /// Number of `f32` values this payload exposes.
+    ///
+    /// Only the view's own iteration test needs a length; `as_slice().len()`
+    /// is what every other caller writes.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    pub(crate) fn as_slice(&self) -> &[f32] {
+        match self {
+            Fp32Payload::Owned(values) => values.as_slice(),
+            Fp32Payload::SharedBytes {
+                data,
+                offset,
+                byte_len,
+            } => {
+                let bytes = &data[*offset..*offset + *byte_len];
+                bytemuck::cast_slice(bytes)
+            }
+        }
+    }
+}
+
 #[derive(Default, Debug)]
 pub struct PersistentPreparedWeights {
-    by_key: HashMap<PreparedWeightKey, Arc<Vec<f32>>>,
+    by_key: HashMap<PreparedWeightKey, Fp32Payload>,
     /// Raw byte payloads for quantized weight slots.
     by_key_u8: HashMap<PreparedWeightKey, Arc<Vec<u8>>>,
     prepared_plan_identity: u64,
@@ -1865,7 +1912,43 @@ impl PersistentPreparedWeights {
         {
             return false;
         }
-        self.by_key.insert(key, payload);
+        self.by_key.insert(key, Fp32Payload::Owned(payload));
+        true
+    }
+
+    /// Register a payload that points into an immutable byte buffer instead of
+    /// owning a copy.
+    ///
+    /// Returns `false` when the range is not f32-aligned, does not match the
+    /// slot's byte length, or the key is already present — the same contract as
+    /// [`Self::insert`]. The caller is expected to have taken the bytes from a
+    /// [`PackedWeightStore::SharedFp32Bytes`] entry, which validates alignment
+    /// when the arena is built.
+    pub fn insert_shared(
+        &mut self,
+        key: PreparedWeightKey,
+        data: Arc<[u8]>,
+        offset: usize,
+        byte_len: usize,
+    ) -> bool {
+        let fits = offset
+            .checked_add(byte_len)
+            .is_some_and(|end| end <= data.len());
+        if !key.0.is_multiple_of(std::mem::align_of::<f32>())
+            || byte_len != key.1
+            || !fits
+            || self.by_key.contains_key(&key)
+        {
+            return false;
+        }
+        self.by_key.insert(
+            key,
+            Fp32Payload::SharedBytes {
+                data,
+                offset,
+                byte_len,
+            },
+        );
         true
     }
 
@@ -1873,7 +1956,7 @@ impl PersistentPreparedWeights {
     /// Returns `None` when no override is registered — the
     /// dispatch loop falls back to the standard arena read.
     pub fn get(&self, key: &PreparedWeightKey) -> Option<&[f32]> {
-        self.by_key.get(key).map(|arc| arc.as_slice())
+        self.by_key.get(key).map(|payload| payload.as_slice())
     }
 
     /// Keep only the entries whose slot still names the weight.
@@ -1923,7 +2006,8 @@ impl PersistentPreparedWeights {
     /// Iterate over all `(key, payload)` pairs in registration order
     /// (insertion order is preserved by the underlying `HashMap` only
     /// when not removed; callers must not depend on order).
-    pub fn iter(&self) -> impl Iterator<Item = (&PreparedWeightKey, &Arc<Vec<f32>>)> {
+    #[cfg(test)]
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&PreparedWeightKey, &Fp32Payload)> {
         self.by_key.iter()
     }
 }
@@ -2005,16 +2089,32 @@ fn register_fp32_slot(
     if id.kind != PackedWeightKind::Fp32 {
         return;
     }
-    let Some(payload) = arena.get(id) else {
+    let Some(entry) = arena.entry(id) else {
         return;
     };
-    let expected_bytes = slot.size;
-    let actual_bytes = std::mem::size_of_val(payload);
-    if expected_bytes != actual_bytes {
+    if entry.byte_len != slot.size {
         return;
     }
     let key = (slot.offset, slot.size);
-    view.insert(key, Arc::new(payload.to_vec()));
+    // An ordinary fp32 weight shares the immutable `WriteConst` bytes, so the
+    // view can point at them: copying each one here duplicated every weight of
+    // the model for as long as the plan lives.
+    match &entry.store {
+        PackedWeightStore::SharedFp32Bytes {
+            data,
+            offset,
+            byte_len,
+        } => {
+            view.insert_shared(key, Arc::clone(data), *offset, *byte_len);
+        }
+        PackedWeightStore::Unpacked(values) => {
+            view.insert(key, Arc::new(values.to_vec()));
+        }
+        PackedWeightStore::TransposedFp32 { data, .. } => {
+            view.insert(key, Arc::new(data.to_vec()));
+        }
+        _ => {}
+    }
 }
 
 fn register_quantized_slot(
@@ -2052,6 +2152,69 @@ fn register_quantized_slot(
 mod tests {
     use super::*;
     use crate::backend::{BufferSlice, Instruction};
+
+    #[test]
+    fn a_shared_fp32_slot_points_at_the_arena_bytes_instead_of_copying_them() {
+        // The plan owns the weight bytes; the view is only an index into them.
+        // Copying each payload here used to duplicate every fp32 weight of the
+        // model for as long as the plan lived.
+        let values: Vec<f32> = (0..8).map(|index| index as f32 * 0.5).collect();
+        let byte_len = values.len() * 4;
+        let bytes: Arc<[u8]> = Arc::from(
+            bytemuck::cast_slice::<f32, u8>(&values)
+                .to_vec()
+                .into_boxed_slice(),
+        );
+        let mut arena = PreparedConstantArena::default();
+        let id = arena.insert_store(
+            "wte",
+            PackedWeightKind::Fp32,
+            values.len(),
+            byte_len,
+            PackedWeightStore::SharedFp32Bytes {
+                data: Arc::clone(&bytes),
+                offset: 0,
+                byte_len,
+            },
+        );
+        let mut view = PersistentPreparedWeights::new();
+        register_fp32_slot(&mut view, &arena, Some(id), BufferSlice::new(64, byte_len));
+
+        let payload = view.get(&(64, byte_len)).expect("the slot is registered");
+        assert_eq!(payload, values.as_slice());
+        assert_eq!(
+            payload.as_ptr() as usize,
+            bytes.as_ptr() as usize,
+            "a shared weight must be read from the arena, not copied"
+        );
+
+        // A range the arena cannot describe is not registered at all, rather
+        // than registered with the wrong bytes.
+        let mut misaligned = PreparedConstantArena::default();
+        let other: Arc<[u8]> = Arc::clone(&bytes);
+        let id = misaligned.insert_store(
+            "wte",
+            PackedWeightKind::Fp32,
+            values.len(),
+            byte_len,
+            PackedWeightStore::SharedFp32Bytes {
+                data: other,
+                offset: 2,
+                byte_len,
+            },
+        );
+        let mut view = PersistentPreparedWeights::new();
+        register_fp32_slot(
+            &mut view,
+            &misaligned,
+            Some(id),
+            BufferSlice::new(64, byte_len),
+        );
+        assert!(
+            view.get(&(64, byte_len)).is_none(),
+            "a misaligned shared range must not be handed out as f32"
+        );
+    }
 
     #[test]
     fn persistent_weight_view_is_bound_to_its_prepared_plan() {
