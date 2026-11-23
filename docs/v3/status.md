@@ -50,8 +50,11 @@ tail op, and the small layers (10x10, 20x20) cannot fill eight workers. `docs/v3
 (one pool region per forward: no change; graph-level scheduling: 1.59x ceiling
 on this graph). Staging is now pooled per worker (#115): `staging_bytes` at
 eight workers fell from 14,110,720 B to 2,048,000 B and CLI peak RSS at eight
-workers from ~106 MB to ~94 MB, with median wall time unchanged within noise
-(measured A/B, three runs each; see `docs/v3/backends.md`).
+workers from ~106 MB to ~94 MB. A follow-up pools the oneDNN scratchpads the
+same way (391-672 blocks owned 27-29 MB; the pool is 3.7 MB at eight workers),
+which takes the same measurement to **76.5 MB** at eight, 75.0 MB at four and
+52.4 MB at one, with median wall time unchanged within noise (measured A/B,
+three runs each; see `docs/v3/backends.md`).
 
 ### Without the Python binding
 
@@ -188,10 +191,12 @@ immutable, and every `session()` owns its own arena and thread pool.
    `runtime/kernels` and `backend/vulkan` still call) and the `Backend`
    trait/`CpuBackend` exports; no session uses the legacy `Session`/`Plan`
    types because they no longer exist.
-3. ~~#115 peak RSS~~ (done): row staging is a session-wide pool of one slot per
-   worker instead of one buffer per block. `staging_bytes` at eight workers:
-   14,110,720 B → 2,048,000 B; CLI peak RSS: ~106 MB → ~94 MB at eight, ~97 MB
-   → ~85 MB at four, with no wall-time change outside host noise.
+3. ~~#115 peak RSS~~ (done): row staging and oneDNN scratchpads are session-wide
+   pools of one slot per worker instead of one buffer per block.
+   `staging_bytes` at eight workers: 14,110,720 B → 2,048,000 B; the scratchpad
+   pool replaces 27.3 MB with 3.7 MB. CLI peak RSS on yolov8n: ~106 MB → 76.5
+   MB at eight, ~97 MB → 75.0 MB at four, ~59 MB → 52.4 MB at one, with no
+   wall-time change outside host noise.
 4. **Phase 5 W8A8** (#103): the gate refuses it with a measured reason on this
    AVX2 host (oneDNN's int8 conv is its reference kernel, 848x slower than
    f32). Real W8A8 needs VNNI/AMX hardware and a calibration path; the

@@ -97,12 +97,15 @@
 //!
 //! # Scratchpads
 //!
-//! Primitives are created with `dnnl_scratchpad_mode_user`, and every block
-//! owns one scratchpad buffer. oneDNN's default library scratchpad is shared
-//! per primitive and, with `DNNL_ENABLE_CONCURRENT_EXEC=OFF`, tied to the
-//! creating thread; a block executes on whichever worker the pool assigns, so
-//! the engine supplies the scratchpad instead. Different blocks use different
-//! buffers, which is the documented condition for executing them concurrently.
+//! Primitives are created with `dnnl_scratchpad_mode_user`. oneDNN's default
+//! library scratchpad is shared per primitive and, with
+//! `DNNL_ENABLE_CONCURRENT_EXEC=OFF`, tied to the creating thread; a block
+//! executes on whichever worker the pool assigns, so the engine supplies the
+//! scratchpad instead. The buffers are session-wide: one slot per worker, each
+//! the size of the largest scratchpad any block needs, instead of one buffer
+//! per block (which cost 27-29 MB on the YOLO graphs). Different concurrent
+//! blocks still use different slots, the documented condition for executing
+//! them concurrently.
 
 pub(crate) mod ffi;
 pub(crate) mod geometry;
@@ -484,8 +487,9 @@ struct Block {
     weights: Option<Arc<AlignedBuffer>>,
     /// The block's bias slice, when the op has a constant bias.
     bias: Option<AlignedBuffer>,
-    /// The user-managed scratchpad, when the primitive needs one.
-    scratchpad: Option<AlignedBuffer>,
+    /// Bytes of user-managed scratchpad the primitive needs; zero when it
+    /// needs none. The buffer itself is leased from the session-wide pool.
+    scratchpad_bytes: usize,
     /// Dense source/destination staging for a row block. `None` otherwise.
     staging: Option<RowStaging>,
     /// The fused activation, applied by the engine after the primitive.
@@ -630,6 +634,9 @@ struct StagingSlot {
     source: Option<AlignedBuffer>,
     /// Dense NCHW output rows; `None` when every destination is blocked.
     destination: Option<AlignedBuffer>,
+    /// User scratchpad for the block running on this slot; `None` when no
+    /// prepared block needs one.
+    scratchpad: Option<AlignedBuffer>,
 }
 
 /// One leased staging slot, returned to the pool on drop.
@@ -656,8 +663,13 @@ impl Drop for StagingLease<'_> {
 }
 
 impl StagingPool {
-    fn new(slots: usize, source_bytes: usize, destination_bytes: usize) -> Result<Self, Fn3Error> {
-        assert!(slots > 0, "a pool with no slot cannot serve a staged block");
+    fn new(
+        slots: usize,
+        source_bytes: usize,
+        destination_bytes: usize,
+        scratchpad_bytes: usize,
+    ) -> Result<Self, Fn3Error> {
+        assert!(slots > 0, "a pool with no slot cannot serve a block");
         let mut buffers = Vec::with_capacity(slots);
         for _ in 0..slots {
             let source = if source_bytes == 0 {
@@ -670,9 +682,15 @@ impl StagingPool {
             } else {
                 Some(AlignedBuffer::zeroed(destination_bytes)?)
             };
+            let scratchpad = if scratchpad_bytes == 0 {
+                None
+            } else {
+                Some(AlignedBuffer::zeroed(scratchpad_bytes)?)
+            };
             buffers.push(StagingSlot {
                 source,
                 destination,
+                scratchpad,
             });
         }
         Ok(StagingPool {
@@ -692,13 +710,20 @@ impl StagingPool {
         StagingLease { pool: self, index }
     }
 
-    fn bytes(&self) -> usize {
+    fn staging_bytes(&self) -> usize {
         self.slots
             .iter()
             .map(|slot| {
                 slot.source.as_ref().map_or(0, AlignedBuffer::len)
                     + slot.destination.as_ref().map_or(0, AlignedBuffer::len)
             })
+            .sum()
+    }
+
+    fn scratchpad_bytes(&self) -> usize {
+        self.slots
+            .iter()
+            .map(|slot| slot.scratchpad.as_ref().map_or(0, AlignedBuffer::len))
             .sum()
     }
 }
@@ -810,16 +835,18 @@ impl Block {
         outputs: &[usize],
         pool: Option<&StagingPool>,
     ) -> Result<(), Fn3Error> {
-        // One slot per concurrently running staged block: a lease held for the
-        // whole call, returned when the block finishes (including on error).
-        let lease = match (&self.staging, pool) {
-            (Some(_), Some(pool)) => Some(pool.acquire()),
-            (Some(_), None) => {
+        // One slot per concurrently running block: a lease held for the whole
+        // call, returned when the block finishes (including on error). A block
+        // leases one when it needs staging rows, a scratchpad, or both.
+        let needs_buffers = self.staging.is_some() || self.scratchpad_bytes > 0;
+        let lease = match (needs_buffers, pool) {
+            (false, _) => None,
+            (true, Some(pool)) => Some(pool.acquire()),
+            (true, None) => {
                 return Err(segment_error(
-                    "a row-split block has no staging pool".to_string(),
+                    "a block needs session buffers but has no pool".to_string(),
                 ))
             }
-            (None, _) => None,
         };
         let slot = lease.as_ref().map(StagingLease::slot);
         if let (Some(staging), Some(slot)) = (&self.staging, slot) {
@@ -850,7 +877,21 @@ impl Block {
                     })?,
                 ArgSource::Weights => buffer_address(self.weights.as_deref())?,
                 ArgSource::Bias => buffer_address(self.bias.as_ref())?,
-                ArgSource::Scratchpad => buffer_address(self.scratchpad.as_ref())?,
+                ArgSource::Scratchpad => {
+                    let scratchpad =
+                        slot.and_then(|slot| slot.scratchpad.as_ref())
+                            .ok_or_else(|| {
+                                segment_error("a block has no scratchpad slot".to_string())
+                            })?;
+                    if scratchpad.len() < self.scratchpad_bytes {
+                        return Err(segment_error(format!(
+                            "scratchpad slot is {} B but the primitive needs {} B",
+                            scratchpad.len(),
+                            self.scratchpad_bytes
+                        )));
+                    }
+                    scratchpad.as_ptr() as usize
+                }
                 ArgSource::BlockedSource(offset) => buffer_address(self.blocked_source.as_deref())?
                     .checked_add(offset)
                     .ok_or_else(|| segment_error("a blocked source offset overflowed".into()))?,
@@ -1121,6 +1162,8 @@ pub(crate) struct OneDnnEngine {
     prepacked_bytes: usize,
     /// Bytes of dense source/destination staging owned by row blocks.
     staging_bytes: usize,
+    /// Bytes of user scratchpad pooled across blocks.
+    scratchpad_bytes: usize,
     /// Prepared segments per kind, for the session report.
     conv_segments: usize,
     pool_segments: usize,
@@ -1189,6 +1232,7 @@ impl OneDnnEngine {
             prepared: (0..segments).map(|_| None).collect(),
             prepacked_bytes: 0,
             staging_bytes: 0,
+            scratchpad_bytes: 0,
             conv_segments: 0,
             pool_segments: 0,
             matmul_segments: 0,
@@ -1215,6 +1259,11 @@ impl OneDnnEngine {
     /// Bytes of dense staging owned by row blocks.
     pub(crate) fn staging_bytes(&self) -> usize {
         self.staging_bytes
+    }
+
+    /// Bytes of user scratchpad pooled across blocks.
+    pub(crate) fn scratchpad_bytes(&self) -> usize {
+        self.scratchpad_bytes
     }
 
     /// Prepared segments by kind: `(conv, pool, matmul)`.
@@ -1345,38 +1394,49 @@ impl OneDnnEngine {
         self.prepared.get(index).and_then(Option::as_ref)
     }
 
-    /// Build the shared staging pool once every segment is prepared.
+    /// Build the shared session buffers once every segment is prepared.
     ///
     /// The pool has one slot per worker, and never more than the largest
-    /// number of staged blocks in one segment (segments execute one at a
-    /// time). Each slot is as large as the largest staged block, so staging
-    /// memory is O(workers x block) rather than O(blocks) — the #115 fix.
-    pub(crate) fn finish_staging(&mut self, workers: usize) -> Result<(), Fn3Error> {
+    /// block count in one segment (segments execute one at a time). Each slot
+    /// holds the largest staged source/destination rows and the largest
+    /// scratchpad any block needs, so this memory is O(workers x block) rather
+    /// than O(blocks): 391-672 blocks owned 27-29 MB of scratchpad on the YOLO
+    /// graphs before this pool existed (#115 follow-up).
+    pub(crate) fn finish_buffers(&mut self, workers: usize) -> Result<(), Fn3Error> {
         let mut max_blocks = 0usize;
         let mut max_source = 0usize;
         let mut max_destination = 0usize;
+        let mut max_scratchpad = 0usize;
         for prepared in self.prepared.iter().flatten() {
-            let mut count = 0usize;
-            for staging in prepared
-                .blocks
-                .iter()
-                .filter_map(|block| block.staging.as_ref())
-            {
-                count += 1;
-                max_source = max_source.max(staging.source_bytes);
-                max_destination = max_destination.max(staging.destination_bytes);
+            max_blocks = max_blocks.max(prepared.blocks.len());
+            for block in &prepared.blocks {
+                if let Some(staging) = block.staging.as_ref() {
+                    max_source = max_source.max(staging.source_bytes);
+                    max_destination = max_destination.max(staging.destination_bytes);
+                }
+                max_scratchpad = max_scratchpad.max(block.scratchpad_bytes);
             }
-            max_blocks = max_blocks.max(count);
         }
-        if max_blocks == 0 {
+        if max_blocks == 0 || (max_source == 0 && max_destination == 0 && max_scratchpad == 0) {
             self.staging_bytes = 0;
+            self.scratchpad_bytes = 0;
             return Ok(());
         }
         let slots = workers.max(1).min(max_blocks);
-        let pool = Arc::new(StagingPool::new(slots, max_source, max_destination)?);
-        self.staging_bytes = pool.bytes();
+        let pool = Arc::new(StagingPool::new(
+            slots,
+            max_source,
+            max_destination,
+            max_scratchpad,
+        )?);
+        self.staging_bytes = pool.staging_bytes();
+        self.scratchpad_bytes = pool.scratchpad_bytes();
         for prepared in self.prepared.iter_mut().flatten() {
-            if prepared.blocks.iter().any(|block| block.staging.is_some()) {
+            if prepared
+                .blocks
+                .iter()
+                .any(|block| block.staging.is_some() || block.scratchpad_bytes > 0)
+            {
                 prepared.staging_pool = Some(Arc::clone(&pool));
             }
         }
@@ -2040,7 +2100,7 @@ impl OneDnnEngine {
                 sources,
                 weights: Some(prepacked),
                 bias: bias_buffer,
-                scratchpad: scratchpad.map(|(_, buffer)| buffer),
+                scratchpad_bytes: scratchpad.map(|(_, bytes)| bytes).unwrap_or(0),
                 staging,
                 epilogue,
                 blocked_source: blocked_source.clone(),
@@ -2180,7 +2240,7 @@ impl OneDnnEngine {
                 sources,
                 weights: None,
                 bias: None,
-                scratchpad: scratchpad.map(|(_, buffer)| buffer),
+                scratchpad_bytes: scratchpad.map(|(_, bytes)| bytes).unwrap_or(0),
                 staging: None,
                 epilogue: None,
                 blocked_source: None,
@@ -2316,7 +2376,7 @@ impl OneDnnEngine {
                 sources,
                 weights: Some(Arc::new(prepacked)),
                 bias: None,
-                scratchpad: scratchpad.map(|(_, buffer)| buffer),
+                scratchpad_bytes: scratchpad.map(|(_, bytes)| bytes).unwrap_or(0),
                 staging: None,
                 epilogue: None,
                 blocked_source: None,
@@ -2406,12 +2466,17 @@ fn eltwise(activation: Activation) -> (i32, f32, f32) {
     }
 }
 
-/// The scratchpad descriptor and its buffer, when the primitive needs one.
-fn prepare_scratchpad(pd: &PrimitiveDescHandle) -> Result<Option<(Desc, AlignedBuffer)>, Fn3Error> {
+/// The scratchpad descriptor and its byte size, when the primitive needs one.
+///
+/// The buffer is not allocated here: the engine pools one slot per worker and
+/// leases it at run time, because a per-block buffer cost 27-29 MB on the YOLO
+/// graphs (391-672 blocks) and the blocks of one segment run at most
+/// `workers`-at-a-time.
+fn prepare_scratchpad(pd: &PrimitiveDescHandle) -> Result<Option<(Desc, usize)>, Fn3Error> {
     match pd.scratchpad()? {
         Some(desc) => {
-            let buffer = AlignedBuffer::zeroed(desc.size())?;
-            Ok(Some((desc, buffer)))
+            let bytes = desc.size();
+            Ok(Some((desc, bytes)))
         }
         None => Ok(None),
     }
@@ -2450,8 +2515,8 @@ mod tests {
 
     #[test]
     fn the_staging_pool_reuses_a_slot_after_the_block_finishes() {
-        let pool = StagingPool::new(2, 128, 64).unwrap();
-        assert_eq!(pool.bytes(), 2 * (128 + 64));
+        let pool = StagingPool::new(2, 128, 64, 0).unwrap();
+        assert_eq!(pool.staging_bytes(), 2 * (128 + 64));
         let first = pool.acquire();
         let second = pool.acquire();
         // Both slots are leased; the two leases address different buffers.
@@ -2465,14 +2530,36 @@ mod tests {
         assert_eq!(third.index, first_index, "the freed slot is reused");
         drop(second);
         drop(third);
-        assert_eq!(pool.bytes(), 384, "a lease never changes the pool size");
+        assert_eq!(
+            pool.staging_bytes(),
+            384,
+            "a lease never changes the pool size"
+        );
     }
 
     #[test]
     fn a_pool_with_no_destination_only_allocates_sources() {
-        let pool = StagingPool::new(1, 0, 64).unwrap();
+        let pool = StagingPool::new(1, 0, 64, 0).unwrap();
         assert!(pool.slots[0].source.is_none());
-        assert_eq!(pool.bytes(), 64);
+        assert_eq!(pool.staging_bytes(), 64);
+    }
+
+    #[test]
+    fn the_scratchpad_pool_serves_one_slot_per_worker() {
+        let pool = StagingPool::new(2, 0, 0, 4096).unwrap();
+        assert_eq!(pool.staging_bytes(), 0);
+        assert_eq!(pool.scratchpad_bytes(), 2 * 4096);
+        let first = pool.acquire();
+        let second = pool.acquire();
+        assert_ne!(
+            first.slot().scratchpad.as_ref().unwrap().as_ptr(),
+            second.slot().scratchpad.as_ref().unwrap().as_ptr(),
+            "concurrent blocks must not share one scratchpad"
+        );
+        let first_index = first.index;
+        drop(first);
+        let third = pool.acquire();
+        assert_eq!(third.index, first_index, "the freed slot is reused");
     }
 
     #[test]

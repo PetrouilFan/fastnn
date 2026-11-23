@@ -303,17 +303,22 @@ an internal conv-to-conv edge in oneDNN's channels-last layout instead.
 
 `SessionThreads::run_blocks` executes the blocks with the session's own pool
 (`rayon::ThreadPool`, exact count, `fn3-worker-*`). Blocks write disjoint
-destination ranges and each owns its primitive, stream and scratchpad, so they
-are independent. With a non-sequential oneDNN build the same blocks run
+destination ranges and each owns its primitive and stream, so they are
+independent; the scratchpad is leased from the session pool for the call. With a non-sequential oneDNN build the same blocks run
 serially and the library uses its own threads.
 
 **Scratchpads.** Primitives are created with
-`dnnl_scratchpad_mode_user` and each block owns one scratchpad buffer. oneDNN's
-default library scratchpad is shared per primitive and, with
-`DNNL_ENABLE_CONCURRENT_EXEC=OFF` (the default), tied to the thread that created
-the primitive; a block executes on whichever pool worker Rayon assigns, so the
-engine supplies the scratchpad instead. Distinct blocks use distinct buffers,
-which is the documented condition for concurrent execution.
+`dnnl_scratchpad_mode_user`. oneDNN's default library scratchpad is shared per
+primitive and, with `DNNL_ENABLE_CONCURRENT_EXEC=OFF` (the default), tied to the
+thread that created the primitive; a block executes on whichever pool worker
+Rayon assigns, so the engine supplies the scratchpad instead. The buffers are
+**pooled**: one slot per worker, each the size of the largest scratchpad any
+block needs, leased for the duration of one block call. Distinct concurrent
+blocks use distinct slots, the documented condition for concurrent execution.
+Per-block buffers cost 27.3-29.4 MB on the YOLO graphs (391-672 blocks); the
+pool is 8 x 460,928 B = 3.7 MB at eight workers. Measured CLI peak RSS on
+yolov8n: 95.3 MB -> 76.5 MB at eight workers, 85.9 -> 75.0 MB at four, 59.1 ->
+52.4 MB at one (median wall time unchanged within noise).
 
 ## 4.5 Layout policy: channels-last on internal conv edges
 
@@ -483,7 +488,7 @@ weight.
 | clone the descriptor oneDNN chose (`dnnl_memory_desc_clone`) | session open | — |
 | reorder the block's weights into it (or a plain copy if it chose the ONNX layout) | session open | session-owned, per block |
 | copy the constant bias slice | session open | session-owned, per block |
-| allocate the scratchpad | session open | session-owned, per block |
+| allocate the scratchpad pool | session open | one slot per worker, largest block |
 | compile the primitive | session open | session-owned, per block |
 
 The result is `pub(crate) struct OneDnnEngine { prepared: Vec<Option<PreparedSegment>>, .. }`
@@ -514,7 +519,8 @@ immediately before each call the engine installs:
 
 - the executor's live arena windows for source and destination (disjoint by the
   plan, `&[u8]`/`&mut [u8]` held across the call);
-- the block's own prepacked weight, bias and scratchpad buffers.
+- the block's own prepacked weight and bias buffers, and the leased scratchpad
+  slot.
 
 Nothing caches an arena pointer between forwards, so no `&mut` provenance has to
 outlive a later reborrow of the arena. The engine is a session field declared

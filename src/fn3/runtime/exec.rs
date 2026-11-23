@@ -197,6 +197,8 @@ pub struct OneDnnReport {
     pub reordered_blocks: usize,
     /// Bytes of dense source/destination staging owned by row-split blocks.
     pub staging_bytes: usize,
+    /// Bytes of user scratchpad pooled across oneDNN blocks.
+    pub scratchpad_bytes: usize,
     /// `true` when blocks are executed on the session's pool; `false` when a
     /// non-sequential oneDNN build forced serial block execution.
     pub parallel_blocks: bool,
@@ -860,6 +862,7 @@ impl Session {
                 prepacked_bytes: engine.prepacked_bytes(),
                 reordered_blocks: engine.reordered_blocks(),
                 staging_bytes: engine.staging_bytes(),
+                scratchpad_bytes: engine.scratchpad_bytes(),
                 parallel_blocks: engine.blocks_run_in_parallel(),
             })
         }
@@ -1082,7 +1085,7 @@ fn prepare_onednn(
     }
     // One shared staging pool per session, sized after every segment has
     // declared its row blocks (#115).
-    engine.finish_staging(workers)?;
+    engine.finish_buffers(workers)?;
     Ok(Some(engine))
 }
 
