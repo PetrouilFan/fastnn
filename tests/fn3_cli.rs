@@ -208,3 +208,32 @@ fn a_version_one_or_foreign_file_is_refused_with_a_next_step() {
     assert_eq!(code, EXIT_MODEL);
     assert!(err.contains("next:"), "{err}");
 }
+
+/// `prepare --precision w8a8` must refuse with the measured reason and write
+/// nothing. The alternative — an artifact no engine can execute — is the trap
+/// the refusal exists to avoid (#103).
+#[test]
+fn prepare_refuses_w8a8_and_names_the_reason() {
+    let scratch = Scratch::new("w8a8-refusal");
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shape-binding.onnx");
+    assert!(fixture.exists(), "the 107-byte fixture is committed");
+    let out_path = scratch.file("refused.fnn3");
+    let (code, out, err) = invoke(&[
+        "prepare",
+        "--onnx",
+        fixture.to_str().expect("utf-8"),
+        "--out",
+        out_path.to_str().expect("utf-8"),
+        "--precision",
+        "w8a8",
+    ]);
+    assert_eq!(code, EXIT_MODEL, "stdout:\n{out}\nstderr:\n{err}");
+    assert!(err.contains("w8a8"), "{err}");
+    assert!(err.contains("nothing was written"), "{err}");
+    assert!(
+        err.contains("ISA") || err.contains("cpu-onednn"),
+        "the refusal names the target's capability:\n{err}"
+    );
+    assert!(!out_path.exists(), "a refused prepare writes no artifact");
+}

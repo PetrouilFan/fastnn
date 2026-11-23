@@ -755,6 +755,7 @@ Five changes and five negative results produced that:
 | `MIN_BLOCK_ELEMENTS` 2 Ki / 1 Ki, re-tested with the staging pool | 22.4 / 22.7 ms at eight workers against 19.7 at 4 Ki (same artifact, one rebuild per floor): the pool removed the staging cost the old sweep blamed, and the extra blocks still cost more than they fill. 4 Ki stays. |
 | oneDNN Winograd (`dnnl_convolution_winograd`) | primitive creation fails on this AVX2 build; the engine is direct-only and the failure is recorded rather than retried per convolution. |
 | `auto` algorithm (`dnnl_convolution_auto`) | 42.0 ms at one worker (one run) against 44.2 direct in the same session; not adopted, because it hands the accumulation order to a heuristic for a difference inside this host's noise (a later direct run measured 41.4). |
+| oneDNN int8 convolution as the W8A8 execution path | **1332 ms** for a 32x80x80x3x3 convolution against **1.57 ms** in f32 on this AVX2 host: oneDNN has no int8 JIT kernel without VNNI/AMX and serves the reference one. The primitive is correct (a 3x3/2x2 unit test pins the s32 accumulator) but 848x slower, so `prepare --precision w8a8` refuses with the ISA and this measurement instead of writing an artifact no engine could run (#103). |
 
 ### Correctness of these numbers
 

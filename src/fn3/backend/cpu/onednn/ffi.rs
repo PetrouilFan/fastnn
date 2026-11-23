@@ -67,6 +67,22 @@ pub(crate) const STATUS_UNIMPLEMENTED: i32 = 3;
 
 /// `dnnl_f32`.
 pub(crate) const DATA_TYPE_F32: i32 = 3;
+/// `dnnl_s32` (the int8 convolution accumulator).
+#[cfg(test)]
+pub(crate) const DATA_TYPE_S32: i32 = 4;
+/// `dnnl_s8` (signed weights).
+#[cfg(test)]
+pub(crate) const DATA_TYPE_S8: i32 = 5;
+/// `dnnl_u8` (unsigned activations).
+#[cfg(test)]
+pub(crate) const DATA_TYPE_U8: i32 = 6;
+
+/// `dnnl_cpu_isa_avx2`.
+pub(crate) const CPU_ISA_AVX2: i32 = 0x7;
+/// `dnnl_cpu_isa_avx2_vnni`.
+pub(crate) const CPU_ISA_AVX2_VNNI: i32 = 0xf;
+/// `dnnl_cpu_isa_avx512_core_vnni`.
+pub(crate) const CPU_ISA_AVX512_CORE_VNNI: i32 = 0x67;
 
 /// `dnnl_format_tag_any`: let the primitive choose the physical layout.
 pub(crate) const FORMAT_TAG_ANY: i32 = 1;
@@ -331,6 +347,45 @@ extern "C" {
         zero_point: i32,
         data_type: i32,
     ) -> c_int;
+
+    // CPU information. `dnnl_get_effective_cpu_isa` reports the ISA the
+    // library will actually use, which is what decides whether an int8
+    // primitive has a JIT kernel or falls back to the reference one.
+    fn dnnl_get_effective_cpu_isa() -> i32;
+}
+
+/// The ISA oneDNN will execute on.
+pub(crate) fn effective_cpu_isa() -> i32 {
+    // SAFETY: no arguments, no state; oneDNN documents it as a pure query.
+    unsafe { dnnl_get_effective_cpu_isa() }
+}
+
+/// A stable name for the ISA code, for a diagnostic.
+pub(crate) fn cpu_isa_name(isa: i32) -> &'static str {
+    match isa {
+        0x1 => "sse41",
+        0x3 => "avx",
+        CPU_ISA_AVX2 => "avx2",
+        CPU_ISA_AVX2_VNNI => "avx2_vnni",
+        0x1f => "avx2_vnni_2",
+        0x27 => "avx512_core",
+        CPU_ISA_AVX512_CORE_VNNI => "avx512_core_vnni",
+        0xe7 => "avx512_core_bf16",
+        0xfef => "avx512_core_amx",
+        _ => "an ISA this table does not name",
+    }
+}
+
+/// Whether oneDNN has a JIT int8 convolution for this ISA.
+///
+/// The check is an explicit list rather than a numeric comparison: the codes
+/// are a capability encoding, not an ordering (avx512_core is 0x27 but has no
+/// VNNI, avx2_vnni is 0xf and has one).
+pub(crate) fn int8_kernels_available(isa: i32) -> bool {
+    matches!(
+        isa,
+        CPU_ISA_AVX2_VNNI | 0x1f | CPU_ISA_AVX512_CORE_VNNI | 0xe7 | 0xfef | 0x1fef | 0x22fff
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -510,6 +565,11 @@ pub(crate) struct Desc(MemoryDesc);
 impl Desc {
     /// A plain descriptor with `tag`.
     pub(crate) fn with_tag(dims: &[Dim], tag: i32) -> Result<Desc, Fn3Error> {
+        Desc::with_tag_dtype(dims, tag, DATA_TYPE_F32)
+    }
+
+    /// A plain descriptor with `tag` and an explicit element type.
+    pub(crate) fn with_tag_dtype(dims: &[Dim], tag: i32, dtype: i32) -> Result<Desc, Fn3Error> {
         let mut raw: MemoryDesc = std::ptr::null_mut();
         // SAFETY: `dims` is a valid slice of `dims.len()` extents; oneDNN reads
         // exactly `ndims` elements for the duration of the call and copies them
@@ -520,7 +580,7 @@ impl Desc {
                     &mut raw,
                     dims.len() as c_int,
                     dims.as_ptr(),
-                    DATA_TYPE_F32,
+                    dtype,
                     tag,
                 )
             },
@@ -1239,5 +1299,180 @@ pub(crate) fn status_name(status: i32) -> &'static str {
         STATUS_INVALID_ARGUMENTS => "invalid_arguments",
         STATUS_UNIMPLEMENTED => "unimplemented",
         _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inference::AlignedBuffer;
+
+    /// The measurement behind `Precision::W8A8`'s refusal on non-VNNI hosts.
+    ///
+    /// Ignored because it is a benchmark, not a gate: on AVX2 the int8
+    /// primitive is oneDNN's reference kernel and takes ~1.3 s for a
+    /// 32x80x80x3x3 convolution, against 1.6 ms for f32. Run it on a VNNI host
+    /// before enabling int8 execution (issue #103).
+    #[test]
+    #[ignore = "benchmark; measures the int8 fallback"]
+    fn probe_int8_speed() {
+        let engine = EngineHandle::cpu().expect("cpu engine");
+        let stream = StreamHandle::new(&engine).expect("stream");
+        let attr = PrimitiveAttrHandle::library_default().expect("attr");
+        let (n, c, h, w, o, k) = (1i64, 32i64, 80i64, 80i64, 32i64, 3i64);
+        let src_dims = [n, c, h, w];
+        let w_dims = [o, c, k, k];
+        let dst_dims = [n, o, h, w];
+        for (name, sdt, wdt, ddt, sb, wb, db) in [
+            (
+                "f32",
+                DATA_TYPE_F32,
+                DATA_TYPE_F32,
+                DATA_TYPE_F32,
+                4usize,
+                4usize,
+                4usize,
+            ),
+            ("int8", DATA_TYPE_U8, DATA_TYPE_S8, DATA_TYPE_S32, 1, 1, 4),
+        ] {
+            let src = Desc::with_tag_dtype(&src_dims, 5, sdt).unwrap();
+            let weights = Desc::with_tag_dtype(&w_dims, 5, wdt).unwrap();
+            let dst = Desc::with_tag_dtype(&dst_dims, 5, ddt).unwrap();
+            let pd = PrimitiveDescHandle::convolution(
+                &engine,
+                ALG_CONVOLUTION_DIRECT,
+                &src,
+                &weights,
+                None,
+                &dst,
+                &[1, 1],
+                &[0, 0],
+                &[1, 1],
+                &[1, 1],
+                &attr,
+            )
+            .unwrap();
+            let primitive = PrimitiveHandle::new(&pd).unwrap();
+            let src_buffer = AlignedBuffer::zeroed((n * c * h * w) as usize * sb).unwrap();
+            let w_buffer = AlignedBuffer::zeroed((o * c * k * k) as usize * wb).unwrap();
+            let dst_buffer = AlignedBuffer::zeroed((n * o * h * w) as usize * db).unwrap();
+            let src_memory = MemoryHandle::new(&src, &engine).unwrap();
+            let w_memory = MemoryHandle::new(&weights, &engine).unwrap();
+            let d_memory = MemoryHandle::new(&dst, &engine).unwrap();
+            unsafe {
+                src_memory
+                    .set_data_handle(src_buffer.as_ptr() as *mut u8)
+                    .unwrap();
+                w_memory
+                    .set_data_handle(w_buffer.as_ptr() as *mut u8)
+                    .unwrap();
+                d_memory
+                    .set_data_handle(dst_buffer.as_ptr() as *mut u8)
+                    .unwrap();
+            }
+            let args = [
+                ExecArg {
+                    arg: ARG_SRC,
+                    memory: src_memory.raw(),
+                },
+                ExecArg {
+                    arg: ARG_WEIGHTS,
+                    memory: w_memory.raw(),
+                },
+                ExecArg {
+                    arg: ARG_DST,
+                    memory: d_memory.raw(),
+                },
+            ];
+            for _ in 0..3 {
+                primitive.execute(&stream, &args).unwrap();
+                stream.wait().unwrap();
+            }
+            let mut times = Vec::new();
+            for _ in 0..5 {
+                let start = std::time::Instant::now();
+                primitive.execute(&stream, &args).unwrap();
+                stream.wait().unwrap();
+                times.push(start.elapsed().as_secs_f64() * 1e3);
+            }
+            times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            println!(
+                "probe speed {name}: median {:.3} ms, min {:.3}, max {:.3}",
+                times[times.len() / 2],
+                times[0],
+                times[times.len() - 1]
+            );
+        }
+    }
+
+    /// The smoke test that decides whether this build can execute a true int8
+    /// convolution: u8 activations, s8 weights, s32 accumulator. It is the
+    /// narrowest shape (1x1x3x3, 2x2 kernel) so a failure names the primitive,
+    /// not the data.
+    #[test]
+    fn an_int8_convolution_accumulates_in_s32() {
+        let engine = EngineHandle::cpu().expect("cpu engine");
+        let stream = StreamHandle::new(&engine).expect("stream");
+        let attr = PrimitiveAttrHandle::library_default().expect("attr");
+        let src =
+            Desc::with_tag_dtype(&[1, 1, 3, 3], FORMAT_TAG_ABCD, DATA_TYPE_U8).expect("src desc");
+        let weights = Desc::with_tag_dtype(&[1, 1, 2, 2], FORMAT_TAG_ABCD, DATA_TYPE_S8)
+            .expect("weights desc");
+        let dst =
+            Desc::with_tag_dtype(&[1, 1, 2, 2], FORMAT_TAG_ABCD, DATA_TYPE_S32).expect("dst desc");
+        let pd = PrimitiveDescHandle::convolution(
+            &engine,
+            ALG_CONVOLUTION_DIRECT,
+            &src,
+            &weights,
+            None,
+            &dst,
+            &[1, 1],
+            &[0, 0],
+            &[0, 0],
+            &[0, 0],
+            &attr,
+        )
+        .expect("int8 convolution primitive descriptor");
+        let primitive = PrimitiveHandle::new(&pd).expect("primitive");
+
+        let input: Vec<u8> = (1..=9u8).collect();
+        let filter: Vec<i8> = vec![1, 2, 3, 4];
+        let mut output = vec![0i32; 4];
+        let src_memory = MemoryHandle::new(&src, &engine).expect("src memory");
+        let weights_memory = MemoryHandle::new(&weights, &engine).expect("weights memory");
+        let dst_memory = MemoryHandle::new(&dst, &engine).expect("dst memory");
+        unsafe {
+            src_memory
+                .set_data_handle(input.as_ptr() as *mut u8)
+                .expect("src handle");
+            weights_memory
+                .set_data_handle(filter.as_ptr() as *mut u8)
+                .expect("weights handle");
+            dst_memory
+                .set_data_handle(output.as_mut_ptr() as *mut u8)
+                .expect("dst handle");
+        }
+        primitive
+            .execute(
+                &stream,
+                &[
+                    ExecArg {
+                        arg: ARG_SRC,
+                        memory: src_memory.raw(),
+                    },
+                    ExecArg {
+                        arg: ARG_WEIGHTS,
+                        memory: weights_memory.raw(),
+                    },
+                    ExecArg {
+                        arg: ARG_DST,
+                        memory: dst_memory.raw(),
+                    },
+                ],
+            )
+            .expect("execute");
+        stream.wait().expect("wait");
+        assert_eq!(output, vec![37, 47, 67, 77]);
     }
 }

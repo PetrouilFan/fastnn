@@ -249,11 +249,17 @@ mod tests {
         let values: Vec<f32> = (0..4000).map(|i| ((i as f32) * 0.01).sin()).collect();
         let mut serial = vec![0.0f32; values.len()];
         let mut pooled = vec![0.0f32; values.len()];
+        // A build without `parallel` has no pool: the same comparison then
+        // runs one worker, which is still the documented serial order.
+        let workers = if cfg!(feature = "parallel") { 4 } else { 1 };
         for (target, threads) in [
             (&mut serial, None),
             (
                 &mut pooled,
-                Some(SessionThreads::new(crate::inference::runtime::Threading::Fixed(4)).unwrap()),
+                Some(
+                    SessionThreads::new(crate::inference::runtime::Threading::Fixed(workers))
+                        .unwrap(),
+                ),
             ),
         ] {
             let view =

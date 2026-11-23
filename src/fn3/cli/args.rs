@@ -272,9 +272,12 @@ fn parse_prepare(args: &[String]) -> Result<Command, CliError> {
         )));
     }
     let precision = precision.unwrap_or_else(|| "f32".to_string());
-    if precision != "f32" && precision != "fp32" {
+    // The name is validated here; whether this build can *execute* it is
+    // decided by `prepare` (which refuses w8a8 with the measured reason), so
+    // the CLI does not duplicate that policy.
+    if !matches!(precision.as_str(), "f32" | "fp32" | "w8a8" | "int8") {
         return Err(CliError::usage(format!(
-            "`--precision {precision}` is not implemented; this build writes `f32` only"
+            "`--precision {precision}` is not a precision this build knows; use `f32` or `w8a8`"
         )));
     }
     Ok(Command::Prepare(PrepareArgs {
@@ -635,7 +638,7 @@ USAGE:
 
 OPTIONS:
   --target <name>     cpu (default), cpu-reference or all
-  --precision <name>  f32 (default and the only implemented precision)
+  --precision <name>  f32 (default) or w8a8 (refused with a measured reason: #103)
   --shape name=d,...  bind a graph input's extents (e.g. images=1,3,640,640)
   --force             replace an existing --out file
 

@@ -191,6 +191,64 @@ pub fn prepare(
     prepare_with_shapes(onnx_path, artifact_path, target, precision, &[])
 }
 
+/// Refuse a precision this build cannot execute, naming why.
+///
+/// `w8a8` is a plan decision, but a decision is only honest if something can
+/// run it. The oneDNN int8 convolution is a reference kernel on a CPU without
+/// VNNI: measured on this host at **1332 ms** for a 32x80x80x3x3 convolution
+/// against **1.57 ms** for the same f32 convolution, so writing a W8A8 artifact
+/// here would be an 848x trap. The check is in `prepare`, before the ONNX is
+/// read, so a refused request writes nothing (#103).
+pub(crate) fn refuse_unexecutable_precision(precision: Precision) -> Result<(), Fn3Error> {
+    if precision != Precision::W8A8 {
+        return Ok(());
+    }
+    #[cfg(feature = "cpu-onednn")]
+    {
+        let (_, isa, available) = crate::inference::backend::cpu::onednn::int8_execution_support();
+        let reason = if available {
+            "int8 kernels exist on that ISA, but no W8A8 executor is implemented yet"
+        } else {
+            "without VNNI oneDNN serves an int8 convolution from its reference kernel, \
+             measured at 1332 ms against 1.57 ms for the same 32x80x80x3x3 f32 convolution \
+             on this host"
+        };
+        Err(Fn3Error::InvalidFormat {
+            format: "precision",
+            detail: format!(
+                "`w8a8` was requested and nothing was written: this build has no W8A8 \
+                 executor. oneDNN reports ISA `{isa}`, and {reason} (issue #103)"
+            ),
+        })
+    }
+    #[cfg(not(feature = "cpu-onednn"))]
+    {
+        Err(Fn3Error::InvalidFormat {
+            format: "precision",
+            detail: "`w8a8` was requested and nothing was written: this build has no \
+                     quantized engine, because it was compiled without `cpu-onednn` \
+                     (issue #103)"
+                .to_string(),
+        })
+    }
+}
+
+#[cfg(all(test, feature = "cpu-onednn"))]
+mod w8a8_tests {
+    use super::*;
+
+    #[test]
+    fn w8a8_is_refused_with_the_measured_isa() {
+        let error = refuse_unexecutable_precision(Precision::W8A8).unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("w8a8"), "{text}");
+        assert!(text.contains("nothing was written"), "{text}");
+        assert!(text.contains("ISA"), "the refusal names the ISA:\n{text}");
+        // f32 is never refused.
+        assert!(refuse_unexecutable_precision(Precision::F32).is_ok());
+    }
+}
+
 /// [`prepare`] with concrete extents for the model's graph inputs.
 ///
 /// A dynamic ONNX export declares its input as `[batch, 3, height, width]` and
@@ -225,8 +283,11 @@ pub fn prepare_with_shapes(
     let imported = import_onnx_graph_with_shapes(&source_bytes, shapes)?;
     let precision = Precision::parse(precision).ok_or_else(|| Fn3Error::InvalidFormat {
         format: "precision",
-        detail: format!("`{precision}` is not implemented; this build writes `f32` only"),
+        detail: format!(
+            "`{precision}` is not a precision this build knows; accepted names are `f32` and              `w8a8`"
+        ),
     })?;
+    refuse_unexecutable_precision(precision)?;
     let targets = resolve_targets(target)?;
     let prepared = PreparedArtifact::from_imported(&imported, &targets, precision, source_digest)?;
     let bytes = prepared.to_bytes()?;

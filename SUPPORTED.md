@@ -16,7 +16,9 @@ executes all twelve on scalar NCHW kernels. An optional oneDNN CPU engine
 (`--features cpu-onednn`) additionally executes 4-D convolution, the pool family
 and 2-D matmul, folds an activation or a residual sum into the producing
 convolution, and keeps internal conv-to-conv edges in a channels-last layout;
-see [docs/v3/backends.md](docs/v3/backends.md). There is no W8A8 execution path.
+see [docs/v3/backends.md](docs/v3/backends.md). There is no W8A8 execution path:
+`prepare --precision w8a8` refuses with the target's ISA and a measurement (on this
+AVX2 host oneDNN's int8 convolution is its reference kernel, 848x slower than f32).
 In the vocabulary of this file the twelve CNN ops are `runs` on the CPU, while a
 model *family* still needs a committed zoo entry with a hash and licence before
 it may be called `imports` (see §2 of
@@ -154,8 +156,8 @@ instead of staging them to the CPU.
 | Mode | Status | Weights | Activations | In the artifact | What may be claimed |
 |---|---|---|---|---|---|
 | `F32` | `runs` (decoder; CPU, Vulkan optional) | f32 | f32 | Yes | The reference mode for every family; decoder logits have a manual accuracy gate |
-| Weight-only INT8 (`weight_int8`) | `runs` (decoder; opt-in, session-local) | int8 codes in groups of 64, f16 scales, i16 zero points | f32 | No; packed on first use per session | A weight-compression option with coverage diagnostics and a manual accuracy gate (top-1/KL); never a latency claim and not a v3 execution mode |
-| `W8A8` | `planned` (#103) | int8 per-channel | u8 per-tensor | Planned | Nothing until the #105 gates pass |
+| Weight-only INT8 (`weight_int8`) | archived with the 3.0 tree | — | — | No | Nothing; the v3 artifact has no weight-only payload |
+| `W8A8` | `refused` (#103) | int8 per-channel (planned) | u8 per-tensor (planned) | No | Nothing yet: `w8a8` parses and `prepare` refuses it with the measured reason. oneDNN has no int8 JIT kernel without VNNI/AMX (1332 ms against 1.57 ms on a 32x80x80x3x3 convolution here), so the executor waits for hardware where it can be measured |
 | `W4A8` | `planned` (#103) | 4-bit | 8-bit | Planned | Nothing; the archived report records 4-bit candidates losing detections, measured on the archived runtime ([report](docs/archive/reports/fn3-22-quant-format.md)) |
 | `F16`, `BF16`, `FP8`, `U4`, `I4`, `F4` | Not planned | — | — | — | No public dtype menu, no storage tag standing in for a compute mode |
 
