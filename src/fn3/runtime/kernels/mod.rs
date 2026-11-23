@@ -72,10 +72,12 @@ pub(crate) mod conv;
 pub(crate) mod data;
 pub(crate) mod fused;
 pub(crate) mod int;
+pub(crate) mod movement;
 pub(crate) mod norm;
 pub(crate) mod pad;
 pub(crate) mod pool;
 pub(crate) mod resize;
+pub(crate) mod softmax;
 pub(crate) mod topk;
 
 /// Smallest output, in elements, worth handing to the session pool.
@@ -112,6 +114,11 @@ pub(crate) fn is_cnn_op(op: OpId) -> bool {
             | OpId::Maximum
             | OpId::Minimum
             | OpId::TopK
+            | OpId::Concat
+            | OpId::Softmax
+            | OpId::Reshape
+            | OpId::Split
+            | OpId::Slice
     )
 }
 
@@ -139,11 +146,35 @@ pub(crate) fn dispatch(
             act::run(op, inputs, outputs, params, threads)
         }
         OpId::TopK => topk::run(inputs, outputs, params),
-        OpId::Split | OpId::Slice => data::run(op, inputs, outputs, params),
+        OpId::Split | OpId::Slice | OpId::Reshape => data::run(op, inputs, outputs, params),
+        OpId::Concat => {
+            let Some(output) = outputs.first_mut() else {
+                return Err(Fn3Error::ArityMismatch {
+                    op,
+                    expected_inputs: 1,
+                    actual_inputs: inputs.len(),
+                    expected_outputs: 1,
+                    actual_outputs: outputs.len(),
+                });
+            };
+            movement::concat(op, inputs, output, params, threads)
+        }
+        OpId::Softmax => {
+            let (Some(input), Some(output)) = (inputs.first(), outputs.first_mut()) else {
+                return Err(Fn3Error::ArityMismatch {
+                    op,
+                    expected_inputs: 1,
+                    actual_inputs: inputs.len(),
+                    expected_outputs: 1,
+                    actual_outputs: outputs.len(),
+                });
+            };
+            softmax::run(op, input, output, params, threads)
+        }
         other => Err(Fn3Error::UnsupportedOp {
             op: other,
             backend: "fn3-runtime-kernels",
-            reason: "not one of the twelve CNN op ids; the legacy table in backend::cpu owns it"
+            reason: "not an op id this table owns; the legacy table in backend::cpu owns the rest"
                 .to_string(),
         }),
     }

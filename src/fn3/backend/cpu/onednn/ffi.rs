@@ -94,9 +94,12 @@ pub(crate) const PROP_KIND_FORWARD_INFERENCE: i32 = 96;
 
 /// `dnnl_convolution_direct`.
 ///
-/// `auto` (which may choose Winograd) measured the same as `direct` on the
-/// pinned graph and makes the accumulation order a heuristic's decision, so the
-/// plan pins direct.
+/// `auto` (which may choose Winograd) was re-checked on the pinned graph: 42.0
+/// ms at one worker against 44.2 direct, one run each, inside this host's
+/// noise. It is not adopted because it makes the accumulation order a
+/// heuristic's decision for a difference that does not reproduce. Winograd
+/// itself is unavailable in this build: its primitive descriptor creation
+/// fails on AVX2.
 pub(crate) const ALG_CONVOLUTION_DIRECT: i32 = 1;
 /// `dnnl_pooling_max`.
 pub(crate) const ALG_POOLING_MAX: i32 = 511;

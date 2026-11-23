@@ -30,22 +30,23 @@ YOLOv8n, `f32[1,3,320,320] -> f32[1,84,2100]`:
 | oneDNN | 40.79 ms | **26.47 ms** | 28.22 ms |
 | ONNX Runtime | 22.90 ms | 7.10 ms | 6.63 ms |
 
-That table is the phase-4a tree. The block payload floor was lowered from 16 Ki
-to 4 Ki elements (see `docs/v3/backends.md`), which is the scaling fix: measured
-against the shipped baseline binary with both run alternately on the same
-artifact,
+That table is the phase-4a tree. Two changes moved it. The block payload floor
+went from 16 Ki to 4 Ki elements (`docs/v3/backends.md`), which is the scaling
+fix. Then the scalar tail stopped paying a pool hand-off per segment and the two
+largest tail ops got row-parallel kernels. Measured by running the pre-change
+binary and the current one alternately on the same artifact, 20 forwards each:
 
 | engine | 1 thread | 4 threads | 8 threads |
 |---|---:|---:|---:|
-| oneDNN, baseline `57272fc` | 44.33 ms | 33.26 ms | 31.68 ms |
-| oneDNN, current | 44.46 ms | **22.73 ms** | **18.90 ms** |
+| oneDNN, pre-change `92af69c` | 44.43 ms | 20.61 ms | 20.19 ms |
+| oneDNN, current | **42.01 ms** | **20.32 ms** | **19.77 ms** |
 | ONNX Runtime | 23.86 ms | 7.82 ms | 7.64 ms |
 
-so oneDNN is now **1.86x** ORT at one worker (inside the <=2x goal), 2.91x at
-four and 2.47x at eight, down from 3.7x / 4.3x. The remaining gap is
-convolution throughput, not block count: the 57 fused `Conv+Swish` segments are
-75 % of the forward, and the small layers (10x10, 20x20) cannot fill eight
-workers. `docs/v3/backends.md` records the per-op table, the negative results
+so oneDNN is **1.76x** ORT at one worker (inside the <=2x goal), 2.60x at four
+and 2.59x at eight. The remaining gap is convolution throughput, not block
+count or glue: the 57 fused `Conv+Swish` segments are 77 % of the forward
+(14.87 of 19.31 ms at eight workers), the pool now takes every row-parallel
+tail op, and the small layers (10x10, 20x20) cannot fill eight workers. `docs/v3/backends.md` records the per-op table, the negative results
 (one pool region per forward: no change; graph-level scheduling: 1.59x ceiling
 on this graph). Staging is now pooled per worker (#115): `staging_bytes` at
 eight workers fell from 14,110,720 B to 2,048,000 B and CLI peak RSS at eight
@@ -72,7 +73,7 @@ input for every engine:
 | | 1 thread | 4 threads | 8 threads |
 |---|---:|---:|---:|
 | fastnn scalar, Rust CLI | 1322.39 ms | 390.60 ms | 256.21 ms |
-| fastnn oneDNN, Rust CLI | 44.26 ms | **32.29 ms** | 32.48 ms |
+| fastnn oneDNN, Rust CLI | **42.01 ms** | **20.32 ms** | **19.77 ms** |
 | ONNX Runtime, Python per-call | 23.86 ms | 7.82 ms | 7.64 ms |
 
 The Python binding is not what separates them: the floor for a Python + ORT
@@ -82,10 +83,26 @@ The Python binding is not what separates them: the floor for a Python + ORT
 What the Python-free measurement does show is the real shape of the gap:
 
 - At **one thread the gap is 1.86x** — inside the <=2x goal.
-- From 1 to 8 threads fastnn gains only 1.36x, while ORT gains 3.12x. The
-  problem is scaling, not single-core throughput: 59 of the 126 segments are
-  still scalar and run with a one-thread budget, so Amdahl's law sets the
-  ceiling long before the convolutions do.
+- From 1 to 8 threads fastnn now gains 2.13x (ORT 3.12x). 59 of the 126
+  segments still run the scalar reference engine, but the row-parallel ones
+  (concat, softmax, activations, pools) take the session pool; what is left
+  serial is small (the 10x10 and 20x20 head layers) and Amdahl's ceiling is
+  the convolutions themselves.
+
+The attention-headed detector tells the same story from the other side:
+stock YOLO11n 640 gets more from the tail work because it has 174 scalar
+segments. Interleaved, pre-change vs current, 15 forwards:
+
+| engine | 1 thread | 4 threads | 8 threads |
+|---|---:|---:|---:|
+| oneDNN, pre-change `92af69c` | 164.46 ms | 66.40 ms | 62.17 ms |
+| oneDNN, current | **156.26 ms** | 67.88 ms | **55.90 ms** |
+| ONNX Runtime | 77.78 ms | 32.07 ms | 27.90 ms |
+
+The four-thread difference is inside this host's noise (the same binary
+measured 64.2-67.9 ms across runs); the one- and eight-worker differences
+reproduce. Against ORT that is 2.01x / 2.12x / 2.00x, down from
+2.13x / 2.34x / 2.21x.
 
 The in-process harness (`fn3_cnn_perf`, which uses borrowed outputs) measures
 40.79 / 26.47 / 28.22 ms on the seeded-random input; the CLI measures a fresh

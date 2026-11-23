@@ -678,14 +678,17 @@ impl Session {
                                     Some(threads),
                                 )?;
                             } else {
-                                // The legacy kernels take a thread budget and would otherwise ask
-                                // Rayon's *global* pool. Running them inside this session's pool
-                                // with a budget of one keeps them on one `fn3-worker` thread and
-                                // makes the backend's nested-region guard (`in_worker`) report
-                                // true, so no library call can reach the global pool.
-                                threads.install(|| {
-                                    dispatch_kernels(op, &views, &mut results, &segment.params, 1)
-                                })?;
+                                // The legacy kernels take a thread budget of one here, so they
+                                // run serially on this thread and cannot submit a parallel
+                                // region (`par_slices_mut`/`par_map` refuse a budget of 1
+                                // whatever `in_worker` says). The executor previously wrapped
+                                // this in `threads.install`, which made `in_worker` true by
+                                // parking the calling thread on a pool worker; at eight
+                                // workers that cost tens of microseconds per tail segment
+                                // (measured: the same serial ops were 1.5 ms slower at eight
+                                // workers than at one). No legacy kernel reaches an external
+                                // library: the GEMM is in-repo and takes the same budget.
+                                dispatch_kernels(op, &views, &mut results, &segment.params, 1)?;
                             }
                         }
                     }

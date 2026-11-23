@@ -691,7 +691,7 @@ forwards, per-op totals in ms):
 | `Sub`, `Div`, `Gather`, `Shape` | 6 | 0.01 | 0.06 | 0.2% |
 | total | 126 | 41.06 | 28.90 | |
 
-Four changes and three negative results produced that:
+Five changes and five negative results produced that:
 
 1. **Fusion (4.6).** 57 `conv+swish` segments replace 171 graph segments; the
    plan falls from 240 to 126 segments and the arena from 6 144 000 to
@@ -720,6 +720,28 @@ Four changes and three negative results produced that:
    graph**: after fusion the pointwise segments it targeted are gone (the
    surviving `Sigmoid` is 168 000 elements, above both floors), so the change is
    documented as a rule rather than claimed as a win.
+5. **The scalar tail.** Two changes, both general:
+   - The executor wrapped every legacy scalar segment in `threads.install`,
+     which parked the calling thread on a pool worker so the backend's
+     nested-region guard (`in_worker`) reported true. The kernels already
+     refuse to split with a budget of one, and no legacy kernel reaches an
+     external library, so the hand-off bought nothing and cost tens of
+     microseconds per segment: the same serial ops measured ~1.5 ms slower at
+     eight workers than at one. Removing it, measured on the CLI with five
+     interleaved pairs on one artifact: 20.7 → 19.85 ms at eight workers;
+     one worker unchanged.
+   - `Concat` and `Softmax` moved from the legacy locator kernels to
+     `runtime/kernels`. Concat copies contiguous runs (one per outer index and
+     input) and splits the destination byte range between workers; softmax
+     splits independent groups and uses disjoint column ranges for the
+     mid-axis detector shape. Both are bit-identical to the serial loop (unit
+     tests pin it) and both take the session pool. On YOLO11n 640, which has 39
+     concats, that is 57.9 → 53.6 ms at eight workers, interleaved; on YOLOv8n
+     (17 concats) concat moves 0.61 → 0.73 ms and softmax 0.54 → 0.30 ms, and
+     the forward is unchanged inside noise. The 8-thread per-op table after
+     this work: `conv+swish` 14.87 ms (77.0 %), `max_pool` 1.07,
+     `concat` 0.73, `conv` 0.56, `resize` 0.33, `softmax` 0.30, `sigmoid` 0.29,
+     `transpose` 0.28, `slice` 0.27, `split` 0.24; total 19.31 ms.
 
 ### Negative results, recorded
 
@@ -730,6 +752,9 @@ Four changes and three negative results produced that:
 | channels-last destination + channel split (dst submemory of a blocked parent) | 233 ms per 32x80x80 3x3 convolution against 1.09 ms; blocked destinations require row splits |
 | mixing families inside one segment (channels-last src, NCHW dst) | 50 ms for a one-block 64x40x40 3x3 convolution against 0.5 ms; every family boundary gets an explicit conversion |
 | channels-last at one worker | inert: one block per segment cannot row-split, so the policy installs zero buffers and the plan reports zero conversions |
+| `MIN_BLOCK_ELEMENTS` 2 Ki / 1 Ki, re-tested with the staging pool | 22.4 / 22.7 ms at eight workers against 19.7 at 4 Ki (same artifact, one rebuild per floor): the pool removed the staging cost the old sweep blamed, and the extra blocks still cost more than they fill. 4 Ki stays. |
+| oneDNN Winograd (`dnnl_convolution_winograd`) | primitive creation fails on this AVX2 build; the engine is direct-only and the failure is recorded rather than retried per convolution. |
+| `auto` algorithm (`dnnl_convolution_auto`) | 42.0 ms at one worker (one run) against 44.2 direct in the same session; not adopted, because it hands the accumulation order to a heuristic for a difference inside this host's noise (a later direct run measured 41.4). |
 
 ### Correctness of these numbers
 
