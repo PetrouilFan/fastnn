@@ -1,4 +1,4 @@
-//! `fastnn-infer`: the FastNN 3.0 inference command line (FN3-17 / #63).
+//! `fastnn-infer`: the FastNN 3.0 inference command line.
 //!
 //! The binary is a thin wrapper over [`run`]: argument parsing, dispatch and
 //! exit codes live here so the integration tests can drive the same code path
@@ -7,11 +7,11 @@
 //! # Commands
 //!
 //! ```text
-//! prepare   ONNX -> versioned FNN3PREP artifact (atomic write, read-back check)
-//! inspect   header and optional section summary; no session, no weights
-//! run       token-ID prefill and optional cached decode on one explicit device
-//! generate  greedy, deterministic token generation (no sampling)
-//! diagnose  build/device/backend matrix, honest about what was only enumerated
+//! prepare   ONNX -> versioned FNN3ART2 artifact (atomic write, read-back check)
+//! load      map the artifact, check every hash and build the recorded session
+//! run       one forward from the artifact, with explicit named inputs
+//! inspect   header, graph, per-target plans, weights, quant and hashes; no map
+//! doctor    diagnose an ONNX model before preparing it
 //! ```
 //!
 //! # Exit codes
@@ -21,23 +21,24 @@
 //! | 0 | success |
 //! | 1 | internal failure (an invariant this tool owns) |
 //! | 2 | usage error: unknown command or flag, missing or malformed value |
-//! | 3 | model/input error: missing file, bad magic, future version, corrupt payload, ONNX mismatch |
-//! | 4 | device error: unavailable device, build without the requested backend, driver cannot open |
-//! | 5 | inference error: envelope or KV capacity exceeded, unsupported op, invalid logits |
+//! | 3 | model/input error: missing file, bad magic, obsolete or future version, corrupt payload |
+//! | 5 | inference error: unsupported op, shape mismatch, a backend refusal |
 //!
 //! Every error is printed as `error: <what>` followed by `next: <action>`, and
 //! no user-controlled input is indexed, unwrapped or allowed to panic.
 
 pub mod args;
-mod devices;
-mod infer;
+mod doctor;
 mod inspect;
+mod load;
 mod prepare;
+mod run;
 
 use std::io::Write;
 
-pub use args::{Command, HelpTopic};
-pub use devices::DeviceSpec;
+pub use args::{Command, HelpTopic, ThreadsArg};
+
+use crate::inference::model::format::{FormatError, FormatErrorKind};
 
 /// Success.
 pub const EXIT_OK: i32 = 0;
@@ -47,9 +48,7 @@ pub const EXIT_INTERNAL: i32 = 1;
 pub const EXIT_USAGE: i32 = 2;
 /// The model file, or the ONNX it was prepared from, is unusable.
 pub const EXIT_MODEL: i32 = 3;
-/// The requested device or backend cannot be used by this build.
-pub const EXIT_DEVICE: i32 = 4;
-/// Inference was refused by the model's bounds, the cache or a backend.
+/// Inference was refused by the model's bounds or a backend.
 pub const EXIT_INFERENCE: i32 = 5;
 
 /// A failure with a user-facing message, the next step, and an exit code.
@@ -77,12 +76,6 @@ impl CliError {
     /// The model file or its ONNX source is unusable.
     pub fn model(message: impl Into<String>) -> CliError {
         CliError::new(EXIT_MODEL, message)
-    }
-
-    /// The requested device is not available in this build or on this host.
-    pub fn device(message: impl Into<String>) -> CliError {
-        CliError::new(EXIT_DEVICE, message)
-            .with_next("run `fastnn-infer diagnose` to list the devices this build can open")
     }
 
     /// Inference was refused by a bound, a capacity or a backend.
@@ -120,6 +113,41 @@ impl CliError {
     }
 }
 
+/// Turn a format failure into an actionable CLI error.
+pub(crate) fn format_error(error: FormatError) -> CliError {
+    let next = match error.kind() {
+        FormatErrorKind::ObsoleteFormat { .. } => {
+            "this file is the replaced format version 1. There is no compatibility reader: \
+             re-prepare its source ONNX with this build"
+        }
+        FormatErrorKind::UnsupportedVersion { .. } => {
+            "this file was written by a newer build; use a matching `fastnn-infer`, or \
+             re-prepare the ONNX with this build"
+        }
+        FormatErrorKind::BadMagic { .. } => {
+            "the first eight bytes must be `FNN3ART2`; this is not a prepared-model artifact"
+        }
+        FormatErrorKind::HashMismatch { .. } => {
+            "a section does not match its stored SHA-256; the file is corrupt, so re-run \
+             `fastnn-infer prepare` from the source ONNX"
+        }
+        FormatErrorKind::Io { .. } => "check the path and its permissions",
+        _ => {
+            "the file is truncated, malformed or internally inconsistent; re-run \
+             `fastnn-infer prepare` from the source ONNX"
+        }
+    };
+    CliError::model(error.to_string()).with_next(next)
+}
+
+/// Turn an import failure into a node-named CLI error.
+pub(crate) fn import_error(error: crate::inference::import::ImportError) -> CliError {
+    CliError::model(format!("the ONNX model could not be imported:\n{error}")).with_next(
+        "run `fastnn-infer doctor <model.onnx>` for the full problem list, then fix the named \
+         node or use an export this build implements",
+    )
+}
+
 /// Run the CLI against explicit writers and return the process exit code.
 ///
 /// `out` receives normal output, `err` receives the rendered error block. Write
@@ -152,10 +180,10 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
 fn dispatch(command: Command, out: &mut dyn Write) -> Result<(), CliError> {
     match command {
         Command::Prepare(args) => prepare::execute(&args, out),
+        Command::Load(args) => load::execute(&args, out),
+        Command::Run(args) => run::execute(&args, out),
         Command::Inspect(args) => inspect::execute(&args, out),
-        Command::Run(args) => infer::execute_run(&args, out),
-        Command::Generate(args) => infer::execute_generate(&args, out),
-        Command::Diagnose(args) => devices::execute_diagnose(&args, out),
+        Command::Doctor(args) => doctor::execute(&args, out),
         Command::Help(_) | Command::Version => Ok(()),
     }
 }
@@ -188,12 +216,12 @@ mod tests {
 
     #[test]
     fn errors_render_two_lines_and_keep_the_code() {
-        let error = CliError::device("requested device vulkan is unavailable")
-            .with_next("run `fastnn-infer diagnose`");
-        assert_eq!(error.code(), EXIT_DEVICE);
+        let error = CliError::inference("a segment refused to run")
+            .with_next("run `fastnn-infer inspect model.fnn3`");
+        assert_eq!(error.code(), EXIT_INFERENCE);
         assert_eq!(
             error.render(),
-            "error: requested device vulkan is unavailable\nnext: run `fastnn-infer diagnose`"
+            "error: a segment refused to run\nnext: run `fastnn-infer inspect model.fnn3`"
         );
     }
 

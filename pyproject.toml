@@ -29,10 +29,6 @@ Repository = "https://github.com/PetrouilFan/fastnn"
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-benchmark"]
-torch = ["torch>=2.11.0"]
-
-[project.scripts]
-fastnn-convert = "fastnn.io.convert:main"
 
 [tool.maturin]
 features = ["pyo3/extension-module", "simd", "parallel", "fusion-forward", "prepared-plan"]

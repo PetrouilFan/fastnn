@@ -53,23 +53,23 @@ ci::run "Rustdoc (warnings are denied)" \
 
 ci::run "Build with --no-default-features (pyo3 extension-module cannot link standalone targets)" \
     "cargo build --no-default-features"
-ci::run "Library tests (fn3 + 2.x unit tests)" \
+ci::run "Library tests" \
     "cargo test --lib -- --test-threads=1"
 # Every integration target, not a hand-picked three.
 #
 # This lane used to run only fn3_contracts, fn3_ci_smoke and two fn3_cli tests,
-# which left roughly 500 of the crate's 551 integration tests compiled nowhere
-# and executed nowhere: the IR shape and memory-planning suites, the compiler
-# edge cases, the 2.x reference oracle, the quantized pipeline, the Python
-# error paths, fn3's import/format/planner/session suites and the arena
-# liveness regression all existed and none of them ran. A test that never runs
-# is not coverage, and the two numerical defects fixed in this cycle (the
-# stride-2 im2col lane gather and the AVX2 log polynomial) were both found by
-# hand-written scratch tests rather than by CI.
+# which left most of the crate's integration tests compiled nowhere and executed
+# nowhere: the IR shape and memory-planning suites, the import/format/planner
+# suites, the CNN import and parity gates and the arena liveness regression all
+# existed and none of them ran. A test that never runs is not coverage.
 ci::run "Integration tests (every target)" \
     "cargo test --no-fail-fast --tests"
+# The binary is exercised as a binary: its own argv parsing, exit codes and
+# output stream, with the Python feature off (PyO3's extension-module mode
+# cannot link a standalone binary). The in-process `fn3_cli` tests cover the
+# same surface through `cli::run`.
 ci::run "Inference CLI binary smoke" \
-    "cargo test --no-default-features --features cli,simd,parallel --test fn3_cli fastnn_infer_binary_"
+    "cargo run --quiet --no-default-features --features cli,parallel --bin fastnn-infer -- --version"
 ci::run "CI tooling selftests" \
     "python3 tools/ci/model_pin.py selftest && python3 tools/ci/lane_status.py selftest"
 

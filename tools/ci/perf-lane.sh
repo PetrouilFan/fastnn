@@ -37,16 +37,16 @@ if ! cargo build --release --lib; then
 fi
 cp target/release/libfastnn.so fastnn/_core.abi3.so
 
-echo "\$ python3 tools/bench/perf_report.py --out $HEAD"
-if ! PYTHONPATH="$ROOT" python3 "$ROOT/tools/bench/perf_report.py" \
+echo "\$ python3 tools/perf/perf_report.py --out $HEAD"
+if ! PYTHONPATH="$ROOT" python3 "$ROOT/tools/perf/perf_report.py" \
      --model "evit-depth-5m=$MODEL" --input pixel_values=1,3,336,448 \
      --threads 4 --warmup 3 --repeat 20 --out "$HEAD"; then
     echo "FAILED: the benchmark did not produce a report"
     exit 1
 fi
 
-echo "\$ python3 tools/bench/compare_perf.py --base $BASELINE --head $HEAD"
-if ! python3 "$ROOT/tools/bench/compare_perf.py" --base "$BASELINE" --head "$HEAD"; then
+echo "\$ python3 tools/perf/compare_perf.py --base $BASELINE --head $HEAD"
+if ! python3 "$ROOT/tools/perf/compare_perf.py" --base "$BASELINE" --head "$HEAD"; then
     echo "FAILED: a measurement moved beyond the documented budget"
     exit 1
 fi

@@ -16,11 +16,23 @@
 //! | Type | Ownership | Writable |
 //! |---|---|---|
 //! | [`Tensor`] | owns its [`Storage`] | yes, when storage is exclusive |
-//! | [`TensorView`] | borrows a `Storage` | no |
-//! | [`TensorMut`] | borrows an `AlignedBuffer` exclusively | yes |
+//! | [`TensorView`] | borrows a `Storage`, or a host byte window | no |
+//! | [`TensorMut`] | borrows an `AlignedBuffer` or a host byte window exclusively | yes |
 //!
 //! A view validated as a broadcast view ([`TensorMeta::is_broadcast`]) is
 //! read-only: several coordinates address the same element.
+//!
+//! # Borrowed byte windows
+//!
+//! The v3 segment executor
+//! ([`crate::inference::runtime`]) owns one arena allocation and hands each
+//! segment disjoint byte windows of it. `TensorView::from_host_bytes` and
+//! `TensorMut::from_host_bytes` bind metadata to such a window without a
+//! `Storage` handle or a copy: the caller has already split the arena with
+//! `split_at_mut`, so the windows are disjoint by construction. A view built
+//! that way reports `offset = 0` (its metadata is relative to the window) and
+//! [`TensorView::storage`] returns `None`, because there is no owning handle to
+//! name. Device-resident storage never uses this path.
 //!
 //! # Offsets
 //!
@@ -98,7 +110,49 @@ use crate::inference::dtype::DType;
 use crate::inference::error::Fn3Error;
 use crate::inference::ops::OpId;
 use crate::inference::shape::{checked_usize, Shape, Strides};
-use crate::inference::storage::{AlignedBuffer, Storage, StorageWindow};
+use crate::inference::storage::{AlignedBuffer, DTypeAlignment, Storage, StorageWindow};
+
+/// Validate that a borrowed byte window can be viewed at `meta`'s dtype.
+///
+/// The window itself carries no alignment guarantee (it comes from an arena
+/// split), so this is where the element alignment, the element-size multiple
+/// and the byte length are checked before any typed slice is created.
+fn check_host_window(what: &'static str, bytes: &[u8], meta: &TensorMeta) -> Result<(), Fn3Error> {
+    let hint = meta.dtype.alignment_hint();
+    if !(bytes.as_ptr() as usize).is_multiple_of(hint) {
+        return Err(Fn3Error::StorageCast {
+            element: meta.dtype.name(),
+            byte_len: bytes.len(),
+            detail: format!(
+                "{what}: the byte window starts at {:#x}, which is not {hint}-byte aligned for {}",
+                bytes.as_ptr() as usize,
+                meta.dtype
+            ),
+        });
+    }
+    if !bytes.len().is_multiple_of(meta.dtype.size_bytes()) {
+        return Err(Fn3Error::StorageCast {
+            element: meta.dtype.name(),
+            byte_len: bytes.len(),
+            detail: format!(
+                "{what}: the byte window is not a whole number of {} elements",
+                meta.dtype
+            ),
+        });
+    }
+    let required = meta.required_bytes()?;
+    if required > bytes.len() {
+        return Err(Fn3Error::OutOfBounds {
+            what: match what {
+                "TensorView::from_host_bytes" => "TensorView::from_host_bytes (window bytes)",
+                _ => "TensorMut::from_host_bytes (window bytes)",
+            },
+            index: required as u64,
+            len: bytes.len() as u64,
+        });
+    }
+    Ok(())
+}
 
 /// Validated description of a tensor: dtype, device, shape, strides, offset.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -456,10 +510,19 @@ fn meta_from_window(
     Ok(meta)
 }
 
+/// Which host allocation a read-only view addresses.
+#[derive(Debug, Clone)]
+enum TensorViewBacking<'a> {
+    /// A shared [`Storage`] handle: the ordinary case.
+    Storage(&'a Storage),
+    /// A disjoint host byte window with no owning handle.
+    Bytes(&'a [u8]),
+}
+
 /// A read-only, borrowed view of a tensor.
 #[derive(Debug, Clone)]
 pub struct TensorView<'a> {
-    storage: &'a Storage,
+    backing: TensorViewBacking<'a>,
     meta: TensorMeta,
 }
 
@@ -474,7 +537,27 @@ impl<'a> TensorView<'a> {
                 len: storage.len() as u64,
             });
         }
-        Ok(TensorView { storage, meta })
+        Ok(TensorView {
+            backing: TensorViewBacking::Storage(storage),
+            meta,
+        })
+    }
+
+    /// Bind `meta` to a borrowed host byte window.
+    ///
+    /// Crate-internal: the v3 segment executor splits one arena allocation into
+    /// disjoint windows, so the borrowed bytes cannot alias a live write. The
+    /// window must start on a `dtype` element boundary and hold every byte the
+    /// metadata addresses; `meta.offset()` is relative to the window start.
+    pub(crate) fn from_host_bytes(
+        bytes: &'a [u8],
+        meta: TensorMeta,
+    ) -> Result<TensorView<'a>, Fn3Error> {
+        check_host_window("TensorView::from_host_bytes", bytes, &meta)?;
+        Ok(TensorView {
+            backing: TensorViewBacking::Bytes(bytes),
+            meta,
+        })
     }
 
     /// A contiguous view of `shape` whose first element starts at `window`'s
@@ -529,38 +612,61 @@ impl<'a> TensorView<'a> {
         self.meta.is_contiguous()
     }
 
-    /// The shared storage the view addresses.
+    /// The shared storage the view addresses, when it has one.
     ///
     /// The whole allocation, not just the view's window; pair it with
-    /// [`TensorMeta::offset`] and the strides.
-    pub fn storage(&self) -> &'a Storage {
-        self.storage
+    /// [`TensorMeta::offset`] and the strides. `None` for a view created by
+    /// `TensorView::from_host_bytes`: its bytes belong to a window the caller
+    /// split from its own allocation, and no [`Storage`] handle names it.
+    pub fn storage(&self) -> Option<&'a Storage> {
+        match &self.backing {
+            TensorViewBacking::Storage(storage) => Some(storage),
+            TensorViewBacking::Bytes(_) => None,
+        }
     }
 
-    /// The whole underlying storage as bytes.
+    /// The whole underlying allocation as bytes.
     ///
     /// Kernels use this together with [`TensorMeta::offset`] and the strides;
     /// it is deliberately *not* restricted to the view's window. A
     /// device-resident view has no host bytes: use [`TensorView::host_bytes`],
     /// which rejects it, or [`TensorView::to_host`].
     pub fn storage_bytes(&self) -> &'a [u8] {
-        self.storage.as_bytes()
+        match &self.backing {
+            TensorViewBacking::Storage(storage) => storage.as_bytes(),
+            TensorViewBacking::Bytes(bytes) => bytes,
+        }
     }
 
-    /// The whole underlying storage as bytes, rejecting device-resident
+    /// The whole underlying allocation as bytes, rejecting device-resident
     /// storage.
     pub fn host_bytes(&self) -> Result<&'a [u8], Fn3Error> {
-        self.storage.host_bytes()
+        match &self.backing {
+            TensorViewBacking::Storage(storage) => storage.host_bytes(),
+            TensorViewBacking::Bytes(bytes) => Ok(bytes),
+        }
     }
 
     /// `true` when the view's bytes live in device memory.
     pub fn is_device_resident(&self) -> bool {
-        self.storage.is_resident()
+        match &self.backing {
+            TensorViewBacking::Storage(storage) => storage.is_resident(),
+            TensorViewBacking::Bytes(_) => false,
+        }
     }
 
-    /// The whole underlying storage as elements of `T`.
+    /// The whole underlying allocation as elements of `T`.
     pub fn storage_slice<T: Pod>(&self) -> Result<&'a [T], Fn3Error> {
-        self.storage.as_slice()
+        match &self.backing {
+            TensorViewBacking::Storage(storage) => storage.as_slice(),
+            TensorViewBacking::Bytes(bytes) => {
+                bytemuck::try_cast_slice(bytes).map_err(|error| Fn3Error::StorageCast {
+                    element: std::any::type_name::<T>(),
+                    byte_len: bytes.len(),
+                    detail: format!("{error:?}"),
+                })
+            }
+        }
     }
 
     /// Download this view's bytes and return an owned host tensor.
@@ -568,20 +674,33 @@ impl<'a> TensorView<'a> {
     /// A host view returns a cheap storage-sharing clone; a device-resident
     /// view is copied device → host through
     /// [`Storage::download`](crate::inference::storage::Storage::download), so the
-    /// result is a snapshot, never a stale alias.
+    /// result is a snapshot, never a stale alias. A byte-window view is copied
+    /// into a fresh host allocation, because it owns no storage to share.
     pub fn to_host(&self) -> Result<Tensor, Fn3Error> {
-        if !self.storage.is_resident() {
-            return Tensor::from_storage(self.storage.clone(), self.meta.clone());
+        match &self.backing {
+            TensorViewBacking::Storage(storage) => {
+                if !storage.is_resident() {
+                    return Tensor::from_storage((*storage).clone(), self.meta.clone());
+                }
+                let bytes = self.materialised_bytes()?;
+                Tensor::from_storage(Storage::from_bytes(&bytes)?, self.meta.clone())
+            }
+            TensorViewBacking::Bytes(bytes) => {
+                Tensor::from_storage(Storage::from_bytes(bytes)?, self.meta.clone())
+            }
         }
-        let bytes = self.materialised_bytes()?;
-        Tensor::from_storage(Storage::from_bytes(&bytes)?, self.meta.clone())
     }
 
     /// The whole resident allocation as host bytes, or an error for a host
     /// allocation (which is already host-readable).
     fn materialised_bytes(&self) -> Result<Vec<u8>, Fn3Error> {
-        let mut bytes = vec![0u8; self.storage.len()];
-        self.storage.download(&mut bytes)?;
+        let storage = self.storage().ok_or(Fn3Error::NotImplemented {
+            what: "TensorView::materialised_bytes on a byte-window view (it is already host \
+                   memory; use TensorView::host_bytes)",
+            owner: "v3 segment runtime",
+        })?;
+        let mut bytes = vec![0u8; storage.len()];
+        storage.download(&mut bytes)?;
         Ok(bytes)
     }
 
@@ -614,7 +733,7 @@ impl<'a> TensorView<'a> {
     }
 
     fn contiguous_window<T: Pod>(&self, context: &'static str) -> Result<&'a [T], Fn3Error> {
-        if self.storage.is_resident() {
+        if self.is_device_resident() {
             return Err(device_resident_read(context));
         }
         if std::mem::size_of::<T>() != self.meta.dtype.size_bytes() {
@@ -640,15 +759,12 @@ impl<'a> TensorView<'a> {
                 axis: None,
                 detail: format!("window end {start} + {len} exceeds usize::MAX"),
             })?;
-        let bytes =
-            self.storage
-                .as_bytes()
-                .get(start..end)
-                .ok_or_else(|| Fn3Error::OutOfBounds {
-                    what: "TensorView contiguous window (storage bytes)",
-                    index: end as u64,
-                    len: self.storage.len() as u64,
-                })?;
+        let all = self.storage_bytes();
+        let bytes = all.get(start..end).ok_or(Fn3Error::OutOfBounds {
+            what: "TensorView contiguous window (storage bytes)",
+            index: end as u64,
+            len: all.len() as u64,
+        })?;
         bytemuck::try_cast_slice(bytes).map_err(|error| Fn3Error::StorageCast {
             element: std::any::type_name::<T>(),
             byte_len: bytes.len(),
@@ -673,6 +789,8 @@ impl<'a> TensorView<'a> {
 enum TensorMutBacking<'a> {
     /// An exclusively borrowed host buffer.
     Host(&'a mut AlignedBuffer),
+    /// A disjoint host byte window with no owning buffer.
+    Bytes(&'a mut [u8]),
     /// A device-resident storage, written by a device kernel.
     Device(&'a Storage),
 }
@@ -706,6 +824,30 @@ impl<'a> TensorMut<'a> {
         }
         Ok(TensorMut {
             backing: TensorMutBacking::Host(buffer),
+            meta,
+        })
+    }
+
+    /// Bind `meta` to a borrowed host byte window the caller owns exclusively.
+    ///
+    /// Crate-internal: the v3 segment executor splits one arena allocation with
+    /// `split_at_mut`, so this window cannot alias any other live window of the
+    /// same arena. The window must start on a `dtype` element boundary and hold
+    /// every byte the metadata addresses; `meta.offset()` is relative to the
+    /// window start.
+    pub(crate) fn from_host_bytes(
+        bytes: &'a mut [u8],
+        meta: TensorMeta,
+    ) -> Result<TensorMut<'a>, Fn3Error> {
+        if !meta.is_writable() {
+            return Err(Fn3Error::InvalidShape {
+                context: "TensorMut::from_host_bytes",
+                detail: format!("broadcast view {meta} is read-only"),
+            });
+        }
+        check_host_window("TensorMut::from_host_bytes", bytes, &meta)?;
+        Ok(TensorMut {
+            backing: TensorMutBacking::Bytes(bytes),
             meta,
         })
     }
@@ -796,7 +938,7 @@ impl<'a> TensorMut<'a> {
     pub fn resident_storage(&self) -> Option<&'a Storage> {
         match &self.backing {
             TensorMutBacking::Device(storage) => Some(storage),
-            TensorMutBacking::Host(_) => None,
+            TensorMutBacking::Host(_) | TensorMutBacking::Bytes(_) => None,
         }
     }
 
@@ -807,6 +949,7 @@ impl<'a> TensorMut<'a> {
     pub fn storage_bytes(&self) -> &[u8] {
         match &self.backing {
             TensorMutBacking::Host(buffer) => buffer.as_bytes(),
+            TensorMutBacking::Bytes(bytes) => bytes,
             TensorMutBacking::Device(_) => &[],
         }
     }
@@ -815,6 +958,7 @@ impl<'a> TensorMut<'a> {
     pub fn host_bytes_mut(&mut self) -> Result<&mut [u8], Fn3Error> {
         match &mut self.backing {
             TensorMutBacking::Host(buffer) => Ok(buffer.as_bytes_mut()),
+            TensorMutBacking::Bytes(bytes) => Ok(bytes),
             TensorMutBacking::Device(_) => Err(device_resident_write("TensorMut::host_bytes_mut")),
         }
     }
@@ -823,6 +967,7 @@ impl<'a> TensorMut<'a> {
     pub fn host_bytes(&self) -> Result<&[u8], Fn3Error> {
         match &self.backing {
             TensorMutBacking::Host(buffer) => Ok(buffer.as_bytes()),
+            TensorMutBacking::Bytes(bytes) => Ok(bytes),
             TensorMutBacking::Device(_) => Err(device_resident_write("TensorMut::host_bytes")),
         }
     }
@@ -831,6 +976,14 @@ impl<'a> TensorMut<'a> {
     pub fn storage_slice_mut<T: Pod>(&mut self) -> Result<&mut [T], Fn3Error> {
         match &mut self.backing {
             TensorMutBacking::Host(buffer) => buffer.as_mut_slice::<T>(),
+            TensorMutBacking::Bytes(bytes) => {
+                let byte_len = bytes.len();
+                bytemuck::try_cast_slice_mut(bytes).map_err(|error| Fn3Error::StorageCast {
+                    element: std::any::type_name::<T>(),
+                    byte_len,
+                    detail: format!("{error:?}"),
+                })
+            }
             TensorMutBacking::Device(_) => {
                 Err(device_resident_write("TensorMut::storage_slice_mut"))
             }
@@ -873,15 +1026,19 @@ impl<'a> TensorMut<'a> {
                 axis: None,
                 detail: format!("window end {start} + {len} exceeds usize::MAX"),
             })?;
-        let buffer = match &mut self.backing {
-            TensorMutBacking::Host(buffer) => buffer,
+        let byte_len = match &self.backing {
+            TensorMutBacking::Host(buffer) => buffer.len(),
+            TensorMutBacking::Bytes(bytes) => bytes.len(),
+            TensorMutBacking::Device(_) => 0,
+        };
+        let start_bytes: &mut [u8] = match &mut self.backing {
+            TensorMutBacking::Host(buffer) => buffer.as_bytes_mut(),
+            TensorMutBacking::Bytes(bytes) => bytes,
             TensorMutBacking::Device(_) => {
                 return Err(device_resident_write("TensorMut::as_mut_slice"))
             }
         };
-        let byte_len = buffer.len();
-        let bytes = buffer
-            .as_bytes_mut()
+        let bytes = start_bytes
             .get_mut(start..end)
             .ok_or(Fn3Error::OutOfBounds {
                 what: "TensorMut::as_mut_slice (storage bytes)",
@@ -930,6 +1087,13 @@ impl<'a> TensorMut<'a> {
                         index: end as u64,
                         len: buffer.len() as u64,
                     })?
+            }
+            TensorMutBacking::Bytes(bytes) => {
+                bytes.get(start..end).ok_or(Fn3Error::OutOfBounds {
+                    what: "TensorMut contiguous window (window bytes)",
+                    index: end as u64,
+                    len: bytes.len() as u64,
+                })?
             }
             TensorMutBacking::Device(_) => return Err(device_resident_write(context)),
         };

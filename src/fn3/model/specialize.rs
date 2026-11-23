@@ -279,6 +279,22 @@ impl PlanAttr {
                     causal: params.keep_dims,
                 })
             }
+            OpId::Conv
+            | OpId::MaxPool
+            | OpId::AveragePool
+            | OpId::GlobalAveragePool
+            | OpId::BatchNorm
+            | OpId::Resize
+            | OpId::Pad
+            | OpId::Clip
+            | OpId::Sigmoid
+            | OpId::Maximum
+            | OpId::Minimum
+            | OpId::TopK => Err(attribute_error(format!(
+                "op {op} has no execution-plan attribute encoding in this revision; the typed IR \
+                 reads its OpParams, and the v3 CNN executor owns the plan encoding (phase 2, \
+                 #102/#104)"
+            ))),
             _ => {
                 if neutral {
                     Ok(PlanAttr::None)
@@ -1252,8 +1268,29 @@ impl<'a> Survey<'a> {
                     ]),
                 ])
             } // Every `OpId` has a rule above: this match is exhaustive on
-              // purpose, so adding an op id without a shape rule is a compile
-              // error rather than a runtime "unsupported" surprise.
+            // purpose, so adding an op id without a shape rule is a compile
+            // error rather than a runtime "unsupported" surprise.
+            OpId::Conv
+            | OpId::MaxPool
+            | OpId::AveragePool
+            | OpId::GlobalAveragePool
+            | OpId::BatchNorm
+            | OpId::Resize
+            | OpId::Pad
+            | OpId::Clip
+            | OpId::Sigmoid
+            | OpId::Maximum
+            | OpId::Minimum
+            | OpId::TopK => Err(Fn3Error::UnsupportedOp {
+                op,
+                backend: "planner",
+                reason: format!(
+                    "{} has no execution-plan shape rule in this revision; the typed IR shape \
+                     pass resolves it, and the v3 CNN executor owns the plan rule (phase 2, \
+                     #102/#104)",
+                    node.name
+                ),
+            }),
         }
     }
 

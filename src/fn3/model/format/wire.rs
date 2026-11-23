@@ -1,8 +1,8 @@
-//! Bounds-checked little-endian wire helpers and the payload checksum.
+//! Bounds-checked little-endian wire helpers.
 //!
 //! Everything here is deliberately small and dependency-free: the format is
 //! hand-framed, so the reader owns its own cursor instead of delegating to a
-//! serialization crate. Two rules are enforced by construction:
+//! serialization crate. Three rules are enforced by construction:
 //!
 //! 1. **No allocation without a validated length.** [`Reader::take`] checks the
 //!    length against the remaining input *before* slicing, and every count is
@@ -11,21 +11,19 @@
 //!    multiplication and one comparison, never memory.
 //! 2. **No unchecked arithmetic.** Every offset is added with `checked_add`, so
 //!    a 32-bit target reports [`FormatErrorKind::Truncated`] instead of wrapping.
+//! 3. **Every diagnostic carries an absolute file offset.** A [`Reader`] is
+//!    created with the file offset of its first byte, so a section decoded from
+//!    an mmap can name the byte the user has to look at.
 //!
-//! The checksum is CRC-32 (IEEE 802.3, reflected, polynomial `0xEDB88320`,
-//! initial value `0xFFFF_FFFF`, final XOR `0xFFFF_FFFF`, check value
-//! `0xCBF43926` for `"123456789"`). CRC-32 — not a hash — because the job is to
-//! detect accidental corruption (a truncated copy, a flipped bit on a network
-//! share), and a standard polynomial with a published check value is auditable
-//! without trusting this file. It is explicitly *not* a security boundary: an
-//! attacker who controls the bytes controls the checksum too, which is why the
-//! reader validates structure independently of the checksum.
+//! The payload is protected by SHA-256 in the `HASHES` section, not by a CRC.
+//! This module does not compute it: the artifact layer streams the ranges it
+//! hashes so a mapped weight section is never faulted in just to validate it.
 
 use super::error::{FormatError, FormatErrorKind};
 
 /// Largest name or string this format accepts, in bytes.
 ///
-/// ONNX value names in a real decoder are well under 100 bytes; the cap keeps a
+/// ONNX value names in a real model are well under 100 bytes; the cap keeps a
 /// declared length from being a memory request.
 pub(super) const MAX_STRING_BYTES: u64 = 4096;
 
@@ -95,9 +93,12 @@ impl Writer {
         Ok(())
     }
 
-    /// Zero-pad to the next multiple of eight.
-    pub(super) fn pad_to_8(&mut self) {
-        while !self.bytes.len().is_multiple_of(8) {
+    /// Zero-pad to the next multiple of 64.
+    ///
+    /// Every section and every weight payload is 64-byte aligned so a mapped
+    /// weight range is aligned for every dtype the artifact can carry.
+    pub(super) fn pad_to_64(&mut self) {
+        while !self.bytes.len().is_multiple_of(64) {
             self.bytes.push(0);
         }
     }
@@ -108,19 +109,32 @@ impl Writer {
 }
 
 /// Read side: a cursor over one byte range with checked reads.
+///
+/// `base` is the absolute file offset of `bytes[0]`; it is carried only so error
+/// messages can name a file position. It never changes an arithmetic result.
 pub(super) struct Reader<'a> {
     bytes: &'a [u8],
     pos: usize,
+    base: u64,
 }
 
 impl<'a> Reader<'a> {
     pub(super) fn new(bytes: &'a [u8]) -> Reader<'a> {
-        Reader { bytes, pos: 0 }
+        Reader::at(bytes, 0)
     }
 
-    /// Bytes consumed so far, i.e. the position that alignment is measured from.
-    pub(super) fn pos(&self) -> usize {
-        self.pos
+    /// A reader whose first byte is `base` in the file.
+    pub(super) fn at(bytes: &'a [u8], base: u64) -> Reader<'a> {
+        Reader {
+            bytes,
+            pos: 0,
+            base,
+        }
+    }
+
+    /// Absolute file offset of the next byte.
+    pub(super) fn pos_abs(&self) -> u64 {
+        self.base.saturating_add(self.pos as u64)
     }
 
     pub(super) fn remaining(&self) -> u64 {
@@ -135,13 +149,18 @@ impl<'a> Reader<'a> {
     ) -> Result<&'a [u8], FormatError> {
         let remaining = self.remaining();
         if len > remaining {
-            return Err(FormatError::truncated(what, len, remaining));
+            return Err(FormatError::truncated_at(
+                what,
+                self.pos_abs(),
+                len,
+                remaining,
+            ));
         }
         let len = len as usize;
         let start = self.pos;
         let end = start
             .checked_add(len)
-            .ok_or_else(|| FormatError::truncated(what, u64::MAX, remaining))?;
+            .ok_or_else(|| FormatError::truncated_at(what, self.pos_abs(), u64::MAX, remaining))?;
         // `end <= bytes.len()` follows from `len <= remaining`.
         self.pos = end;
         Ok(&self.bytes[start..end])
@@ -191,10 +210,17 @@ impl<'a> Reader<'a> {
                 MAX_STRING_BYTES,
             ));
         }
+        let offset = self.pos_abs();
         let bytes = self.take(len, what.clone())?;
         std::str::from_utf8(bytes)
             .map(str::to_owned)
-            .map_err(|error| FormatError::malformed(what, format!("not valid UTF-8: {error}")))
+            .map_err(|error| {
+                FormatError::malformed_at(
+                    what,
+                    offset,
+                    format!("the bytes are not valid UTF-8: {error}"),
+                )
+            })
     }
 
     /// Read a `u32` entry count and prove the entries can fit before allocating.
@@ -210,6 +236,7 @@ impl<'a> Reader<'a> {
         min_entry_bytes: u64,
     ) -> Result<usize, FormatError> {
         let what = what.into();
+        let offset = self.pos_abs();
         let count = self.u32(what.clone())? as u64;
         if count > limit {
             return Err(FormatError::limit(what, count, limit));
@@ -217,27 +244,29 @@ impl<'a> Reader<'a> {
         let needed = count.saturating_mul(min_entry_bytes);
         let remaining = self.remaining();
         if needed > remaining {
-            return Err(FormatError::truncated(what, needed, remaining));
+            return Err(FormatError::truncated_at(what, offset, needed, remaining));
         }
         Ok(count as usize)
     }
 
-    /// Skip to the next multiple of eight, requiring the padding to be zero.
+    /// Skip to the next multiple of 64, requiring the padding to be zero.
     ///
     /// Requiring zeros makes the encoding canonical: there is exactly one valid
     /// byte string for a given model, so a re-write is byte-identical.
-    pub(super) fn pad_to_8(&mut self, what: impl Into<String>) -> Result<(), FormatError> {
-        let padding = (8 - (self.pos % 8)) % 8;
+    pub(super) fn pad_to_64(&mut self, what: impl Into<String>) -> Result<(), FormatError> {
+        let padding = (64 - (self.pos % 64)) % 64;
         if padding == 0 {
             return Ok(());
         }
         let what = what.into();
+        let offset = self.pos_abs();
         let bytes = self.take(padding as u64, what.clone())?;
         if let Some(position) = bytes.iter().position(|&byte| byte != 0) {
-            return Err(FormatError::malformed(
+            return Err(FormatError::malformed_at(
                 what,
+                offset + position as u64,
                 format!(
-                    "alignment padding byte {position} is {:#04x}, expected 0",
+                    "alignment padding byte is {:#04x}, expected 0",
                     bytes[position]
                 ),
             ));
@@ -250,8 +279,9 @@ impl<'a> Reader<'a> {
         if self.pos == self.bytes.len() {
             Ok(())
         } else {
-            Err(FormatError::malformed(
+            Err(FormatError::malformed_at(
                 what,
+                self.pos_abs(),
                 format!("{} trailing bytes after the last field", self.remaining()),
             ))
         }
@@ -259,6 +289,7 @@ impl<'a> Reader<'a> {
 
     /// A reserved field that must be zero.
     pub(super) fn zero_u32(&mut self, field: &'static str) -> Result<(), FormatError> {
+        let offset = self.pos_abs();
         let value = self.u32(field)?;
         if value == 0 {
             Ok(())
@@ -266,37 +297,44 @@ impl<'a> Reader<'a> {
             Err(FormatError::new(FormatErrorKind::ReservedField {
                 field,
                 value: u64::from(value),
+                offset,
             }))
         }
     }
-}
 
-/// CRC-32 table for the reflected IEEE polynomial `0xEDB88320`.
-fn crc_table() -> [u32; 256] {
-    let mut table = [0u32; 256];
-    for (index, slot) in table.iter_mut().enumerate() {
-        let mut value = index as u32;
-        for _ in 0..8 {
-            value = if value & 1 == 1 {
-                (value >> 1) ^ 0xEDB8_8320
-            } else {
-                value >> 1
-            };
+    /// An enum discriminant this build defines.
+    pub(super) fn enum_code(
+        &mut self,
+        what: impl Into<String>,
+        limit: u8,
+    ) -> Result<u8, FormatError> {
+        let what = what.into();
+        let offset = self.pos_abs();
+        let code = self.u8(what.clone())?;
+        if code > limit {
+            return Err(FormatError::malformed_at(
+                what,
+                offset,
+                format!("code {code} is not defined; known codes are 0..={limit}"),
+            ));
         }
-        *slot = value;
+        Ok(code)
     }
-    table
-}
 
-/// CRC-32 (IEEE 802.3) of `bytes`.
-pub(super) fn crc32(bytes: &[u8]) -> u32 {
-    let table = crc_table();
-    let mut crc = 0xFFFF_FFFFu32;
-    for &byte in bytes {
-        let index = ((crc ^ u32::from(byte)) & 0xFF) as usize;
-        crc = (crc >> 8) ^ table[index];
+    /// A boolean encoded as one byte, 0 or 1.
+    pub(super) fn boolean(&mut self, what: impl Into<String>) -> Result<bool, FormatError> {
+        let what = what.into();
+        let offset = self.pos_abs();
+        match self.u8(what.clone())? {
+            0 => Ok(false),
+            1 => Ok(true),
+            other => Err(FormatError::malformed_at(
+                what,
+                offset,
+                format!("boolean is {other}, expected 0 or 1"),
+            )),
+        }
     }
-    crc ^ 0xFFFF_FFFF
 }
 
 #[cfg(test)]
@@ -304,31 +342,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn crc32_matches_the_published_check_value() {
-        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
-        assert_eq!(crc32(b""), 0);
-    }
-
-    #[test]
-    fn crc32_detects_every_single_byte_change() {
-        let reference = b"the quick brown fox jumps over the lazy dog";
-        let baseline = crc32(reference);
-        for position in 0..reference.len() {
-            let mut mutated = reference.to_vec();
-            mutated[position] ^= 0x01;
-            assert_ne!(
-                crc32(&mutated),
-                baseline,
-                "byte {position} was not detected"
-            );
-        }
-    }
-
-    #[test]
-    fn a_short_read_reports_both_sizes() {
-        let mut reader = Reader::new(&[1, 2, 3]);
+    fn a_short_read_reports_the_absolute_offset_and_both_sizes() {
+        let mut reader = Reader::at(&[1, 2, 3], 4096);
         let error = reader.u64("payload length").unwrap_err();
         let text = error.to_string();
+        assert!(text.contains("byte 4096"), "{text}");
         assert!(text.contains("8 bytes are required"), "{text}");
         assert!(text.contains("3 are available"), "{text}");
     }
@@ -357,34 +375,33 @@ mod tests {
             FormatErrorKind::LimitExceeded { .. }
         ));
 
-        let mut invalid = vec![2, 0, 0, 0, 0xC3, 0x28];
+        let invalid = vec![2, 0, 0, 0, 0xC3, 0x28];
         let mut reader = Reader::new(&invalid);
         assert!(matches!(
             reader.string("name").unwrap_err().kind(),
-            FormatErrorKind::Malformed { .. }
+            FormatErrorKind::MalformedAt { .. }
         ));
-        invalid.clear();
     }
 
     #[test]
     fn padding_must_be_zero_and_alignment_is_exact() {
         let mut writer = Writer::with_capacity(0);
         writer.u8(1);
-        writer.pad_to_8();
-        assert_eq!(writer.len(), 8);
+        writer.pad_to_64();
+        assert_eq!(writer.len(), 64);
         writer.u32(7);
         writer.u64(9);
-        assert_eq!(writer.len(), 20);
-        writer.pad_to_8();
+        assert_eq!(writer.len(), 76);
+        writer.pad_to_64();
         let bytes = writer.into_bytes();
-        assert_eq!(bytes.len(), 24);
+        assert_eq!(bytes.len(), 128);
 
         let mut reader = Reader::new(&bytes);
         assert_eq!(reader.u8("tag").unwrap(), 1);
-        reader.pad_to_8("padding").unwrap();
+        reader.pad_to_64("padding").unwrap();
         assert_eq!(reader.u32("seven").unwrap(), 7);
         assert_eq!(reader.u64("nine").unwrap(), 9);
-        reader.pad_to_8("padding").unwrap();
+        reader.pad_to_64("padding").unwrap();
         reader.finish("section").unwrap();
 
         let mut dirty = bytes.clone();
@@ -392,8 +409,8 @@ mod tests {
         let mut reader = Reader::new(&dirty);
         reader.u8("tag").unwrap();
         assert!(matches!(
-            reader.pad_to_8("padding").unwrap_err().kind(),
-            FormatErrorKind::Malformed { .. }
+            reader.pad_to_64("padding").unwrap_err().kind(),
+            FormatErrorKind::MalformedAt { .. }
         ));
     }
 
@@ -409,12 +426,11 @@ mod tests {
     }
 
     #[test]
-    fn trailing_bytes_are_reported() {
+    fn trailing_bytes_are_reported_at_their_offset() {
         let mut reader = Reader::new(&[1, 2, 3]);
         reader.u8("one").unwrap();
-        assert!(matches!(
-            reader.finish("section").unwrap_err().kind(),
-            FormatErrorKind::Malformed { .. }
-        ));
+        let error = reader.finish("section").unwrap_err();
+        assert!(matches!(error.kind(), FormatErrorKind::MalformedAt { .. }));
+        assert!(error.to_string().contains("byte 1"), "{error}");
     }
 }

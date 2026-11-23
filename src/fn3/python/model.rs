@@ -1,62 +1,37 @@
-//! Prepared-model artifacts and loaded models for Python.
-//!
-//! # What a Python caller sees
+//! Prepared-model artifacts, loaded models and diagnostics for Python.
 //!
 //! ```text
-//! prepare(onnx, artifact)   ONNX ──► versioned artifact        (writes a file)
-//! inspect(artifact)         bytes ──► geometry/size/checksum   (no device)
-//! load(artifact, source=None) artifact ► Model ──► Session     (needs a device)
+//! prepare(onnx, artifact, target=..., precision=...)  ONNX -> one .fnn3 file
+//! inspect(artifact)                                   describe without mapping
+//! load(artifact, target=...)                          mmap -> Model
+//! Model.session()                                     one independent Session
+//! Session.run({name: values})                         one forward
+//! doctor(onnx)                                        diagnose before prepare
 //! ```
 //!
-//! `prepare` is idempotent in the useful sense: if the destination already
-//! holds exactly the artifact those arguments produce, it reports
-//! `status="already_valid"` and writes nothing. "I wrote it" and "it was
-//! already there and valid" are therefore different, observable outcomes
-//! ([`PyPrepareReport::wrote`]).
-//!
-//! # The artifact is the input
-//!
-//! `load` reads one file. The prepared artifact carries the graph, the weights,
-//! the geometry and the declared window, so the planner and the session are fed
-//! from it and no ONNX file is needed. `source=<ONNX path>` is optional and
-//! only adds the proof that the two files still describe the same model:
-//! [`check_source_agrees`] compares provenance, geometry, every value, every
-//! node and every weight byte before anything executes, and a disagreement is
-//! refused. The artifact's bytes are what run either way — with no source they
-//! are used directly, with a source they are first proved byte-identical — so
-//! the two paths cannot drift numerically.
-//!
-//! # Device selection
-//!
-//! The device is resolved *before* any file is read, so asking for a Vulkan
-//! adapter on a build without the feature fails immediately with the request,
-//! the reason and the list of available devices — never with a CPU result.
+//! The artifact is the input. `load` maps it, validates every section hash and
+//! decodes the stored plan; no ONNX file is read and nothing is planned again.
+//! `Model` is immutable and shareable; each `Session` owns its arena, worker
+//! pool and mutable state.
 
+use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use pyo3::prelude::*;
-use pyo3::types::PyModule;
+use pyo3::types::{PyDict, PyModule};
 
-use crate::inference::backend::cpu::CpuBackend;
-#[cfg(feature = "vulkan")]
-use crate::inference::backend::vulkan::VulkanBackend;
-use crate::inference::backend::Backend;
 use crate::inference::device::DeviceId;
-#[cfg(feature = "vulkan")]
-use crate::inference::device::DeviceRequest;
-use crate::inference::digest::hex;
-use crate::inference::error::Fn3Error as CoreError;
-use crate::inference::import::{import_onnx_file, DecoderGeometry, ModelImport, PositionEmbedding};
-use crate::inference::model::format::{ArtifactMetadata, PreparedArtifact, PreparedHeader};
-use crate::inference::model::weights::WeightTensor;
-use crate::inference::model::{ModelWeights, Planner, PreparedModel};
-use crate::inference::shape::{LiveDims, ShapeEnvelope, Symbol};
-use crate::inference::tensor::TensorMeta;
+use crate::inference::digest::{sha256_hex, Sha256};
+use crate::inference::import::import_onnx_graph_with_shapes;
+use crate::inference::model::format::{
+    inspect_file, resolve_targets, Artifact, ArtifactMetadata, Precision, PreparedArtifact, TARGETS,
+};
+use crate::inference::runtime::{Session as RuntimeSession, Threading};
 
-use super::device::{describe as describe_device, resolve as resolve_device, PyDevice};
+use super::device::{describe as describe_device, resolve as resolve_device};
 use super::errors;
 use super::session::PySession;
 
@@ -66,211 +41,6 @@ static MODEL_IDENTITY: AtomicU64 = AtomicU64::new(1);
 // ---------------------------------------------------------------------------
 // Reporting types
 // ---------------------------------------------------------------------------
-
-/// Architecture geometry detected by the importer and carried by the artifact.
-#[pyclass(module = "fastnn._core.inference", name = "Geometry", frozen)]
-pub struct PyGeometry {
-    layers: u32,
-    hidden_size: u32,
-    mlp_hidden_size: u32,
-    query_heads: u32,
-    kv_heads: u32,
-    head_dim: u32,
-    vocab_size: u32,
-    max_positions: u32,
-    layer_norm_epsilon: Option<f32>,
-}
-
-impl PyGeometry {
-    fn of(geometry: &DecoderGeometry) -> PyGeometry {
-        // `Learned` is the only position-embedding kind this build defines.
-        let PositionEmbedding::Learned { max_positions, .. } = geometry.positions;
-        PyGeometry {
-            layers: geometry.layers,
-            hidden_size: geometry.hidden_size,
-            mlp_hidden_size: geometry.mlp_hidden_size,
-            query_heads: geometry.query_heads,
-            kv_heads: geometry.kv_heads,
-            head_dim: geometry.head_dim,
-            vocab_size: geometry.vocab_size,
-            max_positions,
-            layer_norm_epsilon: geometry.layer_norm_epsilon,
-        }
-    }
-}
-
-#[pymethods]
-impl PyGeometry {
-    /// Transformer blocks.
-    #[getter]
-    fn layers(&self) -> u32 {
-        self.layers
-    }
-
-    /// Model width.
-    #[getter]
-    fn hidden_size(&self) -> u32 {
-        self.hidden_size
-    }
-
-    /// MLP intermediate width.
-    #[getter]
-    fn mlp_hidden_size(&self) -> u32 {
-        self.mlp_hidden_size
-    }
-
-    /// Query heads.
-    #[getter]
-    fn query_heads(&self) -> u32 {
-        self.query_heads
-    }
-
-    /// Key/value heads.
-    #[getter]
-    fn kv_heads(&self) -> u32 {
-        self.kv_heads
-    }
-
-    /// Per-head width.
-    #[getter]
-    fn head_dim(&self) -> u32 {
-        self.head_dim
-    }
-
-    /// Vocabulary size, from the token embedding table.
-    #[getter]
-    fn vocab_size(&self) -> u32 {
-        self.vocab_size
-    }
-
-    /// Rows in the learned position table.
-    #[getter]
-    fn max_positions(&self) -> u32 {
-        self.max_positions
-    }
-
-    /// LayerNorm epsilon when the importer detected it structurally.
-    #[getter]
-    fn layer_norm_epsilon(&self) -> Option<f32> {
-        self.layer_norm_epsilon
-    }
-
-    /// KV cache bytes one session allocates per token (both buffers, all layers).
-    #[getter]
-    fn kv_bytes_per_token(&self) -> u64 {
-        u64::from(self.layers) * 2 * u64::from(self.kv_heads) * u64::from(self.head_dim) * 4
-    }
-
-    fn __repr__(&self) -> String {
-        self.render()
-    }
-}
-
-impl PyGeometry {
-    fn render(&self) -> String {
-        format!(
-            "Geometry(layers={}, hidden={}, heads={}/{}, head_dim={}, vocab={}, max_positions={})",
-            self.layers,
-            self.hidden_size,
-            self.query_heads,
-            self.kv_heads,
-            self.head_dim,
-            self.vocab_size,
-            self.max_positions
-        )
-    }
-}
-
-/// The artifact's declared dynamic window, per symbol.
-#[pyclass(module = "fastnn._core.inference", name = "Envelope", frozen)]
-pub struct PyEnvelope {
-    bounds: [(u64, u64); Symbol::COUNT],
-}
-
-impl PyEnvelope {
-    fn of(envelope: &ShapeEnvelope) -> PyEnvelope {
-        let mut bounds = [(0, 0); Symbol::COUNT];
-        for symbol in Symbol::ALL {
-            let bound = envelope.get(symbol);
-            bounds[symbol as usize] = (bound.min(), bound.max());
-        }
-        PyEnvelope { bounds }
-    }
-
-    fn bound(&self, symbol: Symbol) -> (u64, u64) {
-        self.bounds[symbol as usize]
-    }
-}
-
-#[pymethods]
-impl PyEnvelope {
-    /// `batch` bound, inclusive.
-    #[getter]
-    fn batch(&self) -> (u64, u64) {
-        self.bound(Symbol::Batch)
-    }
-
-    /// `seq` bound: tokens in one call.
-    #[getter]
-    fn seq(&self) -> (u64, u64) {
-        self.bound(Symbol::Seq)
-    }
-
-    /// `past` bound: tokens already cached.
-    #[getter]
-    fn past(&self) -> (u64, u64) {
-        self.bound(Symbol::Past)
-    }
-
-    /// `total` bound: `past + seq`.
-    #[getter]
-    fn total(&self) -> (u64, u64) {
-        self.bound(Symbol::Total)
-    }
-
-    /// Query-head count (fixed by the weights).
-    #[getter]
-    fn n_heads(&self) -> (u64, u64) {
-        self.bound(Symbol::NHeads)
-    }
-
-    /// Key/value-head count (fixed by the weights).
-    #[getter]
-    fn n_kv_heads(&self) -> (u64, u64) {
-        self.bound(Symbol::NKvHeads)
-    }
-
-    /// Per-head width (fixed by the weights).
-    #[getter]
-    fn head_dim(&self) -> (u64, u64) {
-        self.bound(Symbol::HeadDim)
-    }
-
-    /// Every bound as `{symbol: (min, max)}`.
-    fn as_dict(&self) -> std::collections::BTreeMap<&'static str, (u64, u64)> {
-        Symbol::ALL
-            .into_iter()
-            .map(|symbol| (symbol.name(), self.bound(symbol)))
-            .collect()
-    }
-
-    fn __repr__(&self) -> String {
-        self.render()
-    }
-}
-
-impl PyEnvelope {
-    fn render(&self) -> String {
-        let rendered: Vec<String> = Symbol::ALL
-            .into_iter()
-            .map(|symbol| {
-                let (min, max) = self.bound(symbol);
-                format!("{}={min}..={max}", symbol.name())
-            })
-            .collect();
-        format!("Envelope({})", rendered.join(", "))
-    }
-}
 
 /// Provenance recorded in the artifact.
 #[pyclass(module = "fastnn._core.inference", name = "Metadata", frozen)]
@@ -335,15 +105,182 @@ impl PyMetadata {
     }
 
     fn __repr__(&self) -> String {
-        self.render()
-    }
-}
-
-impl PyMetadata {
-    fn render(&self) -> String {
         format!(
             "Metadata(producer={:?}, opset={}, ir_version={})",
             self.producer, self.opset_version, self.ir_version
+        )
+    }
+}
+
+/// One target plan, as a Python report.
+#[pyclass(module = "fastnn._core.inference", name = "PlanInfo", frozen)]
+pub struct PyPlanInfo {
+    target: String,
+    precision: String,
+    segments: usize,
+    unfused_segments: usize,
+    fusions: usize,
+    reorders: usize,
+    reorder_bytes: u64,
+    arena_bytes: u64,
+    peak_bytes: u64,
+    scalar_segments: usize,
+    one_dnn_segments: usize,
+    layout: String,
+}
+
+impl PyPlanInfo {
+    fn of(plan: &crate::inference::model::format::PlanSummary) -> PyPlanInfo {
+        PyPlanInfo {
+            target: plan.target.clone(),
+            precision: plan.precision.name().to_string(),
+            segments: plan.segments,
+            unfused_segments: plan.unfused_segments,
+            fusions: plan.fusions,
+            reorders: plan.reorders,
+            reorder_bytes: plan.reorder_bytes,
+            arena_bytes: plan.arena_bytes,
+            peak_bytes: plan.peak_bytes,
+            scalar_segments: plan.engines.scalar,
+            one_dnn_segments: plan.engines.one_dnn,
+            layout: plan.layout.name().to_string(),
+        }
+    }
+}
+
+#[pymethods]
+impl PyPlanInfo {
+    #[getter]
+    fn target(&self) -> &str {
+        &self.target
+    }
+
+    #[getter]
+    fn precision(&self) -> &str {
+        &self.precision
+    }
+
+    #[getter]
+    fn segments(&self) -> usize {
+        self.segments
+    }
+
+    #[getter]
+    fn unfused_segments(&self) -> usize {
+        self.unfused_segments
+    }
+
+    #[getter]
+    fn fusions(&self) -> usize {
+        self.fusions
+    }
+
+    #[getter]
+    fn reorders(&self) -> usize {
+        self.reorders
+    }
+
+    #[getter]
+    fn reorder_bytes(&self) -> u64 {
+        self.reorder_bytes
+    }
+
+    #[getter]
+    fn arena_bytes(&self) -> u64 {
+        self.arena_bytes
+    }
+
+    #[getter]
+    fn peak_bytes(&self) -> u64 {
+        self.peak_bytes
+    }
+
+    #[getter]
+    fn scalar_segments(&self) -> usize {
+        self.scalar_segments
+    }
+
+    #[getter]
+    fn one_dnn_segments(&self) -> usize {
+        self.one_dnn_segments
+    }
+
+    #[getter]
+    fn layout(&self) -> &str {
+        &self.layout
+    }
+
+    /// Every field as a dictionary.
+    fn as_dict(&self) -> std::collections::BTreeMap<&'static str, String> {
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("target", self.target.clone());
+        map.insert("precision", self.precision.clone());
+        map.insert("segments", self.segments.to_string());
+        map.insert("unfused_segments", self.unfused_segments.to_string());
+        map.insert("fusions", self.fusions.to_string());
+        map.insert("reorders", self.reorders.to_string());
+        map.insert("reorder_bytes", self.reorder_bytes.to_string());
+        map.insert("arena_bytes", self.arena_bytes.to_string());
+        map.insert("peak_bytes", self.peak_bytes.to_string());
+        map.insert("scalar_segments", self.scalar_segments.to_string());
+        map.insert("one_dnn_segments", self.one_dnn_segments.to_string());
+        map.insert("layout", self.layout.clone());
+        map
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "PlanInfo(target={:?}, segments={}, fusions={}, arena_bytes={})",
+            self.target, self.segments, self.fusions, self.arena_bytes
+        )
+    }
+}
+
+fn plan_infos(plans: &[crate::inference::model::format::PlanSummary]) -> Vec<PyPlanInfo> {
+    plans.iter().map(PyPlanInfo::of).collect()
+}
+
+/// One section, as Python sees it.
+#[pyclass(module = "fastnn._core.inference", name = "Section", frozen)]
+pub struct PySection {
+    name: String,
+    offset: u64,
+    length: u64,
+    sha256: String,
+    verified: bool,
+}
+
+#[pymethods]
+impl PySection {
+    #[getter]
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[getter]
+    fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    #[getter]
+    fn length(&self) -> u64 {
+        self.length
+    }
+
+    #[getter]
+    fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
+    #[getter]
+    fn verified(&self) -> bool {
+        self.verified
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Section(name={:?}, offset={}, length={}, verified={})",
+            self.name, self.offset, self.length, self.verified
         )
     }
 }
@@ -355,21 +292,18 @@ pub struct PyPrepareReport {
     status: String,
     size_bytes: u64,
     sha256: String,
-    payload_crc32: u32,
+    source_sha256: String,
+    nodes: usize,
+    values: usize,
+    weights: usize,
     weight_bytes: u64,
-    geometry: Py<PyGeometry>,
-    envelope: Py<PyEnvelope>,
+    plans: Vec<PyPlanInfo>,
     metadata: Py<PyMetadata>,
     elapsed_ms: f64,
-    verified: bool,
-    /// Differences from the file that was already there, when it differed and
-    /// `overwrite=True` replaced it.
-    replaced_differences: Vec<String>,
 }
 
 #[pymethods]
 impl PyPrepareReport {
-    /// Path that was written, or that already held this artifact.
     #[getter]
     fn path(&self) -> &str {
         &self.path
@@ -381,71 +315,77 @@ impl PyPrepareReport {
         &self.status
     }
 
-    /// `True` when this call created or replaced the file.
     #[getter]
     fn wrote(&self) -> bool {
         self.status != "already_valid"
     }
 
-    /// File size in bytes.
     #[getter]
     fn size_bytes(&self) -> u64 {
         self.size_bytes
     }
 
-    /// SHA-256 of the file on disk, comparable with `sha256sum`.
+    /// SHA-256 of the artifact file.
     #[getter]
     fn sha256(&self) -> &str {
         &self.sha256
     }
 
-    /// The artifact's own payload CRC-32, as stored in its header.
+    /// SHA-256 of the source ONNX file.
     #[getter]
-    fn payload_crc32(&self) -> u32 {
-        self.payload_crc32
+    fn source_sha256(&self) -> &str {
+        &self.source_sha256
     }
 
-    /// Weight payload bytes the artifact carries.
+    #[getter]
+    fn nodes(&self) -> usize {
+        self.nodes
+    }
+
+    #[getter]
+    fn values(&self) -> usize {
+        self.values
+    }
+
+    #[getter]
+    fn weights(&self) -> usize {
+        self.weights
+    }
+
     #[getter]
     fn weight_bytes(&self) -> u64 {
         self.weight_bytes
     }
 
-    /// Detected architecture geometry.
     #[getter]
-    fn geometry(&self, py: Python<'_>) -> Py<PyGeometry> {
-        Py::clone_ref(&self.geometry, py)
+    fn plans(&self) -> Vec<PyPlanInfo> {
+        self.plans
+            .iter()
+            .map(|plan| PyPlanInfo {
+                target: plan.target.clone(),
+                precision: plan.precision.clone(),
+                segments: plan.segments,
+                unfused_segments: plan.unfused_segments,
+                fusions: plan.fusions,
+                reorders: plan.reorders,
+                reorder_bytes: plan.reorder_bytes,
+                arena_bytes: plan.arena_bytes,
+                peak_bytes: plan.peak_bytes,
+                scalar_segments: plan.scalar_segments,
+                one_dnn_segments: plan.one_dnn_segments,
+                layout: plan.layout.clone(),
+            })
+            .collect()
     }
 
-    /// Declared dynamic window.
-    #[getter]
-    fn envelope(&self, py: Python<'_>) -> Py<PyEnvelope> {
-        Py::clone_ref(&self.envelope, py)
-    }
-
-    /// Provenance.
     #[getter]
     fn metadata(&self, py: Python<'_>) -> Py<PyMetadata> {
         Py::clone_ref(&self.metadata, py)
     }
 
-    /// Wall time of the call in milliseconds.
     #[getter]
     fn elapsed_ms(&self) -> f64 {
         self.elapsed_ms
-    }
-
-    /// `True` when the file on disk is byte-identical to the artifact this call
-    /// built (compared by SHA-256), for all three statuses.
-    #[getter]
-    fn verified(&self) -> bool {
-        self.verified
-    }
-
-    /// What differed from the file that `overwrite=True` replaced.
-    #[getter]
-    fn replaced_differences(&self) -> Vec<String> {
-        self.replaced_differences.clone()
     }
 
     fn __repr__(&self) -> String {
@@ -464,16 +404,20 @@ impl PyPrepareReport {
 pub struct PyArtifactInfo {
     path: String,
     size_bytes: u64,
-    sha256: String,
     format_version: u16,
-    payload_bytes: u64,
-    payload_crc32: u32,
+    source_sha256: String,
+    nodes: usize,
+    values: usize,
+    inputs: usize,
+    outputs: usize,
+    weights: usize,
     weight_bytes: u64,
-    value_count: usize,
-    node_count: usize,
-    weight_count: usize,
-    geometry: Py<PyGeometry>,
-    envelope: Py<PyEnvelope>,
+    plans: Vec<PyPlanInfo>,
+    quant_precision: String,
+    quant_entries: usize,
+    sections: Vec<PySection>,
+    mapped_bytes: u64,
+    bytes_read: u64,
     metadata: Py<PyMetadata>,
     elapsed_ms: f64,
 }
@@ -490,27 +434,39 @@ impl PyArtifactInfo {
         self.size_bytes
     }
 
-    /// SHA-256 of the file, comparable with `sha256sum`.
-    #[getter]
-    fn sha256(&self) -> &str {
-        &self.sha256
-    }
-
-    /// Prepared-model format version in the header.
     #[getter]
     fn format_version(&self) -> u16 {
         self.format_version
     }
 
     #[getter]
-    fn payload_bytes(&self) -> u64 {
-        self.payload_bytes
+    fn source_sha256(&self) -> &str {
+        &self.source_sha256
     }
 
-    /// The artifact's own payload CRC-32.
     #[getter]
-    fn payload_crc32(&self) -> u32 {
-        self.payload_crc32
+    fn nodes(&self) -> usize {
+        self.nodes
+    }
+
+    #[getter]
+    fn values(&self) -> usize {
+        self.values
+    }
+
+    #[getter]
+    fn inputs(&self) -> usize {
+        self.inputs
+    }
+
+    #[getter]
+    fn outputs(&self) -> usize {
+        self.outputs
+    }
+
+    #[getter]
+    fn weights(&self) -> usize {
+        self.weights
     }
 
     #[getter]
@@ -519,28 +475,59 @@ impl PyArtifactInfo {
     }
 
     #[getter]
-    fn value_count(&self) -> usize {
-        self.value_count
+    fn plans(&self) -> Vec<PyPlanInfo> {
+        self.plans
+            .iter()
+            .map(|plan| PyPlanInfo {
+                target: plan.target.clone(),
+                precision: plan.precision.clone(),
+                segments: plan.segments,
+                unfused_segments: plan.unfused_segments,
+                fusions: plan.fusions,
+                reorders: plan.reorders,
+                reorder_bytes: plan.reorder_bytes,
+                arena_bytes: plan.arena_bytes,
+                peak_bytes: plan.peak_bytes,
+                scalar_segments: plan.scalar_segments,
+                one_dnn_segments: plan.one_dnn_segments,
+                layout: plan.layout.clone(),
+            })
+            .collect()
     }
 
     #[getter]
-    fn node_count(&self) -> usize {
-        self.node_count
+    fn quant_precision(&self) -> &str {
+        &self.quant_precision
     }
 
     #[getter]
-    fn weight_count(&self) -> usize {
-        self.weight_count
+    fn quant_entries(&self) -> usize {
+        self.quant_entries
     }
 
     #[getter]
-    fn geometry(&self, py: Python<'_>) -> Py<PyGeometry> {
-        Py::clone_ref(&self.geometry, py)
+    fn sections(&self) -> Vec<PySection> {
+        self.sections
+            .iter()
+            .map(|section| PySection {
+                name: section.name.clone(),
+                offset: section.offset,
+                length: section.length,
+                sha256: section.sha256.clone(),
+                verified: section.verified,
+            })
+            .collect()
+    }
+
+    /// Always 0: `inspect` never maps the file.
+    #[getter]
+    fn mapped_bytes(&self) -> u64 {
+        self.mapped_bytes
     }
 
     #[getter]
-    fn envelope(&self, py: Python<'_>) -> Py<PyEnvelope> {
-        Py::clone_ref(&self.envelope, py)
+    fn bytes_read(&self) -> u64 {
+        self.bytes_read
     }
 
     #[getter]
@@ -553,48 +540,176 @@ impl PyArtifactInfo {
         self.elapsed_ms
     }
 
-    fn __repr__(&self, py: Python<'_>) -> String {
+    fn __repr__(&self) -> String {
         format!(
-            "ArtifactInfo(path={:?}, size_bytes={}, format_version={}, sha256={:?}, {})",
+            "ArtifactInfo(path={:?}, size_bytes={}, nodes={}, values={}, plans={})",
             self.path,
             self.size_bytes,
-            self.format_version,
-            &self.sha256[..16.min(self.sha256.len())],
-            self.geometry.bind(py).borrow().render()
+            self.nodes,
+            self.values,
+            self.plans.len()
+        )
+    }
+}
+
+/// One doctor finding.
+#[pyclass(module = "fastnn._core.inference", name = "DoctorIssue", frozen)]
+pub struct PyDoctorIssue {
+    node: Option<String>,
+    category: String,
+    message: String,
+}
+
+#[pymethods]
+impl PyDoctorIssue {
+    #[getter]
+    fn node(&self) -> Option<&str> {
+        self.node.as_deref()
+    }
+
+    #[getter]
+    fn category(&self) -> &str {
+        &self.category
+    }
+
+    #[getter]
+    fn message(&self) -> &str {
+        &self.message
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "DoctorIssue(category={:?}, node={:?})",
+            self.category, self.node
+        )
+    }
+}
+
+/// The outcome of [`doctor`].
+#[pyclass(module = "fastnn._core.inference", name = "DoctorReport", frozen)]
+pub struct PyDoctorReport {
+    path: String,
+    ok: bool,
+    nodes: usize,
+    values: usize,
+    weights: usize,
+    weight_bytes: u64,
+    arena_bytes: u64,
+    peak_bytes: u64,
+    expected_memory_bytes: u64,
+    problems: Vec<PyDoctorIssue>,
+    inputs: Vec<String>,
+    dynamic_symbols: Vec<(String, usize)>,
+    dtypes: Vec<(String, usize)>,
+    elapsed_ms: f64,
+}
+
+#[pymethods]
+impl PyDoctorReport {
+    #[getter]
+    fn path(&self) -> &str {
+        &self.path
+    }
+
+    #[getter]
+    fn ok(&self) -> bool {
+        self.ok
+    }
+
+    #[getter]
+    fn nodes(&self) -> usize {
+        self.nodes
+    }
+
+    #[getter]
+    fn values(&self) -> usize {
+        self.values
+    }
+
+    #[getter]
+    fn weights(&self) -> usize {
+        self.weights
+    }
+
+    #[getter]
+    fn weight_bytes(&self) -> u64 {
+        self.weight_bytes
+    }
+
+    #[getter]
+    fn arena_bytes(&self) -> u64 {
+        self.arena_bytes
+    }
+
+    #[getter]
+    fn peak_bytes(&self) -> u64 {
+        self.peak_bytes
+    }
+
+    #[getter]
+    fn expected_memory_bytes(&self) -> u64 {
+        self.expected_memory_bytes
+    }
+
+    #[getter]
+    fn problems(&self) -> Vec<PyDoctorIssue> {
+        self.problems
+            .iter()
+            .map(|issue| PyDoctorIssue {
+                node: issue.node.clone(),
+                category: issue.category.clone(),
+                message: issue.message.clone(),
+            })
+            .collect()
+    }
+
+    /// The graph inputs with their declared shapes.
+    #[getter]
+    fn inputs(&self) -> Vec<String> {
+        self.inputs.clone()
+    }
+
+    #[getter]
+    fn dynamic_symbols(&self) -> std::collections::BTreeMap<String, usize> {
+        self.dynamic_symbols.iter().cloned().collect()
+    }
+
+    #[getter]
+    fn dtypes(&self) -> std::collections::BTreeMap<String, usize> {
+        self.dtypes.iter().cloned().collect()
+    }
+
+    #[getter]
+    fn elapsed_ms(&self) -> f64 {
+        self.elapsed_ms
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "DoctorReport(ok={}, nodes={}, problems={})",
+            self.ok,
+            self.nodes,
+            self.problems.len()
         )
     }
 }
 
 // ---------------------------------------------------------------------------
-// Loaded model
+// The loaded model
 // ---------------------------------------------------------------------------
 
-/// A loaded, validated prepared model bound to one device.
-///
-/// Immutable and shareable by Python threads: it holds `Arc`s, so every
-/// [`PySession`] created from it shares the weights and the backend and owns its
-/// own KV cache.
+/// A loaded, validated prepared model. Immutable and shareable by threads.
 #[pyclass(module = "fastnn._core.inference", name = "Model", frozen)]
 pub struct PyModel {
-    model: Arc<PreparedModel>,
-    import: Arc<ModelImport>,
-    backend: Arc<dyn Backend>,
-    device: DeviceId,
-    capacity: u64,
-    weight_int8: bool,
+    artifact: Arc<Artifact>,
     instance: u64,
     path: String,
-    source: Option<String>,
     sha256: String,
     size_bytes: u64,
-    geometry: Py<PyGeometry>,
-    envelope: Py<PyEnvelope>,
+    target: Option<String>,
     metadata: Py<PyMetadata>,
-    weight_bytes: u64,
-    weight_count: usize,
-    value_count: usize,
-    node_count: usize,
-    kv_bytes: u64,
+    plans: Vec<PyPlanInfo>,
+    elapsed_ms: f64,
 }
 
 #[pymethods]
@@ -605,14 +720,7 @@ impl PyModel {
         &self.path
     }
 
-    /// Path of the ONNX source this model was verified against, when one was
-    /// given; `None` for an artifact-only load.
-    #[getter]
-    fn source(&self) -> Option<&str> {
-        self.source.as_deref()
-    }
-
-    /// SHA-256 of the artifact file.
+    /// SHA-256 of the artifact file, computed by streaming it on load.
     #[getter]
     fn sha256(&self) -> &str {
         &self.sha256
@@ -624,22 +732,16 @@ impl PyModel {
         self.size_bytes
     }
 
-    /// Resolved device, as a `Device`.
+    /// The selected target plan, when one was requested.
     #[getter]
-    fn device(&self, py: Python<'_>) -> PyResult<Py<PyDevice>> {
-        describe_device(py, self.device)
+    fn target(&self) -> Option<&str> {
+        self.target.as_deref()
     }
 
-    /// Architecture geometry.
+    /// The default target name carried by the artifact.
     #[getter]
-    fn geometry(&self, py: Python<'_>) -> Py<PyGeometry> {
-        Py::clone_ref(&self.geometry, py)
-    }
-
-    /// Declared dynamic window.
-    #[getter]
-    fn envelope(&self, py: Python<'_>) -> Py<PyEnvelope> {
-        Py::clone_ref(&self.envelope, py)
+    fn default_target(&self) -> &str {
+        self.artifact.default_target()
     }
 
     /// Provenance.
@@ -648,185 +750,217 @@ impl PyModel {
         Py::clone_ref(&self.metadata, py)
     }
 
-    /// KV cache capacity in tokens that each session allocates.
     #[getter]
-    fn capacity(&self) -> u64 {
-        self.capacity
+    fn plans(&self) -> Vec<PyPlanInfo> {
+        self.plans
+            .iter()
+            .map(|plan| PyPlanInfo {
+                target: plan.target.clone(),
+                precision: plan.precision.clone(),
+                segments: plan.segments,
+                unfused_segments: plan.unfused_segments,
+                fusions: plan.fusions,
+                reorders: plan.reorders,
+                reorder_bytes: plan.reorder_bytes,
+                arena_bytes: plan.arena_bytes,
+                peak_bytes: plan.peak_bytes,
+                scalar_segments: plan.scalar_segments,
+                one_dnn_segments: plan.one_dnn_segments,
+                layout: plan.layout.clone(),
+            })
+            .collect()
     }
 
-    /// `True` when sessions pack eligible projection weights as INT8.
+    /// Typed graph nodes.
     #[getter]
-    fn weight_int8(&self) -> bool {
-        self.weight_int8
+    fn nodes(&self) -> usize {
+        self.artifact.graph().node_count()
     }
 
-    /// KV cache bytes each session allocates (keys and values, all layers).
+    /// Typed graph values.
     #[getter]
-    fn kv_bytes(&self) -> u64 {
-        self.kv_bytes
+    fn values(&self) -> usize {
+        self.artifact.graph().value_count()
     }
 
-    /// Weight tensors the artifact carried.
+    /// Weight table entries.
     #[getter]
-    fn weight_count(&self) -> usize {
-        self.weight_count
+    fn weights(&self) -> usize {
+        self.artifact.weights().len()
     }
 
     /// Weight payload bytes.
     #[getter]
     fn weight_bytes(&self) -> u64 {
-        self.weight_bytes
+        self.artifact.weight_bytes()
     }
 
-    /// Values in the imported graph.
+    /// Graph input names, in declaration order.
     #[getter]
-    fn value_count(&self) -> usize {
-        self.value_count
+    fn inputs(&self) -> Vec<String> {
+        self.artifact.inputs().to_vec()
     }
 
-    /// Operations in the imported graph.
+    /// Graph output names, in declaration order.
     #[getter]
-    fn node_count(&self) -> usize {
-        self.node_count
+    fn outputs(&self) -> Vec<String> {
+        self.artifact.outputs().to_vec()
+    }
+
+    /// The device every session executes on (`cpu` for this runtime).
+    #[getter]
+    fn device(&self, py: Python<'_>) -> PyResult<Py<super::device::PyDevice>> {
+        describe_device(py, DeviceId::Cpu)
+    }
+
+    /// Wall time the load took, in milliseconds.
+    #[getter]
+    fn elapsed_ms(&self) -> f64 {
+        self.elapsed_ms
     }
 
     /// Open an independent session over this model.
     ///
-    /// Each session owns its KV cache, plan cache and counters; two sessions
-    /// share only the immutable weights and the backend.
-    fn session(&self, py: Python<'_>) -> PyResult<Py<PySession>> {
-        PySession::open(
-            py,
-            Arc::clone(&self.model),
-            Arc::clone(&self.import),
-            Arc::clone(&self.backend),
-            self.device,
-            self.capacity,
-            self.weight_int8,
-            self.instance,
-        )
+    /// An explicit `threads` is a whole number of workers; `None` means the
+    /// physical core count. `device` accepts `None`/`"cpu"`; the typed-graph
+    /// runtime is CPU-only today and an explicit other device is refused rather
+    /// than silently executed on the CPU.
+    #[pyo3(signature = (threads = None, device = None))]
+    fn session(
+        &self,
+        py: Python<'_>,
+        threads: Option<usize>,
+        device: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PySession>> {
+        let resolved = resolve_device(py, device.as_ref())?;
+        if resolved != DeviceId::Cpu {
+            return Err(errors::from_core(
+                py,
+                crate::inference::error::Fn3Error::UnsupportedOp {
+                    op: crate::inference::OpId::Conv,
+                    backend: "typed-graph runtime",
+                    reason: format!(
+                        "the typed-graph artifact runtime executes on the CPU only; {resolved} \
+                         was requested"
+                    ),
+                },
+            ));
+        }
+        let threading = match threads {
+            None => Threading::Auto,
+            Some(0) => {
+                return Err(errors::from_core(
+                    py,
+                    crate::inference::error::Fn3Error::InvalidShape {
+                        context: "Model.session",
+                        detail: "threads must be at least 1".to_string(),
+                    },
+                ))
+            }
+            Some(count) => Threading::Fixed(count),
+        };
+        let session = py.detach(|| {
+            if let Some(target) = &self.target {
+                RuntimeSession::from_artifact_for(&self.artifact, target, threading)
+            } else {
+                RuntimeSession::from_shared_artifact(Arc::clone(&self.artifact), threading)
+            }
+        });
+        let session = session.map_err(|error| errors::from_core(py, error))?;
+        PySession::open(py, session, self.instance)
     }
 
-    fn __repr__(&self, py: Python<'_>) -> String {
+    fn __repr__(&self) -> String {
         format!(
-            "Model(#{} path={:?} device={} capacity={} {})",
+            "Model(#{} path={:?} target={:?} nodes={} values={})",
             self.instance,
             self.path,
-            self.device,
-            self.capacity,
-            self.geometry.bind(py).borrow().render()
+            self.target,
+            self.artifact.graph().node_count(),
+            self.artifact.graph().value_count()
         )
     }
 }
 
 // ---------------------------------------------------------------------------
-// prepare / inspect / load
+// prepare / inspect / load / doctor
 // ---------------------------------------------------------------------------
 
-/// Read a file, mapping the operating-system error to a typed exception.
-fn read_file_py(py: Python<'_>, path: &str) -> PyResult<Vec<u8>> {
-    let display = path.to_string();
-    let owned = path.to_string();
-    py.detach(move || std::fs::read(&owned)).map_err(|error| {
-        errors::file_error(
-            py,
-            format!("cannot read {display:?}: {error}; check the path and its permissions"),
-            display,
-        )
-    })
-}
-
-/// Import an ONNX model, releasing the GIL.
-fn import_onnx(py: Python<'_>, path: &str) -> PyResult<ModelImport> {
-    if !Path::new(path).exists() {
-        return Err(errors::file_error(
-            py,
-            format!(
-                "ONNX model {path:?} does not exist; pass the path of an .onnx file that was \
-                 exported from PyTorch (opset 13..=17)"
-            ),
-            path.to_string(),
-        ));
+/// Parse a lowercase SHA-256 digest into bytes.
+fn digest_bytes(hex: &str) -> [u8; 32] {
+    let mut digest = [0u8; 32];
+    for (index, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+        if let Ok(chunk) = std::str::from_utf8(chunk) {
+            digest[index] = u8::from_str_radix(chunk, 16).unwrap_or(0);
+        }
     }
-    let owned = path.to_string();
-    py.detach(move || import_onnx_file(&owned))
-        .map_err(|error| errors::from_import(py, error))
+    digest
 }
 
-/// The declared window, with defaults derived from the model's position table.
-struct Window {
-    envelope: ShapeEnvelope,
-}
-
-fn window_for(
-    py: Python<'_>,
-    import: &ModelImport,
-    max_total: Option<u64>,
-    max_seq: Option<u64>,
-    max_past: Option<u64>,
-) -> PyResult<Window> {
-    // `Learned` is the only position-embedding kind this build defines; a new
-    // kind must decide its own default window here.
-    let PositionEmbedding::Learned { max_positions, .. } = import.geometry().positions;
-    let max_positions = u64::from(max_positions);
-    let total = max_total.unwrap_or(max_positions.min(1024));
-    if total == 0 {
-        return Err(errors::model_error(
-            py,
-            "max_total must be at least 2: a decode step needs a cached token and a new one"
-                .to_string(),
-        ));
+/// Stream a file through SHA-256 without loading it into memory.
+fn sha256_file(path: &Path) -> Result<String, std::io::Error> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1 << 20];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
     }
-    let seq = max_seq.unwrap_or(total);
-    let past = max_past.unwrap_or(total.saturating_sub(1));
-    // The CPU backend is used only as the envelope's bound check: the artifact
-    // is device-free and `Planner::envelope` reads nothing but the geometry.
-    let backend = CpuBackend::new();
-    let planner = Planner::new(import, &backend);
-    let envelope = planner
-        .envelope(1, seq, past, total)
-        .map_err(|error| errors::from_core(py, error))?;
-    Ok(Window { envelope })
+    Ok(crate::inference::digest::hex(&hasher.finish()))
 }
 
 /// Import an ONNX model and write (or confirm) a versioned artifact.
-///
-/// The destination is only rewritten when the bytes it holds would differ:
-///
-/// * nothing there → write it, `status="created"`;
-/// * the same artifact → write nothing, `status="already_valid"`;
-/// * a different artifact → `Fn3ModelExistsError` unless `overwrite=True`, in
-///   which case `status="replaced"` and `replaced_differences` says what
-///   changed.
-///
-/// The written file is re-read, re-parsed, re-validated and compared with the
-/// SHA-256 of the bytes that were written, so a reported success is a verified
-/// one.
 #[pyfunction]
-#[pyo3(signature = (onnx, artifact, *, max_total = None, max_seq = None, max_past = None, overwrite = false))]
+#[pyo3(signature = (onnx, artifact, *, target = "cpu", precision = "f32", overwrite = false, shapes = None))]
 pub fn prepare(
     py: Python<'_>,
     onnx: &str,
     artifact: &str,
-    max_total: Option<u64>,
-    max_seq: Option<u64>,
-    max_past: Option<u64>,
+    target: &str,
+    precision: &str,
     overwrite: bool,
+    shapes: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyPrepareReport>> {
     let started = Instant::now();
-    let import = import_onnx(py, onnx)?;
-    let window = window_for(py, &import, max_total, max_seq, max_past)?;
+    let source_bytes = std::fs::read(onnx).map_err(|error| {
+        errors::file_error(
+            py,
+            format!("cannot read ONNX model {onnx:?}: {error}"),
+            onnx.to_string(),
+        )
+    })?;
+    let bindings = shape_bindings(shapes)?;
+    let imported = py
+        .detach(|| import_onnx_graph_with_shapes(&source_bytes, &bindings))
+        .map_err(|error| errors::from_import(py, error))?;
+    let precision = Precision::parse(precision).ok_or_else(|| {
+        errors::model_error(
+            py,
+            format!("precision {precision:?} is not implemented; this build writes f32 only"),
+        )
+    })?;
+    let targets = resolve_targets(target).map_err(|error| errors::from_format(py, error))?;
+    let source_sha256 = sha256_hex(&source_bytes);
     let built = py
-        .detach(|| PreparedArtifact::from_import(&import, window.envelope))
+        .detach(|| {
+            PreparedArtifact::from_imported(
+                &imported,
+                &targets,
+                precision,
+                digest_bytes(&source_sha256),
+            )
+        })
         .map_err(|error| errors::from_format(py, error))?;
     let bytes = py
         .detach(|| built.to_bytes())
         .map_err(|error| errors::from_format(py, error))?;
-    let digest = py.detach(|| hex(&bytes));
+    let digest = sha256_hex(&bytes);
 
     let destination = artifact.to_string();
-    let existing_path = destination.clone();
-    let existing = match py.detach(move || std::fs::read(&existing_path)) {
+    let existing = match std::fs::read(artifact) {
         Ok(bytes) => Some(bytes),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
@@ -837,535 +971,294 @@ pub fn prepare(
             ))
         }
     };
-
-    let mut status = "created";
-    let mut differences = Vec::new();
-    if let Some(existing) = &existing {
-        let existing_digest = hex(existing);
-        if existing_digest == digest {
-            status = "already_valid";
-        } else {
-            match PreparedArtifact::from_bytes(existing) {
-                Ok(previous) => {
-                    differences = describe_difference(&previous, &built);
-                    if !overwrite {
-                        return Err(errors::model_exists(
-                            py,
-                            format!(
-                                "{artifact:?} already holds a valid prepared model that differs \
-                                 from what this ONNX and these bounds produce ({}); pass \
-                                 overwrite=True to replace it, or choose another path",
-                                differences.join("; ")
-                            ),
-                            destination,
-                            differences.clone(),
-                        ));
-                    }
-                    status = "replaced";
-                }
-                Err(error) => {
-                    if !overwrite {
-                        return Err(errors::from_format(py, error));
-                    }
-                    differences = vec![format!(
-                        "the previous file was not a valid artifact: {error}"
-                    )];
-                    status = "replaced";
-                }
-            }
-        }
-    }
-
-    // Both paths prove the file on disk is this artifact: `already_valid` by the
-    // digest comparison above, a write by reading it back and hashing it.
-    let verified = true;
-    if status != "already_valid" {
-        py.detach(|| built.write_file(artifact))
-            .map_err(|error| errors::from_format(py, error))?;
-        // Read back what is actually on disk. A short or torn write must not be
-        // reported as success.
-        let on_disk = read_file_py(py, artifact)?;
-        let on_disk_digest = py.detach(|| hex(&on_disk));
-        if on_disk_digest != digest {
-            return Err(errors::model_error(
+    let status = match existing {
+        Some(existing) if sha256_hex(&existing) == digest => "already_valid",
+        Some(_) if !overwrite => {
+            return Err(errors::model_exists(
                 py,
                 format!(
-                    "{artifact:?} was written but its SHA-256 is {on_disk_digest}, not {digest}; \
-                     the file is not the artifact this call built (a torn or replaced write)"
+                    "{artifact:?} already holds a different prepared model; pass overwrite=True \
+                     to replace it"
                 ),
+                destination,
+                vec!["the file contents differ".to_string()],
+            ))
+        }
+        Some(_) => {
+            std::fs::write(artifact, &bytes).map_err(|error| {
+                errors::file_error(
+                    py,
+                    format!("cannot write {artifact:?}: {error}"),
+                    destination.clone(),
+                )
+            })?;
+            "replaced"
+        }
+        None => {
+            std::fs::write(artifact, &bytes).map_err(|error| {
+                errors::file_error(
+                    py,
+                    format!("cannot write {artifact:?}: {error}"),
+                    destination.clone(),
+                )
+            })?;
+            "created"
+        }
+    };
+    if status != "already_valid" {
+        let on_disk = std::fs::read(artifact).map_err(|error| {
+            errors::file_error(
+                py,
+                format!("cannot read back {artifact:?}: {error}"),
+                destination.clone(),
+            )
+        })?;
+        if sha256_hex(&on_disk) != digest {
+            return Err(errors::model_error(
+                py,
+                format!("{artifact:?} was written but its SHA-256 changed; a torn write"),
             ));
         }
-        let reparsed = PreparedArtifact::from_bytes(&on_disk)
-            .map_err(|error| errors::from_format(py, error))?;
-        reparsed
-            .validate()
-            .map_err(|error| errors::from_format(py, error))?;
     }
 
-    let header = PreparedHeader::parse(&bytes).map_err(|error| errors::from_format(py, error))?;
+    let loaded = py
+        .detach(|| Artifact::open(artifact))
+        .map_err(|error| errors::from_format(py, error))?;
     let report = PyPrepareReport {
         path: destination,
         status: status.to_string(),
         size_bytes: bytes.len() as u64,
         sha256: digest,
-        payload_crc32: header.payload_crc32,
-        weight_bytes: built.weight_bytes(),
-        geometry: Py::new(py, PyGeometry::of(built.geometry()))?,
-        envelope: Py::new(py, PyEnvelope::of(&window.envelope))?,
-        metadata: Py::new(py, PyMetadata::of(built.metadata()))?,
+        source_sha256,
+        nodes: loaded.graph().node_count(),
+        values: loaded.graph().value_count(),
+        weights: loaded.weights().len(),
+        weight_bytes: loaded.weight_bytes(),
+        plans: plan_infos(&loaded.plan_summaries()),
+        metadata: Py::new(py, PyMetadata::of(loaded.metadata()))?,
         elapsed_ms: started.elapsed().as_secs_f64() * 1e3,
-        verified,
-        replaced_differences: differences,
     };
     Py::new(py, report)
 }
 
-/// What differs between two artifacts, for the replace/refuse message.
-fn describe_difference(previous: &PreparedArtifact, wanted: &PreparedArtifact) -> Vec<String> {
-    let mut differences = Vec::new();
-    if previous.envelope() != wanted.envelope() {
-        differences.push(format!(
-            "envelope: existing {}, this call {}",
-            PyEnvelope::of(&previous.envelope()).render(),
-            PyEnvelope::of(&wanted.envelope()).render()
-        ));
-    }
-    if previous.geometry() != wanted.geometry() {
-        differences.push(format!(
-            "geometry: existing {}, this call {}",
-            PyGeometry::of(previous.geometry()).render(),
-            PyGeometry::of(wanted.geometry()).render()
-        ));
-    }
-    if previous.metadata() != wanted.metadata() {
-        differences.push(format!(
-            "provenance: existing {}, this call {}",
-            PyMetadata::of(previous.metadata()).render(),
-            PyMetadata::of(wanted.metadata()).render()
-        ));
-    }
-    if previous.weights().len() != wanted.weights().len() {
-        differences.push(format!(
-            "{} weights vs {} weights",
-            previous.weights().len(),
-            wanted.weights().len()
-        ));
-    } else {
-        for (index, (left, right)) in previous
-            .weights()
-            .iter()
-            .zip(wanted.weights().iter())
-            .enumerate()
-        {
-            if let Some(difference) = weight_difference(index, left, right) {
-                differences.push(difference);
-                break;
-            }
-        }
-    }
-    if previous.graph().value_count() != wanted.graph().value_count()
-        || previous.graph().nodes().len() != wanted.graph().nodes().len()
-    {
-        differences.push(format!(
-            "graph {} values/{} nodes vs {} values/{} nodes",
-            previous.graph().value_count(),
-            previous.graph().nodes().len(),
-            wanted.graph().value_count(),
-            wanted.graph().nodes().len()
-        ));
-    }
-    if differences.is_empty() {
-        differences.push("the artifacts differ in bytes but agree structurally".to_string());
-    }
-    differences
-}
-
-/// Report what an artifact file contains without opening a device or a session.
+/// Describe an artifact without mapping its weight payload.
 #[pyfunction]
-#[pyo3(signature = (artifact,))]
 pub fn inspect(py: Python<'_>, artifact: &str) -> PyResult<Py<PyArtifactInfo>> {
     let started = Instant::now();
-    let path = artifact.to_string();
-    let bytes = read_file_py(py, artifact)?;
-    let parsed = py
-        .detach(|| {
-            PreparedArtifact::from_bytes(&bytes).and_then(|parsed| {
-                parsed.validate()?;
-                Ok(parsed)
-            })
-        })
+    let report = py
+        .detach(|| inspect_file(artifact))
         .map_err(|error| errors::from_format(py, error))?;
-    let header = py
-        .detach(|| PreparedHeader::parse(&bytes))
-        .map_err(|error| errors::from_format(py, error))?;
+    let source_sha256 = report
+        .source_onnx_sha256
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     let info = PyArtifactInfo {
-        path,
-        size_bytes: bytes.len() as u64,
-        sha256: py.detach(|| hex(&bytes)),
-        format_version: header.version,
-        payload_bytes: header.payload_bytes,
-        payload_crc32: header.payload_crc32,
-        weight_bytes: parsed.weight_bytes(),
-        value_count: parsed.graph().value_count(),
-        node_count: parsed.graph().nodes().len(),
-        weight_count: parsed.weights().len(),
-        geometry: Py::new(py, PyGeometry::of(parsed.geometry()))?,
-        envelope: Py::new(py, PyEnvelope::of(&parsed.envelope()))?,
-        metadata: Py::new(py, PyMetadata::of(parsed.metadata()))?,
+        path: artifact.to_string(),
+        size_bytes: report.file_bytes,
+        format_version: report.format_version,
+        source_sha256,
+        nodes: report.nodes,
+        values: report.values,
+        inputs: report.inputs,
+        outputs: report.outputs,
+        weights: report.weights,
+        weight_bytes: report.weight_bytes,
+        plans: plan_infos(&report.plans),
+        quant_precision: report.quant.precision().name().to_string(),
+        quant_entries: report.quant.tensors().len(),
+        sections: report
+            .sections
+            .iter()
+            .map(|section| PySection {
+                name: section.name.to_string(),
+                offset: section.offset,
+                length: section.length,
+                sha256: section.sha256_hex(),
+                verified: section.verified,
+            })
+            .collect(),
+        mapped_bytes: report.mapped_bytes,
+        bytes_read: report.bytes_read,
+        metadata: Py::new(py, PyMetadata::of(&report.metadata))?,
         elapsed_ms: started.elapsed().as_secs_f64() * 1e3,
     };
     Py::new(py, info)
 }
 
-/// What differs between two weights, phrased for a message.
-fn weight_difference(index: usize, left: &WeightTensor, right: &WeightTensor) -> Option<String> {
-    if left.name() != right.name() {
-        return Some(format!(
-            "weight {index}: the artifact holds `{}`, the source holds `{}`",
-            left.name(),
-            right.name()
-        ));
-    }
-    if left.dtype() != right.dtype() {
-        return Some(format!(
-            "weight {index} `{}`: dtype {} vs {}",
-            left.name(),
-            left.dtype(),
-            right.dtype()
-        ));
-    }
-    if left.shape() != right.shape() {
-        return Some(format!(
-            "weight {index} `{}`: shape {} vs {}",
-            left.name(),
-            left.shape(),
-            right.shape()
-        ));
-    }
-    if left.bytes() != right.bytes() {
-        return Some(format!(
-            "weight {index} `{}`: the payload bytes differ ({} bytes each), so the source is a \
-             different export or a modified file",
-            left.name(),
-            left.byte_len()
-        ));
-    }
-    None
-}
-
-/// Check that an ONNX source describes the same model as the artifact.
-///
-/// This is the optional `source=` proof, not the input path: the artifact alone
-/// plans and runs. A source that disagrees in provenance, geometry, values,
-/// nodes or weight bytes is a mistake worth refusing rather than accepting as a
-/// verification of a model that is half one file and half another.
-fn check_source_agrees(
-    py: Python<'_>,
-    artifact: &PreparedArtifact,
-    import: &ModelImport,
-) -> PyResult<()> {
-    let mut problems = Vec::new();
-    if artifact.geometry() != import.geometry() {
-        problems.push(format!(
-            "geometry: artifact {}, source {}",
-            PyGeometry::of(artifact.geometry()).render(),
-            PyGeometry::of(import.geometry()).render()
-        ));
-    }
-    let artifact_values = artifact.graph().values();
-    let source_values = import.graph().values();
-    if artifact_values != source_values {
-        let first = artifact_values
-            .iter()
-            .zip(source_values.iter())
-            .position(|(left, right)| left != right);
-        problems.push(match first {
-            Some(index) => {
-                let left = &artifact_values[index];
-                let right = &source_values[index];
-                format!(
-                    "value {index}: artifact `{}` {} {}, source `{}` {} {}",
-                    left.name,
-                    left.dtype,
-                    left.shape.render(),
-                    right.name,
-                    right.dtype,
-                    right.shape.render()
-                )
-            }
-            None => format!(
-                "values: artifact has {}, source has {}",
-                artifact_values.len(),
-                source_values.len()
-            ),
-        });
-    }
-    let artifact_nodes = artifact.graph().nodes();
-    let source_nodes = import.graph().nodes();
-    if artifact_nodes != source_nodes {
-        let first = artifact_nodes
-            .iter()
-            .zip(source_nodes.iter())
-            .position(|(left, right)| left != right);
-        problems.push(match first {
-            Some(index) => {
-                let left = &artifact_nodes[index];
-                let right = &source_nodes[index];
-                format!(
-                    "operation {index}: artifact {} ({}) reads {} writes {}, source {} ({}) reads \
-                     {} writes {}",
-                    left.op,
-                    left.onnx_op,
-                    left.inputs.len(),
-                    left.outputs.len(),
-                    right.op,
-                    right.onnx_op,
-                    right.inputs.len(),
-                    right.outputs.len()
-                )
-            }
-            None => format!(
-                "operations: artifact has {}, source has {}",
-                artifact_nodes.len(),
-                source_nodes.len()
-            ),
-        });
-    }
-    let artifact_weights = artifact.weights();
-    let source_weights = import.weights();
-    if artifact_weights.len() != source_weights.len() {
-        problems.push(format!(
-            "weights: artifact has {}, source has {}",
-            artifact_weights.len(),
-            source_weights.len()
-        ));
-    } else {
-        for (index, (left, right)) in artifact_weights
-            .iter()
-            .zip(source_weights.iter())
-            .enumerate()
-        {
-            if let Some(difference) = weight_difference(index, left, right) {
-                problems.push(difference);
-                break;
-            }
-        }
-    }
-    if problems.is_empty() {
-        Ok(())
-    } else {
-        Err(errors::model_error(
-            py,
-            format!(
-                "the ONNX source and the prepared artifact disagree ({}); the artifact is what \
-                 would run, so loading both would execute a model that is half of each file — \
-                 regenerate the artifact from this source with fastnn.inference.prepare",
-                problems.join("; ")
-            ),
-        ))
-    }
-}
-
-/// Create the one backend a model and all of its sessions execute on.
-fn open_backend(py: Python<'_>, device: DeviceId) -> PyResult<Arc<dyn Backend>> {
-    match device {
-        DeviceId::Cpu => Ok(Arc::new(CpuBackend::new())),
-        #[cfg(feature = "vulkan")]
-        DeviceId::Vulkan(index) => {
-            let request = DeviceRequest::Vulkan {
-                index: Some(index.index()),
-            };
-            let backend =
-                VulkanBackend::open(&request).map_err(|error| errors::from_core(py, error))?;
-            Ok(backend)
-        }
-        #[cfg(not(feature = "vulkan"))]
-        DeviceId::Vulkan(_) => Err(errors::from_core(
-            py,
-            CoreError::DeviceUnavailable(
-                crate::inference::device::DeviceResolveError::unavailable_device(device),
-            ),
-        )),
-    }
-}
-
-/// Re-tag weights for a device without copying bytes.
-///
-/// `PreparedArtifact::to_model_weights` builds host tensors tagged `cpu`; a
-/// session on a Vulkan device needs the same bytes tagged for that device. This
-/// is the alpha's host-staging contract, not a second compute path.
-fn retag_weights(weights: ModelWeights, device: DeviceId) -> Result<ModelWeights, CoreError> {
-    if device == DeviceId::Cpu {
-        return Ok(weights);
-    }
-    let mut named = Vec::with_capacity(weights.len());
-    for index in 0..weights.len() {
-        let tensor = weights.get(index).ok_or(CoreError::OutOfBounds {
-            what: "load (weight index)",
-            index: index as u64,
-            len: weights.len() as u64,
-        })?;
-        let meta = TensorMeta::contiguous(tensor.shape().clone(), tensor.dtype(), device)?;
-        let retagged =
-            crate::inference::tensor::Tensor::from_storage(tensor.storage().clone(), meta)?;
-        named.push((
-            weights
-                .name(index)
-                .ok_or(CoreError::OutOfBounds {
-                    what: "load (weight name)",
-                    index: index as u64,
-                    len: weights.len() as u64,
-                })?
-                .to_string(),
-            retagged,
-        ));
-    }
-    ModelWeights::with_names(named)
-}
-
-/// Load a prepared artifact, bind it to an explicit device and return a model.
+/// Load a prepared artifact and return an immutable model.
 #[pyfunction]
-#[pyo3(signature = (artifact, *, source = None, device = None, capacity = None, weight_int8 = false))]
+#[pyo3(signature = (artifact, *, target = None, device = None))]
 pub fn load(
     py: Python<'_>,
     artifact: &str,
-    source: Option<String>,
+    target: Option<String>,
     device: Option<Bound<'_, PyAny>>,
-    capacity: Option<u64>,
-    weight_int8: bool,
 ) -> PyResult<Py<PyModel>> {
-    // 1. The device first: a wrong request must fail before 28 MB of I/O.
-    let device = resolve_device(py, device.as_ref())?;
-    let backend = open_backend(py, device)?;
-
-    // 2. The artifact bytes: one read, one hash, one parse.
-    let bytes = read_file_py(py, artifact)?;
-    let digest = py.detach(|| hex(&bytes));
-    let size_bytes = bytes.len() as u64;
-    let parsed = py
-        .detach(|| {
-            PreparedArtifact::from_bytes(&bytes).and_then(|parsed| {
-                parsed.validate()?;
-                Ok(parsed)
-            })
-        })
-        .map_err(|error| errors::from_format(py, error))?;
-    drop(bytes);
-
-    // 3. The planner and session input. The artifact is the input: with no
-    // `source`, the graph, weights, geometry and window it carries are exactly
-    // what plans and runs. A `source` only adds the verification that the two
-    // files still describe the same model.
-    let geometry = parsed.geometry().clone();
-    let envelope = parsed.envelope();
-    let provenance = Py::new(py, PyMetadata::of(parsed.metadata()))?;
-    let weight_bytes = parsed.weight_bytes();
-    let weight_count = parsed.weights().len();
-    let value_count = parsed.graph().value_count();
-    let node_count = parsed.graph().nodes().len();
-
-    let (import, source) = match source {
-        Some(source) => {
-            let import = import_onnx(py, &source)?;
-            check_source_agrees(py, &parsed, &import)?;
-            (import, Some(source))
-        }
-        None => (parsed.into_model_import(), None),
-    };
-
-    // 4. Capacity, the one session-scoped bound.
-    let capacity = capacity.unwrap_or(envelope.get(Symbol::Total).max());
-    if capacity == 0 {
-        return Err(errors::capacity(
+    let started = Instant::now();
+    let resolved = resolve_device(py, device.as_ref())?;
+    if resolved != DeviceId::Cpu {
+        return Err(errors::from_core(
             py,
-            format!(
-                "capacity must be at least 1 token (the declared window is 1..={}); pass \
-                 capacity= to choose a smaller cache than the artifact's window",
-                envelope.get(Symbol::Total).max()
-            ),
-            "kv cache capacity",
-            0,
-            envelope.get(Symbol::Total).max(),
+            crate::inference::error::Fn3Error::UnsupportedOp {
+                op: crate::inference::OpId::Conv,
+                backend: "typed-graph runtime",
+                reason: format!(
+                    "the typed-graph artifact runtime executes on the CPU only; {resolved} was \
+                     requested"
+                ),
+            },
         ));
     }
-    let kv_config = geometry.kv_cache_config(capacity, 1);
-    kv_config
-        .validate(&envelope)
-        .map_err(|error| errors::from_core(py, error))?;
-
-    // 5. Plan, weights, model.
-    let import_arc = Arc::new(import);
-    let backend_arc = backend;
-    // Inference runs through Session, which owns its contiguous token binding.
-    let planner = Planner::for_session(import_arc.as_ref(), backend_arc.as_ref());
-    let dims = LiveDims::new(
-        1,
-        1,
-        0,
-        u64::from(geometry.query_heads),
-        u64::from(geometry.kv_heads),
-        u64::from(geometry.head_dim),
-    )
-    .map_err(|error| errors::from_core(py, error))?;
-    let plan = planner
-        .plan(&envelope, dims)
-        .map_err(|error| errors::from_core(py, error))?
-        .execution()
-        .clone();
-    // Weights come from the import that will run the plan. Without a source
-    // that import *is* the artifact; with one, `check_source_agrees` proved
-    // every weight byte identical, so the artifact is still what executes.
-    let weights = py
-        .detach(|| import_arc.to_model_weights())
-        .map_err(|error| errors::from_core(py, error))?;
-    let weights = retag_weights(weights, device).map_err(|error| errors::from_core(py, error))?;
-    let model = PreparedModel::new(plan, weights, device, envelope, Some(kv_config))
-        .map_err(|error| errors::from_core(py, error))?;
-
-    let report = PyModel {
-        model: Arc::new(model),
-        import: import_arc,
-        backend: backend_arc,
-        device,
-        capacity,
-        weight_int8,
+    let size_bytes = std::fs::metadata(artifact)
+        .map(|metadata| metadata.len())
+        .map_err(|error| {
+            errors::file_error(
+                py,
+                format!("cannot stat {artifact:?}: {error}"),
+                artifact.to_string(),
+            )
+        })?;
+    let digest = sha256_file(Path::new(artifact)).map_err(|error| {
+        errors::file_error(
+            py,
+            format!("cannot hash {artifact:?}: {error}"),
+            artifact.to_string(),
+        )
+    })?;
+    let loaded = py
+        .detach(|| Artifact::open(artifact))
+        .map_err(|error| errors::from_format(py, error))?;
+    if let Some(target) = &target {
+        if loaded.plan_for(target).is_none() {
+            let available: Vec<&str> = loaded.plans().iter().map(|plan| plan.target()).collect();
+            return Err(errors::model_error(
+                py,
+                format!(
+                    "{artifact:?} has no target {target:?}; the artifact carries {}",
+                    available.join(", ")
+                ),
+            ));
+        }
+    }
+    let metadata = Py::new(py, PyMetadata::of(loaded.metadata()))?;
+    let plans = plan_infos(&loaded.plan_summaries());
+    let model = PyModel {
+        artifact: Arc::new(loaded),
         instance: MODEL_IDENTITY.fetch_add(1, Ordering::Relaxed),
         path: artifact.to_string(),
-        source,
         sha256: digest,
         size_bytes,
-        geometry: Py::new(py, PyGeometry::of(&geometry))?,
-        envelope: Py::new(py, PyEnvelope::of(&envelope))?,
-        metadata: provenance,
-        weight_bytes,
-        weight_count,
-        value_count,
-        node_count,
-        kv_bytes: kv_bytes_for(&geometry, capacity),
+        target,
+        metadata,
+        plans,
+        elapsed_ms: started.elapsed().as_secs_f64() * 1e3,
     };
-    Py::new(py, report)
+    Py::new(py, model)
 }
 
-/// Bytes one session's KV cache occupies for `capacity` tokens.
-fn kv_bytes_for(geometry: &DecoderGeometry, capacity: u64) -> u64 {
-    u64::from(geometry.layers)
-        * 2
-        * capacity
-        * u64::from(geometry.kv_heads)
-        * u64::from(geometry.head_dim)
-        * 4
+/// Convert `{name: [d0, d1, ...]}` into input-shape bindings.
+///
+/// A dynamic export has no numeric extents for the plan to use, so the caller
+/// supplies the shape the model will be run at. The conversion happens while
+/// the GIL is held; the import itself runs detached.
+fn shape_bindings(shapes: Option<&Bound<'_, PyDict>>) -> PyResult<Vec<(String, Vec<u64>)>> {
+    let Some(shapes) = shapes else {
+        return Ok(Vec::new());
+    };
+    let mut bindings: Vec<(String, Vec<u64>)> = Vec::with_capacity(shapes.len());
+    for (key, value) in shapes.iter() {
+        let name: String = key.extract().map_err(|_| {
+            pyo3::exceptions::PyTypeError::new_err("shapes keys must be str graph-input names")
+        })?;
+        if bindings.iter().any(|(existing, _)| existing == &name) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "shapes names the input {name:?} twice"
+            )));
+        }
+        let extents: Vec<u64> = value.extract().map_err(|_| {
+            pyo3::exceptions::PyTypeError::new_err(format!(
+                "shapes[{name:?}] must be a sequence of positive ints"
+            ))
+        })?;
+        if extents.is_empty() || extents.contains(&0) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "shapes[{name:?}] needs at least one extent and none may be 0"
+            )));
+        }
+        bindings.push((name, extents));
+    }
+    Ok(bindings)
+}
+
+/// Diagnose an ONNX model before preparing it.
+#[pyfunction]
+#[pyo3(signature = (onnx, *, shapes = None))]
+pub fn doctor(
+    py: Python<'_>,
+    onnx: &str,
+    shapes: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyDoctorReport>> {
+    let started = Instant::now();
+    let bindings = shape_bindings(shapes)?;
+    let report = py
+        .detach(|| crate::inference::doctor_with_shapes(onnx, &bindings))
+        .map_err(|error| errors::from_core(py, error))?;
+    let doctor = PyDoctorReport {
+        path: onnx.to_string(),
+        ok: report.ok,
+        nodes: report.nodes,
+        values: report.values,
+        weights: report.weights,
+        weight_bytes: report.weight_bytes,
+        arena_bytes: report.arena_bytes,
+        peak_bytes: report.peak_bytes,
+        expected_memory_bytes: report.expected_memory_bytes,
+        problems: report
+            .problems
+            .iter()
+            .map(|issue| PyDoctorIssue {
+                node: issue.node.clone(),
+                category: issue.category.to_string(),
+                message: issue.message.clone(),
+            })
+            .collect(),
+        inputs: report.inputs.clone(),
+        dynamic_symbols: report
+            .dynamic_symbols
+            .iter()
+            .map(|entry| (entry.symbol.to_string(), entry.values))
+            .collect(),
+        dtypes: report
+            .dtypes
+            .iter()
+            .map(|entry| (entry.dtype.to_string(), entry.values))
+            .collect(),
+        elapsed_ms: started.elapsed().as_secs_f64() * 1e3,
+    };
+    Py::new(py, doctor)
+}
+
+/// `TARGETS` as a Python tuple.
+#[pyfunction]
+pub fn targets() -> Vec<&'static str> {
+    TARGETS.to_vec()
 }
 
 /// Register the model surface.
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add_class::<PyGeometry>()?;
-    module.add_class::<PyEnvelope>()?;
     module.add_class::<PyMetadata>()?;
+    module.add_class::<PyPlanInfo>()?;
+    module.add_class::<PySection>()?;
     module.add_class::<PyPrepareReport>()?;
     module.add_class::<PyArtifactInfo>()?;
+    module.add_class::<PyDoctorIssue>()?;
+    module.add_class::<PyDoctorReport>()?;
     module.add_class::<PyModel>()?;
     module.add_function(wrap_pyfunction!(prepare, module)?)?;
     module.add_function(wrap_pyfunction!(inspect, module)?)?;
     module.add_function(wrap_pyfunction!(load, module)?)?;
+    module.add_function(wrap_pyfunction!(doctor, module)?)?;
+    module.add_function(wrap_pyfunction!(targets, module)?)?;
     Ok(())
 }

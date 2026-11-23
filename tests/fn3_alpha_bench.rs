@@ -1,6 +1,6 @@
 //! FN3-21 alpha follow-up (#67): the matched release-build timing baseline.
 //!
-//! The alpha handoff quoted `fn3-bench --suite model --quick` numbers measured
+//! The alpha handoff quoted the 3.0 harness (`fn3-bench --suite model --quick`, removed with the 2.x surface) numbers measured
 //! on a debug build with unmatched backends. This binary is the replacement
 //! measurement: it drives the **production** [`Session`] path — the same call
 //! sequence the CLI and the Python facade use — through one concrete backend at

@@ -198,7 +198,7 @@ artifact. The crate is `3.0.0` and the Python wheel is `3.0.0`.
   It had no active caller and its `.fnnc` plans are not accepted by the 3.0 CLI.
   Prepare supported decoders from ONNX with `fastnn-infer`;
   `fastnn-convert` and the retained 2.x eager/AOT APIs are unchanged. See the
-  [migration guide](docs/guides/migrate-from-2x.md).
+  [migration guide](docs/archive/guides/migrate-from-2x.md).
 - **Training, autograd and optimizer paths** (alpha.1).
 - **The wgpu backend**, together with its dependencies (alpha.1).
 

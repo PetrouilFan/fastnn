@@ -1,153 +1,121 @@
-//! The artifact: a validated, self-describing, checksummed model file.
+//! The versioned, memory-mappable prepared-model artifact (format version 2).
 //!
-//! # Layout (version 1)
+//! # The file, in full
 //!
 //! ```text
-//! header   (64 bytes, fixed)
-//!   0..8    magic                    b"FNN3PREP"
-//!   8..10   u16 format version       1
-//!  10..12   u16 header length        64
-//!  12..16   u32 dtype encoding       1   (fn3 DType::code values, one byte each)
-//!  16..20   u32 flags                0   (reserved; must be zero)
-//!  20..24   u32 reserved             0
-//!  24..32   u64 file length          header length + payload length
-//!  32..40   u64 payload length
-//!  40..44   u32 payload CRC-32
-//!  44..64   reserved (20 bytes)      0
-//! payload  (everything after the header, covered by the CRC)
-//!   u32 section count                6
-//!   u32 reserved                     0
-//!   6 × [u32 tag, u32 reserved, u64 length]
-//!   sections in tag order, each zero-padded to a multiple of 8 bytes:
-//!     1 META  provenance: ONNX IR version, opset, producer, graph name
-//!     2 GEOM  architecture geometry and its value/weight handles
-//!     3 ENV   the declared dynamic bounds (7 × min/max)
-//!     4 VALS  value table + graph inputs + graph outputs
-//!     5 NODE  op list with operand handles and attributes
-//!     6 WGHT  weight table with the exact payload bytes
+//! header 128 bytes, 64-byte aligned
+//!   0..8    b"FNN3ART2"                 magic
+//!   8..10   u16 format version          = 2
+//!  10..12   u16 header length           = 128
+//!  12..16   u32 section count           = 5
+//!  16..20   u32 target profile count    1..=8
+//!  20..24   u32 flags                   = 0
+//!  24..28   u32 dtype encoding          = 1  (one DType::code byte per tensor)
+//!  28..32   u32 reserved                = 0
+//!  32..64   source ONNX SHA-256
+//!  64..72   u64 file length
+//!  72..80   u64 payload length           file length - 128
+//!  80..88   u64 directory offset         = 128
+//!  88..96   u64 directory length         = 128
+//!  96..104  u64 weights section offset
+//! 104..112  u64 weights section length
+//! 112..120  u64 weight payload offset   (absolute)
+//! 120..128  u64 weight payload length
+//!
+//! directory 128 bytes at offset 128
+//!   u32 section count (5)
+//!   u32 reserved (0)
+//!   5 × { u32 tag, u32 reserved, u64 absolute offset, u64 length }
+//!
+//! sections, each starting on a 64-byte boundary and zero-padded to one:
+//!   1 GRAPH    typed IR, provenance and interface names
+//!   2 PLANS    one full execution plan per target profile
+//!   3 WEIGHTS  one contiguous 64-byte-aligned payload plus its table
+//!   4 QUANT    per-tensor scale/zero-point/axis metadata (empty for F32)
+//!   5 HASHES   SHA-256 of the header and of GRAPH, PLANS, WEIGHTS, QUANT
 //! ```
 //!
-//! # Why each part is where it is
+//! All integers are little-endian. All strings are a `u32` byte length followed
+//! by UTF-8 bytes. Floats are their `f32` bit pattern. Booleans are `u8` 0/1.
+//! Enumerations are `u8` codes with a documented meaning; an unknown code is an
+//! error, never a default.
 //!
-//! * **Magic first, version second.** A file from another format (including a
-//!   2.x `.fnnc`, which is raw `bincode` with neither) is rejected at byte 0,
-//!   and a file from another *version* of this format is rejected at byte 8,
-//!   before a single field is interpreted. That is what makes "this file is
-//!   version 9, this build reads version 1" possible instead of a parse error
-//!   from the middle of the data.
-//! * **A fixed-size header.** Every header field is at a constant offset, so
-//!   the whole header is validated without allocating or interpreting a
-//!   variable-length structure.
-//! * **Lengths before contents.** `file length`, `payload length` and every
-//!   section length are checked against the bytes that are actually present
-//!   before any `Vec` is created. A hostile count cannot become an allocation.
-//! * **A checksum over the payload only.** The header fields are individually
-//!   validated (magic, version, sizes, reserved), and the payload gets one
-//!   CRC-32, so a single flipped byte anywhere in the file is reported — by a
-//!   field check in the header or by the CRC in the payload.
-//! * **Sections, not a single blob.** Each table has one owner function, its own
-//!   length, and an exact-consumption check, so a section that is too short or
-//!   too long is a local error rather than a shifted read. The reserved `tag`
-//!   space and the `dtype encoding` field are the extension points for the
-//!   quantized metadata milestone (#68).
-//! * **Eight-byte alignment of weight payloads**, relative to the section start
-//!   (and therefore to the file: the header is 64 bytes and the directory is
-//!   104, both multiples of 8). Padding is written as zeros and *required* to be
-//!   zeros on read, so the encoding is canonical: one model, one byte string.
+//! # Why mmap
 //!
-//! # What is deliberately absent
+//! The `WEIGHTS` section is one payload whose every entry starts 64 bytes into a
+//! page-aligned mapping. A reader hands each weight out as a `&[u8]` (and, for
+//! F32, a `&[f32]`) pointing straight into the mapping. Two sessions opened on
+//! one artifact therefore share exactly the same pages, and loading a 200 MB
+//! model does not allocate 200 MB of process memory. `memmap2` is the only
+//! dependency this format adds, and it is not optional: the core artifact reader
+//! owns the mapping.
 //!
-//! No KV cache capacity, no batch size, no live extent, no step counter, no
-//! backend or device choice: those are session state (FN3-12 / #58) or a device
-//! decision (FN3-10 / #56), not properties of a shareable model. The geometry
-//! section carries the layer/head/vocabulary shape; a session decides how many
-//! tokens to allocate. Two sessions over one artifact share no byte of mutable
-//! state, and the artifact never changes after it is written.
+//! The file is opened read-only. The format has no executable content, no
+//! pointers, no offsets into process memory and no code. A weight range is cast
+//! to `&[f32]` only after the table proves its length is a whole number of `f32`
+//! elements and its start is 64-byte aligned.
+//!
+//! # Versioning policy
+//!
+//! Version 1 (`FNN3PREP`) stored a decoder-shaped graph and only three
+//! `OpParams` fields. Version 2 replaces it; there is no compatibility reader.
+//! A version-1 file is [`FormatErrorKind::ObsoleteFormat`] and the message tells
+//! the caller to re-prepare the source ONNX. A version above 2 is
+//! [`FormatErrorKind::UnsupportedVersion`]. A change that adds a section,
+//! reorders a field, changes a meaning or assigns a new code **must** bump the
+//! version.
+//!
+//! # Determinism
+//!
+//! Every table is in declaration order, no `HashMap` reaches the byte stream, and
+//! padding is zeros. `to_bytes` twice is byte-identical, and
+//! `from_bytes` → `to_bytes` is byte-identical for a decoded artifact.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use crate::inference::digest::Sha256;
 use crate::inference::dtype::DType;
 use crate::inference::error::Fn3Error;
-use crate::inference::import::{
-    DecoderGeometry, Dim, KvInterface, ModelImport, ModelProvenance, OpsetImport,
-    PositionEmbedding, ValueId, ValueInfo, ValueOrigin, ValueShape,
+use crate::inference::import::ImportedGraph;
+use crate::inference::ir::Graph;
+use crate::inference::model::WeightSet;
+use crate::inference::runtime::plan::{
+    EngineCounts, LayoutStrategy, Plan, Slot, SlotId, SlotSource, SLOT_ALIGNMENT,
 };
-use crate::inference::model::weights::{WeightId, WeightSet, WeightSource, WeightTensor};
-use crate::inference::model::{ModelWeights, MAX_KV_LAYERS};
-use crate::inference::ops::OpId;
-use crate::inference::shape::{DimBound, Shape, ShapeEnvelope, Symbol};
+use crate::inference::runtime::PlanOptions;
 
 use super::error::{FormatError, FormatErrorKind};
-use super::graph::PreparedGraph;
-use super::wire::{crc32, Reader, Writer};
+use super::graph::{check_interface, decode_graph, encode_graph, ArtifactMetadata, GraphParts};
+use super::plan::{decode_plans, encode_plans, ArtifactPlan, Precision, MAX_TARGETS};
+use super::weights::{decode_weight_table, decode_weights, encode_weights, ArtifactWeight};
+use super::wire::{Reader, Writer};
 
-// ---------------------------------------------------------------------------
-// Framing constants
-// ---------------------------------------------------------------------------
+/// The eight magic bytes of a version-2 prepared-model artifact.
+pub const MAGIC: [u8; 8] = *b"FNN3ART2";
 
-/// The eight magic bytes of a versioned prepared-model artifact.
-///
-/// `FNN3` is the tree, `PREP` is the artifact. Deliberately not a NUL-padded
-/// string: all eight bytes carry information, so a truncated copy rarely looks
-/// like a valid magic.
-pub const MAGIC: [u8; 8] = *b"FNN3PREP";
+/// The magic of the replaced version-1 artifact, kept only to name it.
+pub const LEGACY_MAGIC: [u8; 8] = *b"FNN3PREP";
 
 /// The only format version this build writes and reads.
-pub const FORMAT_VERSION: u16 = 1;
+pub const FORMAT_VERSION: u16 = 2;
 
 /// Size of the fixed header, in bytes.
-pub const HEADER_BYTES: usize = 64;
+pub const HEADER_BYTES: usize = 128;
+
+/// Size of the section directory.
+pub const DIRECTORY_BYTES: usize = 128;
+
+/// Number of sections (`GRAPH`, `PLANS`, `WEIGHTS`, `QUANT`, `HASHES`).
+pub const SECTION_COUNT: usize = 5;
 
 /// Dtype encoding id: one byte per tensor, carrying [`DType::code`].
-///
-/// A future encoding (for example a quantized one with a wider code) must use a
-/// new id, so an old build reports "this file uses dtype encoding 2" instead of
-/// misreading a code.
-const DTYPE_ENCODING: u32 = 1;
-
-/// Number of sections. Fixed for version 1.
-const SECTION_COUNT: usize = 6;
-
-/// Payload directory size: a count, a reserved word, and one 16-byte entry per
-/// section. A multiple of eight, so the first section starts aligned.
-const DIRECTORY_BYTES: usize = 8 + SECTION_COUNT * 16;
-
-/// Section tags, in the only order version 1 accepts.
-mod tag {
-    pub(super) const META: u32 = 1;
-    pub(super) const GEOMETRY: u32 = 2;
-    pub(super) const ENVELOPE: u32 = 3;
-    pub(super) const VALUES: u32 = 4;
-    pub(super) const NODES: u32 = 5;
-    pub(super) const WEIGHTS: u32 = 6;
-
-    /// Every tag, in write order.
-    pub(super) const ALL: [u32; super::SECTION_COUNT] =
-        [META, GEOMETRY, ENVELOPE, VALUES, NODES, WEIGHTS];
-
-    /// A human name for a tag, used in malformed-section diagnostics.
-    pub(super) fn name(tag: u32) -> &'static str {
-        match tag {
-            META => "META",
-            GEOMETRY => "GEOM",
-            ENVELOPE => "ENV",
-            VALUES => "VALS",
-            NODES => "NODE",
-            WEIGHTS => "WGHT",
-            _ => "unknown",
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Limits
-// ---------------------------------------------------------------------------
+pub const DTYPE_ENCODING: u32 = 1;
 
 /// Largest artifact payload this build accepts, in bytes.
 ///
-/// The artifact is read from one buffer, so this is the memory a load may cost.
-/// Eight GiB is far above the 498 MB trained GPT-2 and far below "the process
-/// dies before reporting an error".
+/// Eight GiB is far above the largest model in scope (498 MB) and far below
+/// "the process dies before reporting an error".
 pub const MAX_PAYLOAD_BYTES: u64 = 8 * (1 << 30);
 
 /// Largest value table this build accepts.
@@ -162,81 +130,180 @@ pub const MAX_WEIGHTS: u64 = 1 << 20;
 /// Largest tensor rank this build accepts anywhere in the artifact.
 pub const MAX_RANK: u64 = 64;
 
-/// Largest `OpParams.axes` vector this build accepts.
+/// Largest `OpParams` vector this build accepts.
 pub const MAX_PARAM_AXES: u64 = 1024;
 
-/// Largest vocabulary size this build accepts.
+/// Largest section `inspect` is willing to read into memory.
 ///
-/// A policy cap, not a hardware limit: real vocabularies are around 50k and the
-/// largest production ones are under 300k.
-pub const MAX_VOCAB_SIZE: u32 = 1 << 24;
+/// `inspect` reads `GRAPH`, `PLANS` and `QUANT` (never the weight payload), so
+/// this bounds a metadata allocation, not a model load.
+pub const MAX_INSPECT_SECTION_BYTES: u64 = 256 * (1 << 20);
 
-// Smallest possible encoded size of one entry, used to prove that a declared
-// count can fit in the bytes that remain before anything is allocated. Each is a
-// lower bound on the encoding the reader below actually consumes, so a count
-// that fails the proof cannot fit.
-//
-// A value entry is a name (4-byte length + at least one byte, because
-// `PreparedGraph::check` rejects an empty name), a dtype, a shape kind and an
-// origin. A weight or node origin carries a 4-byte handle; a graph-input origin
-// carries no handle but every such value needs a 4-byte slot in the graph-input
-// table that follows, so 11 is the floor for all three.
-const MIN_VALUE_ENTRY: u64 = 4 + 1 + 1 + 1 + 4;
-// A node always has at least one output, so the output count's 4 bytes are
-// followed by at least one 4-byte value handle.
-const MIN_NODE_ENTRY: u64 = 4 + 4 + 4 + 2 + 4 + 4 + 4 + 1 + 4 + 4;
-const MIN_WEIGHT_ENTRY: u64 = 4 + 1 + 4 + 1 + 8;
-const MIN_DIRECTORY_ENTRY: u64 = 16;
+/// Target name for the default CPU profile (`onednn` where this build has it).
+pub const TARGET_CPU: &str = "cpu";
 
-// ---------------------------------------------------------------------------
-// Header
-// ---------------------------------------------------------------------------
+/// Target name for the scalar, unfused reference profile.
+pub const TARGET_CPU_REFERENCE: &str = "cpu-reference";
 
-/// The validated fixed header of an artifact.
-///
-/// [`PreparedHeader::parse`] reads only the framing: magic, version, encoding,
-/// lengths and reserved fields. It is the cheap entry point a tool or a CLI uses
-/// to answer "what is this file?" before committing to a full load — and the
-/// first thing [`PreparedArtifact::from_bytes`] calls.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PreparedHeader {
-    /// Format version (always [`FORMAT_VERSION`] when `parse` succeeds).
-    pub version: u16,
-    /// Dtype encoding id (always `1` when `parse` succeeds).
-    pub dtype_encoding: u32,
-    /// Total file length declared by the header.
-    pub file_bytes: u64,
-    /// Payload length declared by the header.
-    pub payload_bytes: u64,
-    /// CRC-32 of the payload as stored in the header.
-    pub payload_crc32: u32,
+/// Target name that expands to every profile this build can produce.
+pub const TARGET_ALL: &str = "all";
+
+/// The target names a user may pass to `prepare`.
+pub const TARGETS: [&str; 3] = [TARGET_CPU, TARGET_CPU_REFERENCE, TARGET_ALL];
+
+/// Resolve a target request into the profiles to write, in deterministic order.
+pub fn resolve_targets(name: &str) -> Result<Vec<&'static str>, FormatError> {
+    match name {
+        TARGET_CPU => Ok(vec![TARGET_CPU]),
+        TARGET_CPU_REFERENCE => Ok(vec![TARGET_CPU_REFERENCE]),
+        TARGET_ALL => Ok(vec![TARGET_CPU, TARGET_CPU_REFERENCE]),
+        other => Err(FormatError::inconsistent(
+            "target request",
+            format!(
+                "target `{other}` is not defined; this build knows {}",
+                TARGETS.join(", ")
+            ),
+        )),
+    }
 }
 
-impl PreparedHeader {
-    /// Validate the framing of `bytes`.
+/// Build the plan for one target name.
+fn plan_for_target(
+    imported: &ImportedGraph,
+    target: &str,
+    precision: Precision,
+) -> Result<Plan, FormatError> {
+    if precision != Precision::F32 {
+        return Err(FormatError::new(FormatErrorKind::UnsupportedPrecision {
+            found: precision.code(),
+            supported: "f32 (code 0)",
+        }));
+    }
+    let plan = match target {
+        TARGET_CPU => {
+            #[cfg(feature = "cpu-onednn")]
+            {
+                use crate::inference::backend::cpu::onednn::OneDnnCapability;
+                Plan::from_imported_with_options(imported, &OneDnnCapability, PlanOptions::new())
+            }
+            #[cfg(not(feature = "cpu-onednn"))]
+            {
+                use crate::inference::backend::ScalarOnly;
+                Plan::from_imported_with_options(imported, &ScalarOnly, PlanOptions::new())
+            }
+        }
+        TARGET_CPU_REFERENCE => {
+            use crate::inference::backend::ScalarOnly;
+            Plan::from_imported_with_options(imported, &ScalarOnly, PlanOptions::unfused())
+        }
+        other => {
+            return Err(FormatError::malformed_at(
+                "target",
+                0,
+                format!("target `{other}` has no plan builder"),
+            ))
+        }
+    };
+    plan.map_err(|error| FormatError::contract("target plan", error))
+}
+
+// ---------------------------------------------------------------------------
+// Header and sections
+// ---------------------------------------------------------------------------
+
+mod tag {
+    pub(super) const HEADER: u32 = 0;
+    pub(super) const GRAPH: u32 = 1;
+    pub(super) const PLANS: u32 = 2;
+    pub(super) const WEIGHTS: u32 = 3;
+    pub(super) const QUANT: u32 = 4;
+    pub(super) const HASHES: u32 = 5;
+
+    /// Sections in write order.
+    pub(super) const ALL: [u32; super::SECTION_COUNT] = [GRAPH, PLANS, WEIGHTS, QUANT, HASHES];
+
+    pub(super) fn name(tag: u32) -> &'static str {
+        match tag {
+            HEADER => "HEADER",
+            GRAPH => "GRAPH",
+            PLANS => "PLANS",
+            WEIGHTS => "WEIGHTS",
+            QUANT => "QUANT",
+            HASHES => "HASHES",
+            _ => "unknown",
+        }
+    }
+}
+
+/// The validated fixed header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactHeader {
+    /// Format version.
+    pub version: u16,
+    /// Number of sections (always 5).
+    pub section_count: u32,
+    /// Number of target plans.
+    pub target_count: u32,
+    /// Reserved flags (always 0).
+    pub flags: u32,
+    /// Dtype encoding id (always 1).
+    pub dtype_encoding: u32,
+    /// SHA-256 of the source ONNX file.
+    pub source_onnx_sha256: [u8; 32],
+    /// Total file length.
+    pub file_bytes: u64,
+    /// `file_bytes - HEADER_BYTES`.
+    pub payload_bytes: u64,
+    /// Directory offset (always 128).
+    pub directory_offset: u64,
+    /// Directory length (always 128).
+    pub directory_bytes: u64,
+    /// Absolute offset of the `WEIGHTS` section.
+    pub weights_offset: u64,
+    /// Length of the `WEIGHTS` section.
+    pub weights_length: u64,
+    /// Absolute offset of the weight payload.
+    pub weight_payload_offset: u64,
+    /// Length of the weight payload.
+    pub weight_payload_bytes: u64,
+}
+
+impl ArtifactHeader {
+    /// Parse and validate the fixed header.
     ///
-    /// Checks, in this order: minimum size, magic, format version, header
-    /// length, dtype encoding, reserved fields, file length, payload length and
-    /// the payload cap. The checksum is *not* recomputed here; it is a whole
-    /// payload pass and belongs to [`PreparedArtifact::from_bytes`].
-    pub fn parse(bytes: &[u8]) -> Result<PreparedHeader, FormatError> {
+    /// `file_bytes` is the actual file length, so a header cannot claim a size
+    /// the file does not have.
+    pub fn parse(bytes: &[u8], file_bytes: u64) -> Result<ArtifactHeader, FormatError> {
         if bytes.len() < HEADER_BYTES {
-            return Err(FormatError::truncated(
-                "prepared-model header",
+            return Err(FormatError::truncated_at(
+                "artifact header",
+                0,
                 HEADER_BYTES as u64,
                 bytes.len() as u64,
             ));
         }
         let mut magic = [0u8; 8];
         magic.copy_from_slice(&bytes[..8]);
+        if magic == LEGACY_MAGIC {
+            let version = u16::from_le_bytes([bytes[8], bytes[9]]);
+            return Err(FormatError::new(FormatErrorKind::ObsoleteFormat {
+                magic,
+                version,
+            }));
+        }
         if magic != MAGIC {
             return Err(FormatError::new(FormatErrorKind::BadMagic { found: magic }));
         }
         let mut reader = Reader::new(&bytes[..HEADER_BYTES]);
         reader.take(8, "magic")?;
-
         let version = reader.u16("format version")?;
         if version != FORMAT_VERSION {
+            if version < FORMAT_VERSION {
+                return Err(FormatError::new(FormatErrorKind::ObsoleteFormat {
+                    magic,
+                    version,
+                }));
+            }
             return Err(FormatError::new(FormatErrorKind::UnsupportedVersion {
                 found: version,
                 supported: FORMAT_VERSION,
@@ -244,10 +311,38 @@ impl PreparedHeader {
         }
         let header_length = u64::from(reader.u16("header length")?);
         if header_length != HEADER_BYTES as u64 {
-            return Err(FormatError::new(FormatErrorKind::LengthMismatch {
-                what: "header length",
-                declared: header_length,
-                actual: HEADER_BYTES as u64,
+            return Err(FormatError::length_mismatch(
+                "header length",
+                header_length,
+                HEADER_BYTES as u64,
+                10,
+            ));
+        }
+        let section_count = reader.u32("section count")?;
+        if section_count != SECTION_COUNT as u32 {
+            return Err(FormatError::malformed_at(
+                "HEADER",
+                12,
+                format!(
+                    "version {FORMAT_VERSION} has {SECTION_COUNT} sections, the file declares \
+                     {section_count}"
+                ),
+            ));
+        }
+        let target_count = reader.u32("target profile count")?;
+        if target_count == 0 || u64::from(target_count) > MAX_TARGETS {
+            return Err(FormatError::limit(
+                "target profile count",
+                u64::from(target_count),
+                MAX_TARGETS,
+            ));
+        }
+        let flags = reader.u32("flags")?;
+        if flags != 0 {
+            return Err(FormatError::new(FormatErrorKind::ReservedField {
+                field: "flags",
+                value: u64::from(flags),
+                offset: 20,
             }));
         }
         let dtype_encoding = reader.u32("dtype encoding")?;
@@ -259,35 +354,34 @@ impl PreparedHeader {
                 },
             ));
         }
-        reader.zero_u32("flags")?;
         reader.zero_u32("reserved header word")?;
-        let file_bytes = reader.u64("file length")?;
+        let mut source_onnx_sha256 = [0u8; 32];
+        source_onnx_sha256.copy_from_slice(reader.take(32, "source ONNX SHA-256")?);
+        let declared_file_bytes = reader.u64("file length")?;
         let payload_bytes = reader.u64("payload length")?;
-        let payload_crc32 = reader.u32("payload checksum")?;
-        let reserved = reader.take(20, "reserved header bytes")?;
-        if let Some(position) = reserved.iter().position(|&byte| byte != 0) {
-            return Err(FormatError::new(FormatErrorKind::ReservedField {
-                field: "reserved header bytes",
-                value: u64::from(reserved[position]),
-            }));
-        }
+        let directory_offset = reader.u64("directory offset")?;
+        let directory_bytes = reader.u64("directory length")?;
+        let weights_offset = reader.u64("weights offset")?;
+        let weights_length = reader.u64("weights length")?;
+        let weight_payload_offset = reader.u64("weight payload offset")?;
+        let weight_payload_bytes = reader.u64("weight payload length")?;
 
-        let actual_bytes = bytes.len() as u64;
-        if file_bytes != actual_bytes {
-            return Err(FormatError::new(FormatErrorKind::LengthMismatch {
-                what: "file length",
-                declared: file_bytes,
-                actual: actual_bytes,
-            }));
+        if declared_file_bytes != file_bytes {
+            return Err(FormatError::length_mismatch(
+                "file length",
+                declared_file_bytes,
+                file_bytes,
+                64,
+            ));
         }
-        // `actual_bytes >= HEADER_BYTES` was established above.
-        let expected_payload = actual_bytes - HEADER_BYTES as u64;
+        let expected_payload = file_bytes.saturating_sub(HEADER_BYTES as u64);
         if payload_bytes != expected_payload {
-            return Err(FormatError::new(FormatErrorKind::LengthMismatch {
-                what: "payload length",
-                declared: payload_bytes,
-                actual: expected_payload,
-            }));
+            return Err(FormatError::length_mismatch(
+                "payload length",
+                payload_bytes,
+                expected_payload,
+                72,
+            ));
         }
         if payload_bytes > MAX_PAYLOAD_BYTES {
             return Err(FormatError::limit(
@@ -296,213 +390,1064 @@ impl PreparedHeader {
                 MAX_PAYLOAD_BYTES,
             ));
         }
-        Ok(PreparedHeader {
+        if directory_offset != HEADER_BYTES as u64 {
+            return Err(FormatError::length_mismatch(
+                "directory offset",
+                directory_offset,
+                HEADER_BYTES as u64,
+                80,
+            ));
+        }
+        if directory_bytes != DIRECTORY_BYTES as u64 {
+            return Err(FormatError::length_mismatch(
+                "directory length",
+                directory_bytes,
+                DIRECTORY_BYTES as u64,
+                88,
+            ));
+        }
+        if weights_offset % 64 != 0 || weights_length % 64 != 0 {
+            return Err(FormatError::malformed_at(
+                "HEADER",
+                96,
+                format!(
+                    "the WEIGHTS section at {weights_offset} (length {weights_length}) is not \
+                     64-byte aligned"
+                ),
+            ));
+        }
+        let weights_end = weights_offset.checked_add(weights_length).ok_or_else(|| {
+            FormatError::malformed_at("HEADER", 96, "the WEIGHTS range overflows")
+        })?;
+        if weights_end > file_bytes {
+            return Err(FormatError::malformed_at(
+                "HEADER",
+                96,
+                format!(
+                    "the WEIGHTS section ends at byte {weights_end}, past the {file_bytes}-byte \
+                     file"
+                ),
+            ));
+        }
+        if weight_payload_offset < weights_offset
+            || weight_payload_offset % 64 != 0
+            || weight_payload_offset
+                .checked_add(weight_payload_bytes)
+                .is_none_or(|end| end > weights_end)
+        {
+            return Err(FormatError::malformed_at(
+                "HEADER",
+                112,
+                format!(
+                    "the weight payload range {weight_payload_offset}..{} is not inside the \
+                     WEIGHTS section {weights_offset}..{weights_end}",
+                    weight_payload_offset.saturating_add(weight_payload_bytes)
+                ),
+            ));
+        }
+        Ok(ArtifactHeader {
             version,
+            section_count,
+            target_count,
+            flags,
             dtype_encoding,
+            source_onnx_sha256,
             file_bytes,
             payload_bytes,
-            payload_crc32,
+            directory_offset,
+            directory_bytes,
+            weights_offset,
+            weights_length,
+            weight_payload_offset,
+            weight_payload_bytes,
         })
+    }
+
+    /// The source ONNX digest as lowercase hexadecimal.
+    pub fn source_sha256_hex(&self) -> String {
+        hex(&self.source_onnx_sha256)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Metadata
-// ---------------------------------------------------------------------------
-
-/// Provenance carried by the artifact.
-///
-/// Not required to *run* the model, but the first thing a person needs when two
-/// artifacts behave differently: which ONNX IR and opset produced this graph,
-/// from which exporter, and what the graph was called. It is also the section a
-/// reproducible-build check compares.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArtifactMetadata {
-    /// ONNX IR version of the source model.
-    pub ir_version: i64,
-    /// Opset of the source model's default domain.
-    pub opset: OpsetImport,
-    /// Exporter name (`"pytorch"`).
-    pub producer: String,
-    /// Exporter version (`"2.8.0"`).
-    pub producer_version: String,
-    /// Source graph name.
-    pub graph_name: String,
+/// One section's absolute position and declared length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SectionRange {
+    /// Section tag (1..=5).
+    pub tag: u32,
+    /// Absolute file offset.
+    pub offset: u64,
+    /// Encoded length, excluding padding.
+    pub length: u64,
 }
 
-impl ArtifactMetadata {
-    /// Read the provenance off an import.
-    pub fn from_import(import: &ModelImport) -> ArtifactMetadata {
-        ArtifactMetadata {
-            ir_version: import.ir_version(),
-            opset: import.opset().clone(),
-            producer: import.producer().to_string(),
-            producer_version: import.producer_version().to_string(),
-            graph_name: import.graph_name().to_string(),
+impl SectionRange {
+    /// Human name (`GRAPH`).
+    pub fn name(&self) -> &'static str {
+        tag::name(self.tag)
+    }
+}
+
+/// One section's stored SHA-256.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SectionHash {
+    /// Section name (`HEADER`, `GRAPH`, `PLANS`, `WEIGHTS`, `QUANT`).
+    pub name: &'static str,
+    /// Stored digest.
+    pub sha256: [u8; 32],
+}
+
+impl SectionHash {
+    /// Lowercase hexadecimal.
+    pub fn hex(&self) -> String {
+        hex(&self.sha256)
+    }
+}
+
+fn align64(value: u64) -> Result<u64, FormatError> {
+    value
+        .checked_add(63)
+        .map(|value| value & !63)
+        .ok_or_else(|| FormatError::limit("64-byte alignment", value, u64::MAX))
+}
+
+/// Parse the fixed directory.
+pub fn parse_directory(
+    directory: &[u8],
+    header: &ArtifactHeader,
+) -> Result<[SectionRange; SECTION_COUNT], FormatError> {
+    if directory.len() < DIRECTORY_BYTES {
+        return Err(FormatError::truncated_at(
+            "artifact directory",
+            header.directory_offset,
+            DIRECTORY_BYTES as u64,
+            directory.len() as u64,
+        ));
+    }
+    let mut reader = Reader::at(&directory[..DIRECTORY_BYTES], header.directory_offset);
+    let count = reader.count("section directory", SECTION_COUNT as u64, 24)?;
+    if count != SECTION_COUNT {
+        return Err(FormatError::malformed_at(
+            "HEADER",
+            header.directory_offset,
+            format!("expected {SECTION_COUNT} section entries, found {count}"),
+        ));
+    }
+    reader.zero_u32("directory reserved word")?;
+
+    let mut ranges = [SectionRange {
+        tag: 0,
+        offset: 0,
+        length: 0,
+    }; SECTION_COUNT];
+    let mut cursor = header.directory_offset + DIRECTORY_BYTES as u64;
+    for (position, expected) in tag::ALL.into_iter().enumerate() {
+        let entry_offset = header.directory_offset + 8 + position as u64 * 24;
+        let found = reader.u32("section tag")?;
+        reader.zero_u32("section tag reserved word")?;
+        let offset = reader.u64("section offset")?;
+        let length = reader.u64("section length")?;
+        if found != expected {
+            return Err(FormatError::malformed_at(
+                "HEADER",
+                entry_offset,
+                format!(
+                    "section {position} is tagged {found} ({}), expected {expected} ({})",
+                    tag::name(found),
+                    tag::name(expected)
+                ),
+            ));
+        }
+        if offset != cursor {
+            return Err(FormatError::malformed_at(
+                "HEADER",
+                entry_offset + 8,
+                format!(
+                    "section {position} ({}) starts at {offset}, expected {cursor}",
+                    tag::name(found)
+                ),
+            ));
+        }
+        if offset % 64 != 0 {
+            return Err(FormatError::malformed_at(
+                "HEADER",
+                entry_offset + 8,
+                format!("section {} is not 64-byte aligned", tag::name(found)),
+            ));
+        }
+        let end = offset.checked_add(length).ok_or_else(|| {
+            FormatError::malformed_at(
+                "HEADER",
+                entry_offset + 16,
+                format!("section {} length overflows", tag::name(found)),
+            )
+        })?;
+        if end > header.file_bytes {
+            return Err(FormatError::truncated_at(
+                format!("{} section", tag::name(found)),
+                offset,
+                length,
+                header.file_bytes.saturating_sub(offset),
+            ));
+        }
+        if length == 0 {
+            return Err(FormatError::malformed_at(
+                "HEADER",
+                entry_offset + 16,
+                format!("section {} has length 0", tag::name(found)),
+            ));
+        }
+        cursor = align64(end)?;
+        ranges[position] = SectionRange {
+            tag: found,
+            offset,
+            length,
+        };
+    }
+    if cursor != header.file_bytes {
+        return Err(FormatError::length_mismatch(
+            "file length",
+            header.file_bytes,
+            cursor,
+            header.directory_offset,
+        ));
+    }
+    let weights = ranges[2];
+    if weights.offset != header.weights_offset || weights.length != header.weights_length {
+        return Err(FormatError::inconsistent(
+            "section directory",
+            format!(
+                "the directory places WEIGHTS at {}..{} but the header says {}..{}",
+                weights.offset,
+                weights.offset + weights.length,
+                header.weights_offset,
+                header.weights_length
+            ),
+        ));
+    }
+    Ok(ranges)
+}
+
+/// Require the bytes between sections to be zero padding.
+///
+/// The writer pads every section to 64 bytes; a reader that accepted a nonzero
+/// padding byte would make the encoding non-canonical and a single-byte flip in
+/// the gap invisible to every section hash.
+pub(super) fn check_section_padding(
+    bytes: &[u8],
+    ranges: &[SectionRange; SECTION_COUNT],
+) -> Result<(), FormatError> {
+    for range in ranges {
+        let end = range.offset as usize + range.length as usize;
+        let padded = align64(range.offset + range.length)? as usize;
+        let limit = padded.min(bytes.len());
+        if let Some(position) = bytes[end..limit].iter().position(|&byte| byte != 0) {
+            return Err(FormatError::malformed_at(
+                range.name(),
+                end as u64 + position as u64,
+                format!(
+                    "inter-section padding byte is {:#04x}, expected 0",
+                    bytes[end + position]
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn read_hashes(section: &[u8], base: u64) -> Result<[SectionHash; 5], FormatError> {
+    let mut reader = Reader::at(section, base);
+    let count = reader.count("hash table", 5, 40)?;
+    if count != 5 {
+        return Err(FormatError::malformed_at(
+            "HASHES",
+            base,
+            format!("expected 5 hashes (HEADER, GRAPH, PLANS, WEIGHTS, QUANT), found {count}"),
+        ));
+    }
+    reader.zero_u32("hash table reserved word")?;
+    let mut hashes = [SectionHash {
+        name: "unknown",
+        sha256: [0u8; 32],
+    }; 5];
+    for position in 0..5 {
+        let entry_offset = base + 8 + position as u64 * 40;
+        let tag = reader.u32("hash section tag")?;
+        let expected = position as u32;
+        if tag != expected {
+            return Err(FormatError::malformed_at(
+                "HASHES",
+                entry_offset,
+                format!("hash entry {position} is tagged {tag}, expected {expected}"),
+            ));
+        }
+        reader.zero_u32("hash entry reserved word")?;
+        let mut digest = [0u8; 32];
+        digest.copy_from_slice(reader.take(32, "section SHA-256")?);
+        hashes[position] = SectionHash {
+            name: tag::name(tag),
+            sha256: digest,
+        };
+    }
+    reader.finish("HASHES section")?;
+    Ok(hashes)
+}
+
+fn hash_slice(bytes: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher.finish()
+}
+
+/// Hash one file range with a fixed 1 MiB buffer.
+///
+/// The buffer is reused for every chunk, so validating a 200 MB weight section
+/// does not grow process memory by the section size. It also deliberately uses
+/// `File` reads rather than the mapping, so a load does not fault the weight
+/// pages into the process just to check them.
+fn hash_file_range(
+    file: &mut std::fs::File,
+    offset: u64,
+    length: u64,
+) -> std::io::Result<[u8; 32]> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1 << 20];
+    file.seek(SeekFrom::Start(offset))?;
+    let mut remaining = length;
+    while remaining > 0 {
+        let take = remaining.min(buffer.len() as u64) as usize;
+        file.read_exact(&mut buffer[..take])?;
+        hasher.update(&buffer[..take]);
+        remaining -= take as u64;
+    }
+    Ok(hasher.finish())
+}
+
+fn verify_hashes_slice(
+    bytes: &[u8],
+    ranges: &[SectionRange; SECTION_COUNT],
+    hashes: &[SectionHash; 5],
+) -> Result<(), FormatError> {
+    let mut pairs: Vec<(&'static str, &[u8])> = Vec::with_capacity(5);
+    pairs.push(("HEADER", &bytes[..HEADER_BYTES]));
+    for range in ranges.iter().take(4) {
+        let start = range.offset as usize;
+        let end = start + range.length as usize;
+        pairs.push((range.name(), &bytes[start..end]));
+    }
+    for (name, data) in pairs {
+        let stored = hashes
+            .iter()
+            .find(|hash| hash.name == name)
+            .ok_or_else(|| {
+                FormatError::inconsistent("hash table", format!("no hash for {name}"))
+            })?;
+        let computed = hash_slice(data);
+        if computed != stored.sha256 {
+            return Err(FormatError::new(FormatErrorKind::HashMismatch {
+                section: name.to_string(),
+                offset: if name == "HEADER" {
+                    0
+                } else {
+                    ranges
+                        .iter()
+                        .find(|range| range.name() == name)
+                        .map(|range| range.offset)
+                        .unwrap_or(0)
+                },
+                stored: stored.sha256,
+                computed,
+            }));
+        }
+    }
+    Ok(())
+}
+
+fn verify_hashes_file(
+    file: &mut std::fs::File,
+    ranges: &[SectionRange; SECTION_COUNT],
+    hashes: &[SectionHash; 5],
+) -> Result<(), FormatError> {
+    let mut pairs: Vec<(&'static str, u64, u64)> = Vec::with_capacity(5);
+    pairs.push(("HEADER", 0, HEADER_BYTES as u64));
+    for range in ranges.iter().take(4) {
+        pairs.push((range.name(), range.offset, range.length));
+    }
+    for (name, offset, length) in pairs {
+        let stored = hashes
+            .iter()
+            .find(|hash| hash.name == name)
+            .ok_or_else(|| {
+                FormatError::inconsistent("hash table", format!("no hash for {name}"))
+            })?;
+        let computed = hash_file_range(file, offset, length)
+            .map_err(|error| FormatError::io("<artifact>", error.to_string()))?;
+        if computed != stored.sha256 {
+            return Err(FormatError::new(FormatErrorKind::HashMismatch {
+                section: name.to_string(),
+                offset: if name == "HEADER" {
+                    0
+                } else {
+                    ranges
+                        .iter()
+                        .find(|range| range.name() == name)
+                        .map(|range| range.offset)
+                        .unwrap_or(0)
+                },
+                stored: stored.sha256,
+                computed,
+            }));
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Quantization metadata
+// ---------------------------------------------------------------------------
+
+/// One tensor's quantization metadata, reserved for a future precision.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuantTensor {
+    /// Graph value or weight id the entry describes.
+    pub tensor: u32,
+    /// Scale.
+    pub scale: f32,
+    /// Zero point.
+    pub zero_point: i64,
+    /// Axis for per-channel metadata, `None` for per-tensor.
+    pub axis: Option<i64>,
+}
+
+/// The `QUANT` section: empty but well formed for `F32`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuantMetadata {
+    precision: Precision,
+    tensors: Vec<QuantTensor>,
+}
+
+impl QuantMetadata {
+    /// Empty metadata for an F32 artifact.
+    pub fn empty_f32() -> QuantMetadata {
+        QuantMetadata {
+            precision: Precision::F32,
+            tensors: Vec::new(),
+        }
+    }
+
+    /// Declared execution precision.
+    pub fn precision(&self) -> Precision {
+        self.precision
+    }
+
+    /// Per-tensor entries (empty for F32).
+    pub fn tensors(&self) -> &[QuantTensor] {
+        &self.tensors
+    }
+}
+
+const QUANT_HEADER_BYTES: u64 = 8;
+const QUANT_ENTRY_BYTES: u64 = 28;
+
+fn encode_quant(quant: &QuantMetadata) -> Result<Vec<u8>, FormatError> {
+    if quant.precision != Precision::F32 {
+        return Err(FormatError::new(FormatErrorKind::UnsupportedPrecision {
+            found: quant.precision.code(),
+            supported: "f32 (code 0)",
+        }));
+    }
+    if !quant.tensors.is_empty() {
+        return Err(FormatError::inconsistent(
+            "QUANT section",
+            "an F32 artifact carries no quantization entries",
+        ));
+    }
+    let mut section = Writer::with_capacity(QUANT_HEADER_BYTES as usize);
+    section.u8(quant.precision.code());
+    section.u8(0);
+    section.u16(0);
+    section.u32(0);
+    Ok(section.into_bytes())
+}
+
+fn decode_quant(section: &[u8], base: u64) -> Result<QuantMetadata, FormatError> {
+    let mut reader = Reader::at(section, base);
+    let code = reader.u8("quantization precision")?;
+    let precision = Precision::from_code(code).ok_or_else(|| {
+        FormatError::new(FormatErrorKind::UnsupportedPrecision {
+            found: code,
+            supported: "f32 (code 0)",
+        })
+    })?;
+    reader.u8("quantization reserved byte")?;
+    let reserved = reader.u16("quantization reserved word")?;
+    if reserved != 0 {
+        return Err(FormatError::new(FormatErrorKind::ReservedField {
+            field: "quantization reserved word",
+            value: u64::from(reserved),
+            offset: base + 2,
+        }));
+    }
+    let count = reader.count("quantization tensor table", MAX_VALUES, QUANT_ENTRY_BYTES)?;
+    if precision == Precision::F32 && count != 0 {
+        return Err(FormatError::inconsistent(
+            "QUANT section",
+            format!("an F32 artifact declares {count} quantized tensors"),
+        ));
+    }
+    let mut tensors = Vec::with_capacity(count);
+    for index in 0..count {
+        let tensor = reader.u32(format!("quant tensor {index}"))?;
+        let scale = reader.f32(format!("quant tensor {index} scale"))?;
+        let zero_point = reader.i64(format!("quant tensor {index} zero point"))?;
+        let axis = reader.i64(format!("quant tensor {index} axis"))?;
+        tensors.push(QuantTensor {
+            tensor,
+            scale,
+            zero_point,
+            axis: if axis == i64::MIN { None } else { Some(axis) },
+        });
+    }
+    reader.finish("QUANT section")?;
+    Ok(QuantMetadata { precision, tensors })
+}
+
+// ---------------------------------------------------------------------------
+// The loaded artifact
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+enum Backing {
+    Mapped(Arc<memmap2::Mmap>),
+    Owned(Arc<[u8]>),
+}
+
+impl Backing {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Backing::Mapped(map) => map.as_ref(),
+            Backing::Owned(bytes) => bytes.as_ref(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+}
+
+/// A validated artifact whose weights point into a read-only mapping.
+///
+/// `Artifact` is `Send + Sync`. Cloning shares the one mapping (the `Arc<Mmap>`)
+/// and copies the graph and plan tables, never the weight payload; using
+/// `Artifact` behind an `Arc` is the usual deployment path. It owns the mapping
+/// for as long as any clone lives, which is what lets a session keep weight
+/// slices without copying them.
+#[derive(Debug, Clone)]
+pub struct Artifact {
+    backing: Backing,
+    header: ArtifactHeader,
+    metadata: ArtifactMetadata,
+    graph: Graph,
+    inputs: Vec<String>,
+    outputs: Vec<String>,
+    plans: Vec<ArtifactPlan>,
+    weights: Vec<ArtifactWeight>,
+    weight_payload_offset: u64,
+    quant: QuantMetadata,
+    hashes: [SectionHash; 5],
+    ranges: [SectionRange; SECTION_COUNT],
+}
+
+impl Artifact {
+    /// Map an artifact file read-only and validate every section.
+    ///
+    /// The weight payload is hashed from the file in fixed-size reads *before*
+    /// the mapping is used, so corruption is reported before a single weight
+    /// page is faulted in.
+    pub fn open(path: impl AsRef<Path>) -> Result<Artifact, FormatError> {
+        let path = path.as_ref();
+        let mut file = std::fs::File::open(path)
+            .map_err(|error| FormatError::io(path.display().to_string(), error.to_string()))?;
+        let file_bytes = file
+            .metadata()
+            .map_err(|error| FormatError::io(path.display().to_string(), error.to_string()))?
+            .len();
+        let mut header_bytes = [0u8; HEADER_BYTES];
+        read_range(&mut file, 0, &mut header_bytes, path)?;
+        let header = ArtifactHeader::parse(&header_bytes, file_bytes)?;
+        let mut directory = [0u8; DIRECTORY_BYTES];
+        read_range(&mut file, header.directory_offset, &mut directory, path)?;
+        let ranges = parse_directory(&directory, &header)?;
+
+        let hashes_range = ranges[4];
+        let mut hashes_bytes = vec![0u8; hashes_range.length as usize];
+        read_range(&mut file, hashes_range.offset, &mut hashes_bytes, path)?;
+        let hashes = read_hashes(&hashes_bytes, hashes_range.offset)?;
+        verify_hashes_file(&mut file, &ranges, &hashes)?;
+
+        // SAFETY: the file is opened read-only (`File::open`), the mapping is
+        // created with `MmapOptions::map` (not `map_mut`), and `Artifact` keeps
+        // the `Arc<Mmap>` alive for at least as long as this value and every
+        // clone. The mapping's length is the file length the header validated.
+        // No code in this module writes through the pointer or constructs a
+        // `&mut [u8]` from it. `memmap2` guarantees the mapping is page-aligned;
+        // the format's 64-byte offsets preserve alignment for every dtype.
+        let mapping = unsafe {
+            memmap2::MmapOptions::new()
+                .map(&file)
+                .map_err(|error| FormatError::io(path.display().to_string(), error.to_string()))?
+        };
+        if mapping.len() as u64 != file_bytes {
+            return Err(FormatError::length_mismatch(
+                "mapped file length",
+                file_bytes,
+                mapping.len() as u64,
+                0,
+            ));
+        }
+        Artifact::decode(Backing::Mapped(Arc::new(mapping)), header, ranges, hashes)
+    }
+
+    /// Decode an artifact from bytes already in memory.
+    ///
+    /// This is the test and embedding seam. `open` is the deployment path and
+    /// the only one that provides zero-copy sharing between sessions.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Artifact, FormatError> {
+        let file_bytes = bytes.len() as u64;
+        let header = ArtifactHeader::parse(&bytes, file_bytes)?;
+        let directory = bytes
+            .get(
+                header.directory_offset as usize
+                    ..(header.directory_offset + DIRECTORY_BYTES as u64) as usize,
+            )
+            .ok_or_else(|| {
+                FormatError::truncated_at(
+                    "artifact directory",
+                    header.directory_offset,
+                    DIRECTORY_BYTES as u64,
+                    file_bytes,
+                )
+            })?;
+        let ranges = parse_directory(directory, &header)?;
+        let hash_range = ranges[4];
+        let hash_bytes = section_slice(&bytes, hash_range)?;
+        let hashes = read_hashes(hash_bytes, hash_range.offset)?;
+        verify_hashes_slice(&bytes, &ranges, &hashes)?;
+        Artifact::decode(
+            Backing::Owned(Arc::from(bytes.into_boxed_slice())),
+            header,
+            ranges,
+            hashes,
+        )
+    }
+
+    fn decode(
+        backing: Backing,
+        header: ArtifactHeader,
+        ranges: [SectionRange; SECTION_COUNT],
+        hashes: [SectionHash; 5],
+    ) -> Result<Artifact, FormatError> {
+        if backing.len() as u64 != header.file_bytes {
+            return Err(FormatError::length_mismatch(
+                "artifact length",
+                header.file_bytes,
+                backing.len() as u64,
+                0,
+            ));
+        }
+        check_section_padding(backing.as_slice(), &ranges)?;
+        let graph_bytes = section_slice(backing.as_slice(), ranges[0])?;
+        let parts = decode_graph(graph_bytes, ranges[0].offset)?;
+        let weights_bytes = section_slice(backing.as_slice(), ranges[2])?;
+        let weight_section = decode_weights(weights_bytes, ranges[2].offset)?;
+        let quant_bytes = section_slice(backing.as_slice(), ranges[3])?;
+        let quant = decode_quant(quant_bytes, ranges[3].offset)?;
+        let plans_bytes = section_slice(backing.as_slice(), ranges[1])?;
+        let plans = decode_plans(
+            plans_bytes,
+            ranges[1].offset,
+            &parts.graph,
+            &parts.inputs,
+            &parts.outputs,
+            &weight_section.entries,
+        )?;
+        if plans.len() as u32 != header.target_count {
+            return Err(FormatError::inconsistent(
+                "PLANS section",
+                format!(
+                    "the header declares {} target profiles but the section carries {}",
+                    header.target_count,
+                    plans.len()
+                ),
+            ));
+        }
+        let section = &ranges[2];
+        let expected_payload = section.offset + weight_section.payload_offset;
+        if expected_payload != header.weight_payload_offset
+            || weight_section.payload_bytes != header.weight_payload_bytes
+        {
+            return Err(FormatError::inconsistent(
+                "WEIGHTS section",
+                format!(
+                    "the table places the payload at {expected_payload} ({} bytes) but the header \
+                     says {} ({} bytes)",
+                    weight_section.payload_bytes,
+                    header.weight_payload_offset,
+                    header.weight_payload_bytes
+                ),
+            ));
+        }
+        Ok(Artifact {
+            backing,
+            header,
+            metadata: parts.metadata,
+            graph: parts.graph,
+            inputs: parts.inputs,
+            outputs: parts.outputs,
+            plans,
+            weights: weight_section.entries,
+            weight_payload_offset: header.weight_payload_offset,
+            quant,
+            hashes,
+            ranges,
+        })
+    }
+
+    /// The validated header.
+    pub fn header(&self) -> &ArtifactHeader {
+        &self.header
+    }
+
+    /// Graph provenance (source digest is in the header).
+    pub fn metadata(&self) -> &ArtifactMetadata {
+        &self.metadata
+    }
+
+    /// The typed graph.
+    pub fn graph(&self) -> &Graph {
+        &self.graph
+    }
+
+    /// Graph input names, in declaration order.
+    pub fn inputs(&self) -> &[String] {
+        &self.inputs
+    }
+
+    /// Graph output names, in declaration order.
+    pub fn outputs(&self) -> &[String] {
+        &self.outputs
+    }
+
+    /// The default plan: the first target profile in the file.
+    pub fn default_plan(&self) -> &Plan {
+        self.plans[0].plan()
+    }
+
+    /// The default target name.
+    pub fn default_target(&self) -> &str {
+        self.plans[0].target()
+    }
+
+    /// Every target profile.
+    pub fn plans(&self) -> &[ArtifactPlan] {
+        &self.plans
+    }
+
+    /// The plan for an exact target name.
+    pub fn plan_for(&self, target: &str) -> Option<&Plan> {
+        self.plans
+            .iter()
+            .find(|plan| plan.target() == target)
+            .map(ArtifactPlan::plan)
+    }
+
+    /// The weight table.
+    pub fn weights(&self) -> &[ArtifactWeight] {
+        &self.weights
+    }
+
+    /// Total weight payload bytes.
+    pub fn weight_bytes(&self) -> u64 {
+        self.weights.iter().map(|weight| weight.len()).sum()
+    }
+
+    /// The weight payload's absolute file range.
+    pub fn weight_payload_range(&self) -> std::ops::Range<u64> {
+        self.weight_payload_offset..self.weight_payload_offset + self.header.weight_payload_bytes
+    }
+
+    /// One weight's payload, borrowed from the mapping with no copy.
+    pub fn weight_bytes_at(&self, id: crate::inference::model::WeightId) -> Option<&[u8]> {
+        let entry = self.weights.get(id.index())?;
+        let start = usize::try_from(entry.file_range().start).ok()?;
+        let end = usize::try_from(entry.file_range().end).ok()?;
+        self.backing.as_slice().get(start..end)
+    }
+
+    /// One `f32` weight, borrowed from the mapping with no copy.
+    ///
+    /// Fails for a non-`f32` weight rather than reinterpreting its bytes.
+    pub fn weight_f32(&self, id: crate::inference::model::WeightId) -> Result<&[f32], Fn3Error> {
+        let entry = self.weights.get(id.index()).ok_or(Fn3Error::OutOfBounds {
+            what: "artifact weight id",
+            index: id.index() as u64,
+            len: self.weights.len() as u64,
+        })?;
+        if entry.dtype() != DType::F32 {
+            return Err(Fn3Error::UnsupportedDType {
+                op: None,
+                dtype: entry.dtype(),
+                context: "artifact weight_f32",
+            });
+        }
+        let bytes = self.weight_bytes_at(id).ok_or(Fn3Error::OutOfBounds {
+            what: "artifact weight bytes",
+            index: id.index() as u64,
+            len: self.weights.len() as u64,
+        })?;
+        // SAFETY: the table proves `bytes.len()` is a whole number of `f32`
+        // elements (`DType::F32` is four bytes and the decoder rejects a
+        // non-multiple). The mapping is page-aligned and the payload start is
+        // 64-byte aligned, so the pointer is at least 4-byte aligned. The slice
+        // borrows `self`, and the mapping is owned by `self.backing` for at
+        // least as long as the returned reference; the mapping is read-only, so
+        // no `&mut` alias can exist. `bytemuck` re-checks the length and
+        // alignment.
+        let slice: &[f32] =
+            bytemuck::try_cast_slice(bytes).map_err(|error| Fn3Error::StorageCast {
+                element: "f32",
+                byte_len: bytes.len(),
+                detail: format!("artifact weight {}: {error:?}", id.index()),
+            })?;
+        Ok(slice)
+    }
+
+    /// `true` when `[ptr, ptr + len)` lies inside the mapping.
+    ///
+    /// This is the evidence a sharing test uses: two sessions' weight pointers
+    /// must be equal *and* inside the one mapping.
+    pub fn contains_address(&self, ptr: *const u8, len: usize) -> bool {
+        let base = self.backing.as_slice().as_ptr() as usize;
+        let end = match base.checked_add(self.backing.len()) {
+            Some(end) => end,
+            None => return false,
+        };
+        let start = ptr as usize;
+        start >= base && start.checked_add(len).is_some_and(|end_ptr| end_ptr <= end)
+    }
+
+    /// Every graph value that a plan names as a weight slot, with its weight id.
+    pub fn weight_slots(&self) -> Vec<(SlotId, crate::inference::model::WeightId)> {
+        let mut slots = Vec::new();
+        for (index, slot) in self.default_plan().slots.iter().enumerate() {
+            if let SlotSource::Weight(id) = slot.source {
+                slots.push((SlotId::new(index as u32), id));
+            }
+        }
+        slots
+    }
+
+    /// The stored section hashes.
+    pub fn hashes(&self) -> &[SectionHash; 5] {
+        &self.hashes
+    }
+
+    /// The section ranges.
+    pub fn sections(&self) -> &[SectionRange; SECTION_COUNT] {
+        &self.ranges
+    }
+
+    /// Quantization metadata.
+    pub fn quant(&self) -> &QuantMetadata {
+        &self.quant
+    }
+
+    /// The target plans as compact reports.
+    pub fn plan_summaries(&self) -> Vec<PlanSummary> {
+        self.plans
+            .iter()
+            .map(|artifact_plan| PlanSummary::of(artifact_plan.target(), artifact_plan))
+            .collect()
+    }
+
+    /// Bytes the mapping occupies; the backing bytes, not resident pages.
+    pub fn mapped_bytes(&self) -> u64 {
+        self.backing.len() as u64
+    }
+}
+
+/// One target plan, summarised for reports and the CLI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanSummary {
+    /// Target name.
+    pub target: String,
+    /// Execution precision.
+    pub precision: Precision,
+    /// Segments in the plan.
+    pub segments: usize,
+    /// Recognised fusions.
+    pub fusions: usize,
+    /// Layout conversions.
+    pub reorders: usize,
+    /// Bytes those conversions move per forward.
+    pub reorder_bytes: u64,
+    /// The arena allocation.
+    pub arena_bytes: u64,
+    /// Largest live payload.
+    pub peak_bytes: u64,
+    /// Engine split.
+    pub engines: EngineCounts,
+    /// Layout policy.
+    pub layout: LayoutStrategy,
+    /// `segments + sum(removed)`.
+    pub unfused_segments: usize,
+}
+
+impl PlanSummary {
+    fn of(target: &str, artifact_plan: &ArtifactPlan) -> PlanSummary {
+        let plan = artifact_plan.plan();
+        PlanSummary {
+            target: target.to_string(),
+            precision: artifact_plan.precision(),
+            segments: plan.segments.len(),
+            fusions: plan.fusions.len(),
+            reorders: plan.reorders.len(),
+            reorder_bytes: plan.reorder_bytes as u64,
+            arena_bytes: plan.arena_bytes as u64,
+            peak_bytes: plan.peak_bytes as u64,
+            engines: plan.engine_counts(),
+            layout: plan.layout,
+            unfused_segments: plan.unfused_segment_count(),
         }
     }
 }
 
+fn section_slice(bytes: &[u8], range: SectionRange) -> Result<&[u8], FormatError> {
+    let start = usize::try_from(range.offset)
+        .map_err(|_| FormatError::limit("section offset", range.offset, usize::MAX as u64))?;
+    let end = usize::try_from(range.offset.saturating_add(range.length)).map_err(|_| {
+        FormatError::limit(
+            "section end",
+            range.offset + range.length,
+            usize::MAX as u64,
+        )
+    })?;
+    bytes.get(start..end).ok_or_else(|| {
+        FormatError::truncated_at(
+            format!("{} section", range.name()),
+            range.offset,
+            range.length,
+            bytes.len().saturating_sub(start) as u64,
+        )
+    })
+}
+
+fn read_range(
+    file: &mut std::fs::File,
+    offset: u64,
+    buffer: &mut [u8],
+    path: &Path,
+) -> Result<(), FormatError> {
+    use std::io::{Read, Seek, SeekFrom};
+    file.seek(SeekFrom::Start(offset))
+        .and_then(|_| file.read_exact(buffer))
+        .map_err(|error| {
+            FormatError::io(
+                path.display().to_string(),
+                format!("reading {} bytes at byte {offset}: {error}", buffer.len()),
+            )
+        })
+}
+
 // ---------------------------------------------------------------------------
-// Artifact
+// The writer
 // ---------------------------------------------------------------------------
 
-/// A validated prepared model in its shareable, versioned form.
+/// A prepared artifact before it is written.
 ///
-/// Build one from an import, write it, read it back. It owns weights, the graph
-/// (values, ops and the graph interface), the architecture geometry and the
-/// declared dynamic bounds — and nothing else. It holds no session state and is
-/// independent of any device.
-///
-/// ```no_run
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// use fastnn::inference::import::import_onnx_file;
-/// use fastnn::inference::model::format::PreparedArtifact;
-/// use fastnn::inference::shape::ShapeEnvelope;
-///
-/// let imported = import_onnx_file("model.onnx")?;
-/// let artifact = PreparedArtifact::from_import(&imported, ShapeEnvelope::uniform(1024)?)?;
-/// artifact.write_file("model.fn3")?;
-///
-/// let loaded = PreparedArtifact::read_file("model.fn3")?;
-/// assert_eq!(loaded.geometry(), artifact.geometry());
-/// assert_eq!(loaded.to_bytes()?, artifact.to_bytes()?);
-/// # Ok(())
-/// # }
-/// ```
+/// Built from a typed import by [`PreparedArtifact::from_imported`], or from
+/// already-owned parts by [`PreparedArtifact::from_parts`]. It owns the graph,
+/// the weight bytes and the plans; `to_bytes` produces the canonical file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedArtifact {
     metadata: ArtifactMetadata,
-    graph: PreparedGraph,
+    source_onnx_sha256: [u8; 32],
+    graph: Graph,
+    inputs: Vec<String>,
+    outputs: Vec<String>,
     weights: WeightSet,
-    geometry: DecoderGeometry,
-    envelope: ShapeEnvelope,
+    plans: Vec<ArtifactPlan>,
 }
 
 impl PreparedArtifact {
-    /// Build from an import and the declared bounds.
+    /// Import-derived constructor.
     ///
-    /// Copies the weight payload once (the import owns it); use
-    /// [`PreparedArtifact::from_parts`] when the caller already owns the parts
-    /// and wants to avoid that copy for a large model.
-    ///
-    /// The envelope is *declared*, not detected: how many tokens a deployment
-    /// may ask for is a deployment decision, so it is an argument. It is
-    /// validated here, so an envelope this build cannot honour never reaches a
-    /// file.
-    pub fn from_import(
-        import: &ModelImport,
-        envelope: ShapeEnvelope,
+    /// `targets` is a list of target names (see [`resolve_targets`]); the first
+    /// plan is the artifact's default. Every target is planned once, here, and
+    /// the plans are serialized as-is.
+    pub fn from_imported(
+        imported: &ImportedGraph,
+        targets: &[&str],
+        precision: Precision,
+        source_onnx_sha256: [u8; 32],
     ) -> Result<PreparedArtifact, FormatError> {
-        let artifact = PreparedArtifact {
-            metadata: ArtifactMetadata::from_import(import),
-            graph: PreparedGraph::from_graph(import.graph()),
-            weights: import.weights().clone(),
-            geometry: import.geometry().clone(),
-            envelope,
+        if targets.is_empty() {
+            return Err(FormatError::inconsistent(
+                "target plan",
+                "at least one target is required",
+            ));
+        }
+        let graph = imported.graph().clone();
+        let mut input_names = Vec::with_capacity(imported.inputs().len());
+        for &id in imported.inputs() {
+            input_names.push(value_name(&graph, id, "graph input")?);
+        }
+        let mut output_names = Vec::with_capacity(imported.outputs().len());
+        for &id in imported.outputs() {
+            output_names.push(value_name(&graph, id, "graph output")?);
+        }
+        let mut plans = Vec::with_capacity(targets.len());
+        for target in targets {
+            let plan = plan_for_target(imported, target, precision)?;
+            plans.push(ArtifactPlan::new(*target, precision, plan));
+        }
+        let prepared = PreparedArtifact {
+            metadata: ArtifactMetadata::from_import(imported),
+            source_onnx_sha256,
+            graph,
+            inputs: input_names,
+            outputs: output_names,
+            weights: imported.weights().clone(),
+            plans,
         };
-        artifact.validate()?;
-        Ok(artifact)
+        prepared.validate()?;
+        Ok(prepared)
     }
 
     /// Build from already-owned parts.
     ///
-    /// The zero-copy seam for a caller that consumed a [`ModelImport`] with
-    /// [`ModelImport::into_parts`].
+    /// This is the seam for a caller that already has a typed graph, a weight
+    /// table and plans (the synthetic large-model test uses it).
     pub fn from_parts(
         metadata: ArtifactMetadata,
-        graph: PreparedGraph,
+        source_onnx_sha256: [u8; 32],
+        graph: Graph,
+        inputs: Vec<String>,
+        outputs: Vec<String>,
         weights: WeightSet,
-        geometry: DecoderGeometry,
-        envelope: ShapeEnvelope,
+        plans: Vec<ArtifactPlan>,
     ) -> Result<PreparedArtifact, FormatError> {
-        let artifact = PreparedArtifact {
+        let prepared = PreparedArtifact {
             metadata,
+            source_onnx_sha256,
             graph,
+            inputs,
+            outputs,
             weights,
-            geometry,
-            envelope,
+            plans,
         };
-        artifact.validate()?;
-        Ok(artifact)
-    }
-
-    /// Decode an artifact from bytes.
-    ///
-    /// Fails on a bad magic, an unreadable version, a checksum mismatch, a
-    /// truncated or over-long section, an unknown dtype or op code, and on any
-    /// internal inconsistency between the sections. Never panics and never
-    /// allocates from an unvalidated count.
-    pub fn from_bytes(bytes: &[u8]) -> Result<PreparedArtifact, FormatError> {
-        let header = PreparedHeader::parse(bytes)?;
-        let payload = &bytes[HEADER_BYTES..];
-        let computed = crc32(payload);
-        if computed != header.payload_crc32 {
-            return Err(FormatError::new(FormatErrorKind::ChecksumMismatch {
-                stored: header.payload_crc32,
-                computed,
-            }));
-        }
-        let sections = read_directory(payload)?;
-        let artifact = PreparedArtifact {
-            metadata: decode_metadata(sections[0])?,
-            geometry: decode_geometry(sections[1])?,
-            envelope: decode_envelope(sections[2])?,
-            graph: decode_graph(sections[3], sections[4])?,
-            weights: decode_weights(sections[5])?,
-        };
-        artifact.validate()?;
-        Ok(artifact)
-    }
-
-    /// Read an artifact from a file.
-    pub fn read_file(path: impl AsRef<Path>) -> Result<PreparedArtifact, FormatError> {
-        let path = path.as_ref();
-        let bytes = std::fs::read(path)
-            .map_err(|error| FormatError::io(path.display().to_string(), error.to_string()))?;
-        PreparedArtifact::from_bytes(&bytes)
-    }
-
-    /// Encode to the canonical byte string.
-    ///
-    /// Deterministic: the same artifact always produces the same bytes, and
-    /// `from_bytes(to_bytes())` round-trips byte-identically because the
-    /// encoding has no nullable, unordered or padded-by-choice fields.
-    pub fn to_bytes(&self) -> Result<Vec<u8>, FormatError> {
-        self.validate()?;
-        let payload = self.encode_payload()?;
-        let payload_bytes = payload.len() as u64;
-        if payload_bytes > MAX_PAYLOAD_BYTES {
-            return Err(FormatError::limit(
-                "payload length",
-                payload_bytes,
-                MAX_PAYLOAD_BYTES,
-            ));
-        }
-        let file_bytes = HEADER_BYTES as u64 + payload_bytes;
-
-        let mut file = Vec::with_capacity(file_bytes as usize);
-        file.extend_from_slice(&MAGIC);
-        file.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
-        file.extend_from_slice(&(HEADER_BYTES as u16).to_le_bytes());
-        file.extend_from_slice(&DTYPE_ENCODING.to_le_bytes());
-        file.extend_from_slice(&0u32.to_le_bytes());
-        file.extend_from_slice(&0u32.to_le_bytes());
-        file.extend_from_slice(&file_bytes.to_le_bytes());
-        file.extend_from_slice(&payload_bytes.to_le_bytes());
-        file.extend_from_slice(&crc32(&payload).to_le_bytes());
-        file.resize(HEADER_BYTES, 0);
-        debug_assert_eq!(file.len(), HEADER_BYTES);
-        file.extend_from_slice(&payload);
-        Ok(file)
-    }
-
-    /// Write the artifact to a file, replacing any existing file.
-    pub fn write_file(&self, path: impl AsRef<Path>) -> Result<(), FormatError> {
-        let path = path.as_ref();
-        let bytes = self.to_bytes()?;
-        std::fs::write(path, &bytes)
-            .map_err(|error| FormatError::io(path.display().to_string(), error.to_string()))
+        prepared.validate()?;
+        Ok(prepared)
     }
 
     /// Provenance.
@@ -510,1356 +1455,724 @@ impl PreparedArtifact {
         &self.metadata
     }
 
-    /// The graph: values, ops and the graph interface.
-    pub fn graph(&self) -> &PreparedGraph {
+    /// Source ONNX digest.
+    pub fn source_onnx_sha256(&self) -> [u8; 32] {
+        self.source_onnx_sha256
+    }
+
+    /// The graph.
+    pub fn graph(&self) -> &Graph {
         &self.graph
     }
 
-    /// The weight table, in declaration order.
+    /// The weight table.
     pub fn weights(&self) -> &WeightSet {
         &self.weights
     }
 
-    /// The architecture geometry.
-    pub fn geometry(&self) -> &DecoderGeometry {
-        &self.geometry
+    /// The target plans.
+    pub fn plans(&self) -> &[ArtifactPlan] {
+        &self.plans
     }
 
-    /// The declared dynamic bounds.
-    pub fn envelope(&self) -> ShapeEnvelope {
-        self.envelope
-    }
-
-    /// Bytes of weight payload the artifact carries.
+    /// Weight payload bytes the artifact will carry (including alignment padding).
     pub fn weight_bytes(&self) -> u64 {
-        self.weights.total_bytes()
+        let table = 24 + 24 * self.weights.len() as u64;
+        let offset = (table + 63) & !63;
+        let mut payload = 0u64;
+        for weight in self.weights.iter() {
+            payload = (payload + weight.byte_len() as u64).div_ceil(64) * 64;
+        }
+        offset + payload
     }
 
-    /// Copy every weight into host tensors on the CPU.
-    ///
-    /// The loaded artifact stays independent: the tensors own aligned copies.
-    pub fn to_model_weights(&self) -> Result<ModelWeights, Fn3Error> {
-        self.weights.to_model_weights()
-    }
-
-    /// Consume into the five parts.
-    pub fn into_parts(
-        self,
-    ) -> (
-        ArtifactMetadata,
-        PreparedGraph,
-        WeightSet,
-        DecoderGeometry,
-        ShapeEnvelope,
-    ) {
-        (
-            self.metadata,
-            self.graph,
-            self.weights,
-            self.geometry,
-            self.envelope,
-        )
-    }
-
-    /// Turn the artifact into the planner and session input, with no ONNX file.
-    ///
-    /// This is the whole point of the artifact: the graph, the weights, the
-    /// geometry and the envelope in the file are what a plan is built from, so
-    /// a prepared deployment never needs the source it was prepared from.
-    /// Nothing is re-detected and nothing is copied twice: the artifact is
-    /// consumed and its weight bytes move into the import.
-    ///
-    /// The result satisfies the round-trip identity a verifier can check:
-    /// `ArtifactMetadata::from_import(&artifact.to_model_import()) == *artifact.metadata()`,
-    /// and [`Session::with_runtime`](crate::inference::model::Session::with_runtime)
-    /// produces the same plans as an import of the source ONNX.
-    pub fn into_model_import(self) -> ModelImport {
-        let metadata = self.metadata;
-        ModelImport::from_parts(
-            self.graph.into_graph_ir(),
-            self.weights,
-            self.geometry,
-            ModelProvenance {
-                ir_version: metadata.ir_version,
-                opset: metadata.opset,
-                producer: metadata.producer,
-                producer_version: metadata.producer_version,
-                graph_name: metadata.graph_name,
-            },
-        )
-    }
-
-    /// [`PreparedArtifact::into_model_import`] without consuming the artifact.
-    ///
-    /// Copies the weight bytes once; prefer the consuming form when the
-    /// artifact is not needed afterwards.
-    pub fn to_model_import(&self) -> ModelImport {
-        self.clone().into_model_import()
-    }
-
-    /// Check every invariant the reader and writer rely on.
-    ///
-    /// Called by [`PreparedArtifact::from_bytes`] (so a decoded file is always
-    /// consistent) and by [`PreparedArtifact::to_bytes`] (so a hand-built
-    /// artifact can never be written into an unreadable file).
+    /// Check every invariant the writer and reader rely on.
     pub fn validate(&self) -> Result<(), FormatError> {
-        self.envelope
-            .validate()
-            .map_err(|error| FormatError::contract("envelope", error))?;
-        self.graph.check()?;
-        self.graph.check_weights(self.weights.len())?;
-        self.check_geometry()
-    }
-
-    /// Cross-check the geometry against the value table, the weight table and
-    /// the envelope.
-    ///
-    /// This is the "bounded" rule: a file cannot claim a vocabulary, a layer
-    /// count or a head geometry that the rest of the file does not support, and
-    /// cannot declare fixed geometry that its own dynamic bounds exclude.
-    fn check_geometry(&self) -> Result<(), FormatError> {
-        let geometry = &self.geometry;
-        let layer_cap = MAX_KV_LAYERS.min(u64::from(u32::MAX));
-        if u64::from(geometry.layers) > layer_cap {
-            return Err(FormatError::limit(
-                "layer count",
-                u64::from(geometry.layers),
-                layer_cap,
-            ));
-        }
-        if geometry.vocab_size > MAX_VOCAB_SIZE {
-            return Err(FormatError::limit(
-                "vocabulary size",
-                u64::from(geometry.vocab_size),
-                u64::from(MAX_VOCAB_SIZE),
-            ));
-        }
-        if geometry.vocab_size == 0 {
+        if self.graph.value_count() == 0 {
             return Err(FormatError::inconsistent(
-                "geometry",
-                "the vocabulary size is 0; a model with no tokens cannot produce logits",
+                "graph",
+                "a graph needs at least one value",
             ));
         }
-        for (name, value) in [
-            ("hidden size", geometry.hidden_size),
-            ("MLP hidden size", geometry.mlp_hidden_size),
-            ("query head count", geometry.query_heads),
-            ("KV head count", geometry.kv_heads),
-            ("head width", geometry.head_dim),
-        ] {
-            if value == 0 {
+        check_interface(&self.graph, &self.inputs, &self.outputs)?;
+        if self.plans.is_empty() {
+            return Err(FormatError::inconsistent(
+                "target plan",
+                "an artifact needs at least one target plan",
+            ));
+        }
+        if self.plans.len() as u64 > MAX_TARGETS {
+            return Err(FormatError::limit(
+                "target profile count",
+                self.plans.len() as u64,
+                MAX_TARGETS,
+            ));
+        }
+        for (position, plan) in self.plans.iter().enumerate() {
+            if plan.target().is_empty() {
                 return Err(FormatError::inconsistent(
-                    "geometry",
-                    format!("{name} must be positive, found 0"),
+                    "target plan",
+                    format!("profile {position} has an empty target name"),
                 ));
             }
-        }
-        let projected = u64::from(geometry.query_heads) * u64::from(geometry.head_dim);
-        if projected != u64::from(geometry.hidden_size) {
-            return Err(FormatError::inconsistent(
-                "geometry",
-                format!(
-                    "query heads ({}) x head width ({}) = {projected}, but the model width is {}",
-                    geometry.query_heads, geometry.head_dim, geometry.hidden_size
-                ),
-            ));
-        }
-        if geometry.kv.len() != geometry.layers as usize {
-            return Err(FormatError::inconsistent(
-                "geometry",
-                format!(
-                    "the model declares {} layers but {} KV interfaces",
-                    geometry.layers,
-                    geometry.kv.len()
-                ),
-            ));
-        }
-
-        let token_embedding = self.weight(geometry.token_embedding, "token embedding")?;
-        let expected = [
-            u64::from(geometry.vocab_size),
-            u64::from(geometry.hidden_size),
-        ];
-        if token_embedding.shape().dims() != expected {
-            return Err(FormatError::inconsistent(
-                "geometry",
-                format!(
-                    "the token embedding weight `{}` is {}, but the declared vocabulary and \
-                     width need [vocab_size, hidden_size] = {expected:?}",
-                    token_embedding.name(),
-                    token_embedding.shape()
-                ),
-            ));
-        }
-
-        match geometry.positions {
-            PositionEmbedding::Learned {
-                weight,
-                max_positions,
-            } => {
-                if max_positions == 0 {
-                    return Err(FormatError::inconsistent(
-                        "geometry",
-                        "the position table declares zero positions",
-                    ));
-                }
-                let table = self.weight(weight, "position embedding")?;
-                let expected = [u64::from(max_positions), u64::from(geometry.hidden_size)];
-                if table.shape().dims() != expected {
-                    return Err(FormatError::inconsistent(
-                        "geometry",
-                        format!(
-                            "the position table `{}` is {}, but {max_positions} positions of \
-                             width {} need {expected:?}",
-                            table.name(),
-                            table.shape(),
-                            geometry.hidden_size
-                        ),
-                    ));
-                }
-            }
-        }
-
-        if let Some(epsilon) = geometry.layer_norm_epsilon {
-            if !epsilon.is_finite() || epsilon <= 0.0 {
+            if self.plans[..position]
+                .iter()
+                .any(|other| other.target() == plan.target())
+            {
                 return Err(FormatError::inconsistent(
-                    "geometry",
-                    format!("the LayerNorm epsilon is {epsilon}, which is not a positive float"),
+                    "target plan",
+                    format!("target `{}` appears twice", plan.target()),
                 ));
             }
-        }
-
-        let logits = self.value(geometry.logits, "logits")?;
-        if logits.dtype != DType::F32 {
-            return Err(FormatError::inconsistent(
-                "geometry",
-                format!(
-                    "the logits value `{}` is {}, but logits must be f32",
-                    logits.name, logits.dtype
-                ),
-            ));
-        }
-        for (layer, interface) in geometry.kv.iter().enumerate() {
-            for (field, id) in [
-                ("past key", interface.past_key),
-                ("past value", interface.past_value),
-                ("present key", interface.present_key),
-                ("present value", interface.present_value),
-            ] {
-                let value = self.value(id, "KV interface")?;
-                if value.dtype != DType::F32 {
-                    return Err(FormatError::inconsistent(
-                        "geometry",
-                        format!(
-                            "layer {layer} {field} value `{}` is {}, but a KV cache is f32",
-                            value.name, value.dtype
-                        ),
-                    ));
-                }
+            if plan.precision() != Precision::F32 {
+                return Err(FormatError::new(FormatErrorKind::UnsupportedPrecision {
+                    found: plan.precision().code(),
+                    supported: "f32 (code 0)",
+                }));
             }
+            self.validate_plan(plan.plan(), plan.target())?;
         }
-
-        // Fixed geometry must be inside the declared dynamic bounds, or no
-        // session could ever run this model.
-        for (symbol, value) in [
-            (Symbol::NHeads, u64::from(geometry.query_heads)),
-            (Symbol::NKvHeads, u64::from(geometry.kv_heads)),
-            (Symbol::HeadDim, u64::from(geometry.head_dim)),
-        ] {
-            self.envelope
-                .get(symbol)
-                .check(symbol, value)
-                .map_err(|error| {
-                    FormatError::inconsistent(
-                        "geometry vs envelope",
-                        format!(
-                            "the model's fixed {symbol} is {value}, which its own declared \
-                             envelope excludes: {error}"
-                        ),
-                    )
-                })?;
+        // Every weight the graph names must have matching dtype and length.
+        for value in self.graph.values() {
+            let Some(name) = value.name.as_deref() else {
+                continue;
+            };
+            let Some(id) = self.weights.id_of(name) else {
+                continue;
+            };
+            let weight = self.weights.get(id).ok_or_else(|| {
+                FormatError::inconsistent("weight table", format!("missing weight `{name}`"))
+            })?;
+            let bytes = graph_bytes(value)?;
+            if weight.dtype() != value.ty.dtype || weight.byte_len() as u64 != bytes {
+                return Err(FormatError::inconsistent(
+                    "weight table",
+                    format!(
+                        "weight `{name}` is {} {} bytes but the graph value is {} {bytes} bytes",
+                        weight.dtype(),
+                        weight.byte_len(),
+                        value.ty.dtype
+                    ),
+                ));
+            }
         }
         Ok(())
     }
 
-    fn value(&self, id: ValueId, what: &str) -> Result<&ValueInfo, FormatError> {
-        self.graph.values().get(id.index()).ok_or_else(|| {
-            FormatError::inconsistent(
-                "geometry",
+    fn validate_plan(&self, plan: &Plan, target: &str) -> Result<(), FormatError> {
+        if plan.slots.len() != self.graph.value_count() {
+            return Err(FormatError::inconsistent(
+                "plan slot table",
                 format!(
-                    "the {what} handle names value {}, but the graph has {} values",
-                    id.index(),
+                    "target `{target}` has {} slots but the graph has {} values",
+                    plan.slots.len(),
                     self.graph.value_count()
                 ),
-            )
-        })
-    }
-
-    fn weight(&self, id: WeightId, what: &str) -> Result<&WeightTensor, FormatError> {
-        self.weights.get(id).ok_or_else(|| {
-            FormatError::inconsistent(
-                "geometry",
-                format!(
-                    "the {what} handle names weight {}, but the weight table has {} entries",
-                    id.index(),
-                    self.weights.len()
-                ),
-            )
-        })
-    }
-
-    // -----------------------------------------------------------------------
-    // Encoding
-    // -----------------------------------------------------------------------
-
-    fn encode_payload(&self) -> Result<Vec<u8>, FormatError> {
-        let sections: [Vec<u8>; SECTION_COUNT] = [
-            encode_metadata(&self.metadata)?,
-            encode_geometry(&self.geometry)?,
-            encode_envelope(&self.envelope),
-            encode_values(&self.graph)?,
-            encode_nodes(&self.graph)?,
-            encode_weights(&self.weights)?,
-        ];
-
-        let total: usize = sections.iter().map(Vec::len).sum();
-        let mut payload = Writer::with_capacity(DIRECTORY_BYTES + total);
-        payload.u32(SECTION_COUNT as u32);
-        payload.u32(0);
-        for (position, bytes) in sections.iter().enumerate() {
-            payload.u32(tag::ALL[position]);
-            payload.u32(0);
-            payload.u64(bytes.len() as u64);
-        }
-        for bytes in &sections {
-            payload.bytes(bytes);
-            payload.pad_to_8();
-        }
-        debug_assert_eq!(
-            payload.len() % 8,
-            0,
-            "every section is padded to an eight-byte boundary"
-        );
-        Ok(payload.into_bytes())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Payload directory
-// ---------------------------------------------------------------------------
-
-/// Read the section directory and return each section's bytes.
-fn read_directory(payload: &[u8]) -> Result<Vec<&[u8]>, FormatError> {
-    let mut reader = Reader::new(payload);
-    let count = reader.count(
-        "section directory",
-        SECTION_COUNT as u64,
-        MIN_DIRECTORY_ENTRY,
-    )?;
-    if count != SECTION_COUNT {
-        return Err(FormatError::malformed(
-            "payload directory",
-            format!(
-                "version {FORMAT_VERSION} has {SECTION_COUNT} sections, the file declares {count}"
-            ),
-        ));
-    }
-    reader.zero_u32("payload directory reserved word")?;
-
-    let mut lengths = Vec::with_capacity(SECTION_COUNT);
-    for expected in tag::ALL {
-        let found = reader.u32("section tag")?;
-        reader.zero_u32("section tag reserved word")?;
-        let length = reader.u64("section length")?;
-        if found != expected {
-            return Err(FormatError::malformed(
-                "payload directory",
-                format!(
-                    "section {} is tagged {found} ({}), expected {expected} ({})",
-                    lengths.len(),
-                    tag::name(found),
-                    tag::name(expected)
-                ),
             ));
         }
-        if length > reader.remaining() {
-            return Err(FormatError::truncated(
-                format!("{} section", tag::name(expected)),
-                length,
-                reader.remaining(),
+        if plan.peak_bytes > plan.arena_bytes {
+            return Err(FormatError::inconsistent(
+                "plan memory",
+                format!("target `{target}` has peak above arena"),
             ));
         }
-        lengths.push((expected, length));
-    }
-
-    let mut sections = Vec::with_capacity(SECTION_COUNT);
-    for (tag, length) in lengths {
-        debug_assert_eq!(
-            reader.pos() % 8,
-            0,
-            "a section must start on an eight-byte boundary"
-        );
-        let bytes = reader.take(length, format!("{} section", tag::name(tag)))?;
-        reader.pad_to_8(format!("{} section padding", tag::name(tag)))?;
-        sections.push(bytes);
-    }
-    reader.finish("payload")?;
-    Ok(sections)
-}
-
-// ---------------------------------------------------------------------------
-// META
-// ---------------------------------------------------------------------------
-
-fn encode_metadata(metadata: &ArtifactMetadata) -> Result<Vec<u8>, FormatError> {
-    let mut section = Writer::with_capacity(96);
-    section.i64(metadata.ir_version);
-    section.string(&metadata.opset.domain)?;
-    section.i64(metadata.opset.version);
-    section.string(&metadata.producer)?;
-    section.string(&metadata.producer_version)?;
-    section.string(&metadata.graph_name)?;
-    Ok(section.into_bytes())
-}
-
-fn decode_metadata(section: &[u8]) -> Result<ArtifactMetadata, FormatError> {
-    let mut reader = Reader::new(section);
-    let ir_version = reader.i64("metadata ir_version")?;
-    let domain = reader.string("opset domain")?;
-    let version = reader.i64("opset version")?;
-    let producer = reader.string("producer name")?;
-    let producer_version = reader.string("producer version")?;
-    let graph_name = reader.string("graph name")?;
-    reader.finish("META section")?;
-    Ok(ArtifactMetadata {
-        ir_version,
-        opset: OpsetImport { domain, version },
-        producer,
-        producer_version,
-        graph_name,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// GEOM
-// ---------------------------------------------------------------------------
-
-fn encode_geometry(geometry: &DecoderGeometry) -> Result<Vec<u8>, FormatError> {
-    let mut section = Writer::with_capacity(72);
-    section.u32(geometry.layers);
-    section.u32(geometry.hidden_size);
-    section.u32(geometry.mlp_hidden_size);
-    section.u32(geometry.query_heads);
-    section.u32(geometry.kv_heads);
-    section.u32(geometry.head_dim);
-    section.u32(geometry.vocab_size);
-    match geometry.positions {
-        PositionEmbedding::Learned {
-            weight,
-            max_positions,
-        } => {
-            section.u8(0);
-            section.u32(weight.index() as u32);
-            section.u32(max_positions);
-        }
-    }
-    match geometry.layer_norm_epsilon {
-        Some(epsilon) => {
-            section.u8(1);
-            section.f32(epsilon);
-        }
-        None => {
-            section.u8(0);
-            section.f32(0.0);
-        }
-    }
-    section.u32(geometry.token_embedding.index() as u32);
-    section.u32(geometry.logits.index() as u32);
-    let kv_count = u32::try_from(geometry.kv.len()).map_err(|_| {
-        FormatError::limit(
-            "KV interface count",
-            geometry.kv.len() as u64,
-            u32::MAX as u64,
-        )
-    })?;
-    section.u32(kv_count);
-    for interface in &geometry.kv {
-        section.u32(interface.past_key.index() as u32);
-        section.u32(interface.past_value.index() as u32);
-        section.u32(interface.present_key.index() as u32);
-        section.u32(interface.present_value.index() as u32);
-    }
-    Ok(section.into_bytes())
-}
-
-fn decode_geometry(section: &[u8]) -> Result<DecoderGeometry, FormatError> {
-    let mut reader = Reader::new(section);
-    let layers = reader.u32("geometry layer count")?;
-    let hidden_size = reader.u32("geometry hidden size")?;
-    let mlp_hidden_size = reader.u32("geometry MLP size")?;
-    let query_heads = reader.u32("geometry query head count")?;
-    let kv_heads = reader.u32("geometry KV head count")?;
-    let head_dim = reader.u32("geometry head width")?;
-    let vocab_size = reader.u32("geometry vocabulary size")?;
-
-    let positions_kind = reader.u8("geometry position kind")?;
-    if positions_kind != 0 {
-        return Err(FormatError::malformed(
-            "geometry",
-            format!(
-                "position embedding kind {positions_kind} is not defined; this build knows \
-                 kind 0 (learned position table)"
-            ),
-        ));
-    }
-    let position_weight = WeightId::new(reader.u32("geometry position weight")?);
-    let max_positions = reader.u32("geometry position count")?;
-
-    let epsilon_present = reader.u8("geometry epsilon flag")?;
-    let epsilon_bits = reader.u32("geometry epsilon")?;
-    let layer_norm_epsilon = match epsilon_present {
-        0 if epsilon_bits == 0 => None,
-        0 => {
-            return Err(FormatError::malformed(
-                "geometry",
-                format!("the epsilon flag is 0 but its value bits are {epsilon_bits:#010x}"),
-            ))
-        }
-        1 => Some(f32::from_bits(epsilon_bits)),
-        other => {
-            return Err(FormatError::malformed(
-                "geometry",
-                format!("the epsilon flag is {other}, expected 0 or 1"),
-            ))
-        }
-    };
-
-    let token_embedding = WeightId::new(reader.u32("geometry token embedding")?);
-    let logits = ValueId::new(reader.u32("geometry logits")?);
-    let kv_count = reader.count("KV interface table", MAX_KV_LAYERS, 16)?;
-    let mut kv = Vec::with_capacity(kv_count);
-    for layer in 0..kv_count {
-        kv.push(KvInterface {
-            past_key: ValueId::new(reader.u32(format!("layer {layer} past key"))?),
-            past_value: ValueId::new(reader.u32(format!("layer {layer} past value"))?),
-            present_key: ValueId::new(reader.u32(format!("layer {layer} present key"))?),
-            present_value: ValueId::new(reader.u32(format!("layer {layer} present value"))?),
-        });
-    }
-    reader.finish("GEOM section")?;
-    Ok(DecoderGeometry {
-        layers,
-        hidden_size,
-        mlp_hidden_size,
-        query_heads,
-        kv_heads,
-        head_dim,
-        vocab_size,
-        positions: PositionEmbedding::Learned {
-            weight: position_weight,
-            max_positions,
-        },
-        layer_norm_epsilon,
-        token_embedding,
-        logits,
-        kv,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// ENV
-// ---------------------------------------------------------------------------
-
-fn encode_envelope(envelope: &ShapeEnvelope) -> Vec<u8> {
-    let mut section = Writer::with_capacity(Symbol::COUNT * 16);
-    for symbol in Symbol::ALL {
-        let bound = envelope.get(symbol);
-        section.u64(bound.min());
-        section.u64(bound.max());
-    }
-    section.into_bytes()
-}
-
-fn decode_envelope(section: &[u8]) -> Result<ShapeEnvelope, FormatError> {
-    let mut reader = Reader::new(section);
-    let mut bounds = [DimBound::new(0, 0).expect("0,0 is a valid bound"); Symbol::COUNT];
-    for (position, symbol) in Symbol::ALL.into_iter().enumerate() {
-        let min = reader.u64(format!("envelope {} minimum", symbol.name()))?;
-        let max = reader.u64(format!("envelope {} maximum", symbol.name()))?;
-        bounds[position] =
-            DimBound::new(min, max).map_err(|error| FormatError::contract("envelope", error))?;
-    }
-    reader.finish("ENV section")?;
-    Ok(ShapeEnvelope::new(bounds))
-}
-
-// ---------------------------------------------------------------------------
-// VALS + NODE
-// ---------------------------------------------------------------------------
-
-fn encode_values(graph: &PreparedGraph) -> Result<Vec<u8>, FormatError> {
-    let count = u32::try_from(graph.value_count()).map_err(|_| {
-        FormatError::limit("value count", graph.value_count() as u64, u32::MAX as u64)
-    })?;
-    let mut section = Writer::with_capacity(64 + graph.value_count() * 32);
-    section.u32(count);
-    for value in graph.values() {
-        section.string(&value.name)?;
-        section.u8(value.dtype.code());
-        match &value.shape {
-            ValueShape::Unknown => section.u8(0),
-            ValueShape::Dims(dims) => {
-                section.u8(1);
-                let rank = u32::try_from(dims.len()).map_err(|_| {
-                    FormatError::limit("value rank", dims.len() as u64, u32::MAX as u64)
-                })?;
-                section.u32(rank);
-                for dim in dims {
-                    match dim {
-                        Dim::Known(extent) => {
-                            section.u8(0);
-                            section.u64(*extent);
-                        }
-                        Dim::Symbol(symbol) => {
-                            section.u8(1);
-                            section.u8(symbol_code(*symbol));
-                        }
-                        Dim::Unknown(reason) => {
-                            section.u8(2);
-                            section.string(reason)?;
-                        }
+        for (index, slot) in plan.slots.iter().enumerate() {
+            let value = &self.graph.values()[index];
+            if slot.value != value.id {
+                return Err(FormatError::inconsistent(
+                    "plan slot table",
+                    format!(
+                        "slot {index} names {} but the graph value is {}",
+                        slot.value, value.id
+                    ),
+                ));
+            }
+            let bytes = graph_bytes(value)?;
+            if slot.bytes as u64 != bytes {
+                return Err(FormatError::inconsistent(
+                    "plan slot table",
+                    format!(
+                        "slot {index} is {} bytes but its graph value needs {bytes}",
+                        slot.bytes
+                    ),
+                ));
+            }
+            match slot.source {
+                SlotSource::Arena => {
+                    if slot.offset % SLOT_ALIGNMENT != 0
+                        || slot.offset.saturating_add(slot.bytes) > plan.arena_bytes
+                    {
+                        return Err(FormatError::inconsistent(
+                            "plan slot table",
+                            format!(
+                                "arena slot {index} at {}..{} is outside the {}-byte arena",
+                                slot.offset,
+                                slot.offset.saturating_add(slot.bytes),
+                                plan.arena_bytes
+                            ),
+                        ));
+                    }
+                }
+                SlotSource::Weight(id) => {
+                    if slot.offset != 0 {
+                        return Err(FormatError::inconsistent(
+                            "plan slot table",
+                            format!("weight slot {index} has a non-zero arena offset"),
+                        ));
+                    }
+                    let weight = self.weights.get(id).ok_or_else(|| {
+                        FormatError::inconsistent(
+                            "plan slot table",
+                            format!(
+                                "slot {index} names weight {}, which does not exist",
+                                id.index()
+                            ),
+                        )
+                    })?;
+                    if weight.dtype() != value.ty.dtype
+                        || weight.byte_len() as u64 != slot.bytes as u64
+                    {
+                        return Err(FormatError::inconsistent(
+                            "plan slot table",
+                            format!(
+                                "slot {index} names weight {}, which is {} {} bytes, but the slot \
+                                 is {} {} bytes",
+                                id.index(),
+                                weight.dtype(),
+                                weight.byte_len(),
+                                value.ty.dtype,
+                                slot.bytes
+                            ),
+                        ));
                     }
                 }
             }
         }
-        match value.origin {
-            ValueOrigin::GraphInput => section.u8(0),
-            ValueOrigin::Weight(weight) => {
-                section.u8(1);
-                section.u32(weight.index() as u32);
+        check_slot_names(&plan.slots, &plan.inputs, &self.inputs, "input", target)?;
+        check_slot_names(&plan.slots, &plan.outputs, &self.outputs, "output", target)?;
+        for (index, segment) in plan.segments.iter().enumerate() {
+            for &id in segment.inputs.iter().chain(segment.outputs.iter()) {
+                if id.index() >= plan.slots.len() {
+                    return Err(FormatError::inconsistent(
+                        "plan segment table",
+                        format!(
+                            "segment {index} names slot {}, but the plan has {} slots",
+                            id.index(),
+                            plan.slots.len()
+                        ),
+                    ));
+                }
             }
-            ValueOrigin::Node(node) => {
-                section.u8(2);
-                section.u32(node);
+            if segment.outputs.is_empty() {
+                return Err(FormatError::inconsistent(
+                    "plan segment table",
+                    format!("segment {index} has no outputs"),
+                ));
+            }
+            if let Some(fused) = segment.fused() {
+                if fused.chain.len() < 2 || fused.chain[0] != fused.anchor {
+                    return Err(FormatError::inconsistent(
+                        "fusion",
+                        format!("segment {index} has an invalid fused chain"),
+                    ));
+                }
+                if let Some(position) = fused.sum {
+                    if position >= segment.inputs.len() {
+                        return Err(FormatError::inconsistent(
+                            "fusion",
+                            format!(
+                                "segment {index} names residual operand {position} but has {} \
+                                 inputs",
+                                segment.inputs.len()
+                            ),
+                        ));
+                    }
+                }
             }
         }
+        for fusion in &plan.fusions {
+            let segment = plan.segments.get(fusion.segment).ok_or_else(|| {
+                FormatError::inconsistent(
+                    "fusion table",
+                    format!("fusion names segment {}", fusion.segment),
+                )
+            })?;
+            if segment.fused() != Some(&fusion.fused) {
+                return Err(FormatError::inconsistent(
+                    "fusion table",
+                    format!("fusion does not match segment {}", fusion.segment),
+                ));
+            }
+        }
+        let mut reorder_bytes = 0usize;
+        for reorder in &plan.reorders {
+            if reorder.segment >= plan.segments.len() || reorder.slot.index() >= plan.slots.len() {
+                return Err(FormatError::inconsistent(
+                    "reorder table",
+                    "a reorder names a segment or slot outside the plan",
+                ));
+            }
+            reorder_bytes = reorder_bytes.checked_add(reorder.bytes).ok_or_else(|| {
+                FormatError::inconsistent("reorder table", "the byte sum overflows usize")
+            })?;
+        }
+        if reorder_bytes != plan.reorder_bytes {
+            return Err(FormatError::inconsistent(
+                "reorder table",
+                "reorder_bytes does not match the list",
+            ));
+        }
+        for fallback in &plan.fallbacks {
+            let segment = plan.segments.get(fallback.segment).ok_or_else(|| {
+                FormatError::inconsistent(
+                    "fallback table",
+                    format!("fallback names segment {}", fallback.segment),
+                )
+            })?;
+            if segment.op_id() != fallback.op {
+                return Err(FormatError::inconsistent(
+                    "fallback table",
+                    "a fallback names an op its segment does not run",
+                ));
+            }
+        }
+        Ok(())
     }
-    let input_count = u32::try_from(graph.inputs().len()).map_err(|_| {
-        FormatError::limit(
-            "graph input count",
-            graph.inputs().len() as u64,
-            u32::MAX as u64,
-        )
-    })?;
-    section.u32(input_count);
-    for id in graph.inputs() {
-        section.u32(id.index() as u32);
-    }
-    let output_count = u32::try_from(graph.outputs().len()).map_err(|_| {
-        FormatError::limit(
-            "graph output count",
-            graph.outputs().len() as u64,
-            u32::MAX as u64,
-        )
-    })?;
-    section.u32(output_count);
-    for id in graph.outputs() {
-        section.u32(id.index() as u32);
-    }
-    Ok(section.into_bytes())
-}
 
-fn encode_nodes(graph: &PreparedGraph) -> Result<Vec<u8>, FormatError> {
-    let count = u32::try_from(graph.nodes().len()).map_err(|_| {
-        FormatError::limit("node count", graph.nodes().len() as u64, u32::MAX as u64)
-    })?;
-    let mut section = Writer::with_capacity(64 + graph.nodes().len() * 64);
-    section.u32(count);
-    for node in graph.nodes() {
-        section.u32(node.onnx_index);
-        section.string(&node.name)?;
-        section.string(&node.onnx_op)?;
-        section.u16(node.op.code());
-        let input_count = u32::try_from(node.inputs.len()).map_err(|_| {
-            FormatError::limit(
-                "node input count",
-                node.inputs.len() as u64,
-                u32::MAX as u64,
-            )
+    /// Encode the canonical byte string.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, FormatError> {
+        self.validate()?;
+        let graph_bytes = encode_graph(&GraphParts {
+            metadata: self.metadata.clone(),
+            graph: self.graph.clone(),
+            inputs: self.inputs.clone(),
+            outputs: self.outputs.clone(),
         })?;
-        section.u32(input_count);
-        for id in &node.inputs {
-            section.u32(id.index() as u32);
-        }
-        let output_count = u32::try_from(node.outputs.len()).map_err(|_| {
-            FormatError::limit(
-                "node output count",
-                node.outputs.len() as u64,
-                u32::MAX as u64,
-            )
-        })?;
-        section.u32(output_count);
-        for id in &node.outputs {
-            section.u32(id.index() as u32);
-        }
-        let axes_count = u32::try_from(node.params.axes.len()).map_err(|_| {
-            FormatError::limit(
-                "op axes count",
-                node.params.axes.len() as u64,
-                u32::MAX as u64,
-            )
-        })?;
-        section.u32(axes_count);
-        for axis in &node.params.axes {
-            section.i64(*axis);
-        }
-        section.u8(u8::from(node.params.keep_dims));
-        section.f32(node.params.epsilon);
-    }
-    Ok(section.into_bytes())
-}
+        let plans_bytes = encode_plans(&self.plans)?;
+        let weights_bytes = encode_weights(&self.weights)?;
+        let quant_bytes = encode_quant(&QuantMetadata::empty_f32())?;
+        let hashes_length = 8 + 5 * 40u64;
 
-fn decode_graph(values_section: &[u8], nodes_section: &[u8]) -> Result<PreparedGraph, FormatError> {
-    let mut reader = Reader::new(values_section);
-    let count = reader.count("value table", MAX_VALUES, MIN_VALUE_ENTRY)?;
-    let mut values = Vec::with_capacity(count);
-    for index in 0..count {
-        let name = reader.string(format!("value {index} name"))?;
-        let dtype = dtype(reader.u8(format!("value {index} dtype"))?, "value table")?;
-        let shape = decode_shape(&mut reader, index)?;
-        let origin_kind = reader.u8(format!("value {index} origin"))?;
-        let origin = match origin_kind {
-            0 => ValueOrigin::GraphInput,
-            1 => ValueOrigin::Weight(WeightId::new(
-                reader.u32(format!("value {index} weight handle"))?,
-            )),
-            2 => ValueOrigin::Node(reader.u32(format!("value {index} producer node"))?),
-            other => {
-                return Err(FormatError::malformed(
-                    "value table",
-                    format!(
-                        "value {index} (`{name}`) has origin kind {other}, expected 0 (graph \
-                         input), 1 (weight) or 2 (node)"
-                    ),
-                ))
-            }
-        };
-        values.push(ValueInfo {
-            name,
-            dtype,
-            shape,
-            origin,
+        let sections: [&[u8]; 4] = [&graph_bytes, &plans_bytes, &weights_bytes, &quant_bytes];
+        let mut offsets = [0u64; SECTION_COUNT];
+        let mut lengths = [0u64; SECTION_COUNT];
+        let mut cursor = (HEADER_BYTES + DIRECTORY_BYTES) as u64;
+        for index in 0..SECTION_COUNT {
+            offsets[index] = cursor;
+            let length = if index == 4 {
+                hashes_length
+            } else {
+                sections[index].len() as u64
+            };
+            lengths[index] = length;
+            cursor = align64(cursor + length)?;
+        }
+        let file_bytes = cursor;
+        if file_bytes > HEADER_BYTES as u64 + MAX_PAYLOAD_BYTES {
+            return Err(FormatError::limit(
+                "artifact length",
+                file_bytes,
+                HEADER_BYTES as u64 + MAX_PAYLOAD_BYTES,
+            ));
+        }
+        let weights = decode_weights(&weights_bytes, 0)?;
+
+        let header = encode_header(&ArtifactHeader {
+            version: FORMAT_VERSION,
+            section_count: SECTION_COUNT as u32,
+            target_count: self.plans.len() as u32,
+            flags: 0,
+            dtype_encoding: DTYPE_ENCODING,
+            source_onnx_sha256: self.source_onnx_sha256,
+            file_bytes,
+            payload_bytes: file_bytes - HEADER_BYTES as u64,
+            directory_offset: HEADER_BYTES as u64,
+            directory_bytes: DIRECTORY_BYTES as u64,
+            weights_offset: offsets[2],
+            weights_length: lengths[2],
+            weight_payload_offset: offsets[2] + weights.payload_offset,
+            weight_payload_bytes: weights.payload_bytes,
         });
+
+        let mut hashes = Writer::with_capacity(hashes_length as usize);
+        hashes.u32(5);
+        hashes.u32(0);
+        for (tag, digest) in [
+            (tag::HEADER, hash_slice(&header)),
+            (tag::GRAPH, hash_slice(&graph_bytes)),
+            (tag::PLANS, hash_slice(&plans_bytes)),
+            (tag::WEIGHTS, hash_slice(&weights_bytes)),
+            (tag::QUANT, hash_slice(&quant_bytes)),
+        ] {
+            hashes.u32(tag);
+            hashes.u32(0);
+            hashes.bytes(&digest);
+        }
+        let hashes_bytes = hashes.into_bytes();
+        debug_assert_eq!(hashes_bytes.len() as u64, hashes_length);
+
+        let mut directory = Writer::with_capacity(DIRECTORY_BYTES);
+        directory.u32(SECTION_COUNT as u32);
+        directory.u32(0);
+        for index in 0..SECTION_COUNT {
+            directory.u32(tag::ALL[index]);
+            directory.u32(0);
+            directory.u64(offsets[index]);
+            directory.u64(lengths[index]);
+        }
+        let directory = directory.into_bytes();
+        debug_assert_eq!(directory.len(), DIRECTORY_BYTES);
+
+        let file_len = usize::try_from(file_bytes)
+            .map_err(|_| FormatError::limit("artifact length", file_bytes, usize::MAX as u64))?;
+        let mut file = vec![0u8; file_len];
+        file[..HEADER_BYTES].copy_from_slice(&header);
+        file[HEADER_BYTES..HEADER_BYTES + DIRECTORY_BYTES].copy_from_slice(&directory);
+        for index in 0..SECTION_COUNT {
+            let bytes: &[u8] = if index == 4 {
+                &hashes_bytes
+            } else {
+                sections[index]
+            };
+            let start = offsets[index] as usize;
+            file[start..start + bytes.len()].copy_from_slice(bytes);
+        }
+        Ok(file)
     }
-    let input_count = reader.count("graph input table", MAX_VALUES, 4)?;
-    let mut inputs = Vec::with_capacity(input_count);
-    for position in 0..input_count {
-        inputs.push(ValueId::new(reader.u32(format!("graph input {position}"))?));
+
+    /// Write the canonical file, replacing any existing one.
+    pub fn write_file(&self, path: impl AsRef<Path>) -> Result<(), FormatError> {
+        let path = path.as_ref();
+        let bytes = self.to_bytes()?;
+        std::fs::write(path, &bytes)
+            .map_err(|error| FormatError::io(path.display().to_string(), error.to_string()))
     }
-    let output_count = reader.count("graph output table", MAX_VALUES, 4)?;
-    let mut outputs = Vec::with_capacity(output_count);
-    for position in 0..output_count {
-        outputs.push(ValueId::new(
-            reader.u32(format!("graph output {position}"))?,
+}
+
+fn encode_header(header: &ArtifactHeader) -> Vec<u8> {
+    let mut bytes = Writer::with_capacity(HEADER_BYTES);
+    bytes.bytes(&MAGIC);
+    bytes.u16(header.version);
+    bytes.u16(HEADER_BYTES as u16);
+    bytes.u32(header.section_count);
+    bytes.u32(header.target_count);
+    bytes.u32(header.flags);
+    bytes.u32(header.dtype_encoding);
+    bytes.u32(0);
+    bytes.bytes(&header.source_onnx_sha256);
+    bytes.u64(header.file_bytes);
+    bytes.u64(header.payload_bytes);
+    bytes.u64(header.directory_offset);
+    bytes.u64(header.directory_bytes);
+    bytes.u64(header.weights_offset);
+    bytes.u64(header.weights_length);
+    bytes.u64(header.weight_payload_offset);
+    bytes.u64(header.weight_payload_bytes);
+    let bytes = bytes.into_bytes();
+    debug_assert_eq!(bytes.len(), HEADER_BYTES);
+    bytes
+}
+
+fn value_name(
+    graph: &Graph,
+    id: crate::inference::ir::ValueId,
+    what: &str,
+) -> Result<String, FormatError> {
+    graph
+        .value(id)
+        .ok_or_else(|| {
+            FormatError::inconsistent(what, format!("{what} handle {id} is out of range"))
+        })?
+        .name
+        .clone()
+        .ok_or_else(|| FormatError::inconsistent(what, format!("{what} {id} has no name")))
+}
+
+fn graph_bytes(value: &crate::inference::ir::Value) -> Result<u64, FormatError> {
+    let shape = value.ty.static_shape().ok_or_else(|| {
+        FormatError::inconsistent(
+            "graph value",
+            format!(
+                "{} is {}; an artifact needs static extents",
+                value.id, value.ty
+            ),
+        )
+    })?;
+    let elements = shape
+        .numel()
+        .map_err(|error| FormatError::contract("graph value bytes", error))?;
+    elements
+        .checked_mul(value.ty.dtype.size_bytes() as u64)
+        .ok_or_else(|| {
+            FormatError::inconsistent(
+                "graph value",
+                format!("{} overflows its byte count", value.id),
+            )
+        })
+}
+
+fn check_slot_names(
+    slots: &[Slot],
+    ids: &[SlotId],
+    names: &[String],
+    kind: &str,
+    target: &str,
+) -> Result<(), FormatError> {
+    if ids.len() != names.len() {
+        return Err(FormatError::inconsistent(
+            "plan interface",
+            format!(
+                "target `{target}` has {} {kind} slots but the graph declares {}",
+                ids.len(),
+                names.len()
+            ),
         ));
     }
-    reader.finish("VALS section")?;
-
-    let mut reader = Reader::new(nodes_section);
-    let count = reader.count("node table", MAX_NODES, MIN_NODE_ENTRY)?;
-    let mut nodes = Vec::with_capacity(count);
-    for index in 0..count {
-        let onnx_index = reader.u32(format!("node {index} ONNX index"))?;
-        let name = reader.string(format!("node {index} name"))?;
-        let onnx_op = reader.string(format!("node {index} ONNX op"))?;
-        let code = reader.u16(format!("node {index} op code"))?;
-        let op = OpId::from_u16(code)
-            .ok_or_else(|| FormatError::new(FormatErrorKind::UnknownOpCode { code }))?;
-        let input_count = reader.count(format!("node {index} inputs"), MAX_PARAM_AXES, 4)?;
-        let mut inputs = Vec::with_capacity(input_count);
-        for position in 0..input_count {
-            inputs.push(ValueId::new(
-                reader.u32(format!("node {index} input {position}"))?,
+    for (position, (id, name)) in ids.iter().zip(names).enumerate() {
+        if slots[id.index()].name.as_deref() != Some(name.as_str()) {
+            return Err(FormatError::inconsistent(
+                "plan interface",
+                format!(
+                    "target `{target}` {kind} {position} names `{name}` but the slot is {:?}",
+                    slots[id.index()].name
+                ),
             ));
         }
-        let output_count = reader.count(format!("node {index} outputs"), MAX_PARAM_AXES, 4)?;
-        let mut node_outputs = Vec::with_capacity(output_count);
-        for position in 0..output_count {
-            node_outputs.push(ValueId::new(
-                reader.u32(format!("node {index} output {position}"))?,
-            ));
-        }
-        let axes_count = reader.count(format!("node {index} axes"), MAX_PARAM_AXES, 8)?;
-        let mut axes = Vec::with_capacity(axes_count);
-        for position in 0..axes_count {
-            axes.push(reader.i64(format!("node {index} axis {position}"))?);
-        }
-        let keep_dims = match reader.u8(format!("node {index} keep_dims"))? {
-            0 => false,
-            1 => true,
-            other => {
-                return Err(FormatError::malformed(
-                    "node table",
-                    format!("node {index} (`{name}`) has keep_dims {other}, expected 0 or 1"),
-                ))
-            }
-        };
-        let epsilon = reader.f32(format!("node {index} epsilon"))?;
-        nodes.push(crate::inference::import::GraphNode {
-            onnx_index,
-            name,
-            onnx_op,
-            op,
-            inputs,
-            outputs: node_outputs,
-            params: crate::inference::backend::OpParams {
-                axes,
-                keep_dims,
-                epsilon,
-            },
-        });
     }
-    reader.finish("NODE section")?;
-
-    PreparedGraph::new(values, nodes, inputs, outputs)
+    Ok(())
 }
 
-fn decode_shape(reader: &mut Reader<'_>, index: usize) -> Result<ValueShape, FormatError> {
-    let kind = reader.u8(format!("value {index} shape kind"))?;
-    match kind {
-        0 => Ok(ValueShape::Unknown),
-        1 => {
-            let rank = reader.count(format!("value {index} rank"), MAX_RANK, 2)?;
-            let mut dims = Vec::with_capacity(rank);
-            for axis in 0..rank {
-                let dim_kind = reader.u8(format!("value {index} axis {axis} kind"))?;
-                dims.push(match dim_kind {
-                    0 => Dim::Known(reader.u64(format!("value {index} axis {axis} extent"))?),
-                    1 => {
-                        let code = reader.u8(format!("value {index} axis {axis} symbol"))?;
-                        Dim::Symbol(symbol_from_code(code).map_err(|detail| {
-                            FormatError::malformed(
-                                "value table",
-                                format!("value {index} axis {axis}: {detail}"),
-                            )
-                        })?)
-                    }
-                    2 => Dim::Unknown(
-                        reader.string(format!("value {index} axis {axis} unknown reason"))?,
-                    ),
-                    other => {
-                        return Err(FormatError::malformed(
-                            "value table",
-                            format!(
-                                "value {index} axis {axis} has dim kind {other}, expected 0 \
-                                 (known), 1 (symbol) or 2 (unknown)"
-                            ),
-                        ))
-                    }
-                });
-            }
-            Ok(ValueShape::Dims(dims))
-        }
-        other => Err(FormatError::malformed(
-            "value table",
-            format!("value {index} has shape kind {other}, expected 0 (unknown) or 1 (ranked)"),
-        )),
+fn hex(bytes: &[u8; 32]) -> String {
+    let mut text = String::with_capacity(64);
+    for byte in bytes {
+        text.push_str(&format!("{byte:02x}"));
     }
+    text
 }
 
 // ---------------------------------------------------------------------------
-// WGHT
+// inspect
 // ---------------------------------------------------------------------------
 
-fn encode_weights(weights: &WeightSet) -> Result<Vec<u8>, FormatError> {
-    let count = u32::try_from(weights.len())
-        .map_err(|_| FormatError::limit("weight count", weights.len() as u64, u32::MAX as u64))?;
-    let payload_bytes: usize = weights.iter().map(WeightTensor::byte_len).sum();
-    let mut section = Writer::with_capacity(32 + weights.len() * 64 + payload_bytes);
-    section.u32(count);
-    for weight in weights.iter() {
-        section.string(weight.name())?;
-        section.u8(weight.dtype().code());
-        let rank = u32::try_from(weight.shape().rank()).map_err(|_| {
-            FormatError::limit("weight rank", weight.shape().rank() as u64, u32::MAX as u64)
-        })?;
-        section.u32(rank);
-        for extent in weight.shape().dims() {
-            section.u64(*extent);
-        }
-        section.u8(match weight.source() {
-            WeightSource::Initializer => 0,
-            WeightSource::AttributeConstant => 1,
-        });
-        section.u64(weight.byte_len() as u64);
-        section.pad_to_8();
-        section.bytes(weight.bytes());
+/// One section, as `inspect` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SectionInfo {
+    /// `HEADER`, `GRAPH`, `PLANS`, `WEIGHTS` or `QUANT`.
+    pub name: &'static str,
+    /// Absolute file offset.
+    pub offset: u64,
+    /// Encoded length.
+    pub length: u64,
+    /// Stored SHA-256.
+    pub sha256: [u8; 32],
+    /// `true` when `inspect` re-read and matched the hash.
+    pub verified: bool,
+}
+
+impl SectionInfo {
+    /// Lowercase hexadecimal digest.
+    pub fn sha256_hex(&self) -> String {
+        hex(&self.sha256)
     }
-    Ok(section.into_bytes())
 }
 
-fn decode_weights(section_bytes: &[u8]) -> Result<WeightSet, FormatError> {
-    let mut reader = Reader::new(section_bytes);
-    let count = reader.count("weight table", MAX_WEIGHTS, MIN_WEIGHT_ENTRY)?;
-    let mut entries = Vec::with_capacity(count);
-    for index in 0..count {
-        let name = reader.string(format!("weight {index} name"))?;
-        let dtype = dtype(reader.u8(format!("weight {index} dtype"))?, "weight table")?;
-        let rank = reader.count(format!("weight {index} rank"), MAX_RANK, 8)?;
-        let mut dims = Vec::with_capacity(rank);
-        for axis in 0..rank {
-            dims.push(reader.u64(format!("weight {index} axis {axis}"))?);
-        }
-        let source = match reader.u8(format!("weight {index} source"))? {
-            0 => WeightSource::Initializer,
-            1 => WeightSource::AttributeConstant,
-            other => {
-                return Err(FormatError::malformed(
-                    "weight table",
-                    format!(
-                        "weight {index} (`{name}`) has source {other}, expected 0 (initializer) \
-                         or 1 (attribute constant)"
-                    ),
-                ))
-            }
-        };
-        let payload_len = reader.u64(format!("weight {index} payload length"))?;
-        reader.pad_to_8(format!("weight {index} padding"))?;
-        let payload = reader.take(payload_len, format!("weight {index} payload"))?;
-        entries.push(
-            WeightTensor::new(
-                name,
-                dtype,
-                Shape::from_dims(dims),
-                payload.to_vec(),
-                source,
-            )
-            .map_err(|error| FormatError::contract("weight table", error))?,
-        );
-    }
-    reader.finish("WGHT section")?;
-    WeightSet::new(entries).map_err(|error| FormatError::contract("weight table", error))
+/// What `inspect` learned without mapping or executing the model.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArtifactInspection {
+    /// Path inspected.
+    pub path: PathBuf,
+    /// File length.
+    pub file_bytes: u64,
+    /// Format version.
+    pub format_version: u16,
+    /// Target profiles.
+    pub target_count: u32,
+    /// Source ONNX digest.
+    pub source_onnx_sha256: [u8; 32],
+    /// Graph provenance (same metadata a prepared artifact carries).
+    pub metadata: ArtifactMetadata,
+    /// Nodes in the typed graph.
+    pub nodes: usize,
+    /// Values in the typed graph.
+    pub values: usize,
+    /// Weights in the table.
+    pub weights: usize,
+    /// Graph inputs.
+    pub inputs: usize,
+    /// Graph outputs.
+    pub outputs: usize,
+    /// Sum of the weight payloads.
+    pub weight_bytes: u64,
+    /// Compact per-target plans.
+    pub plans: Vec<PlanSummary>,
+    /// Quantization metadata.
+    pub quant: QuantMetadata,
+    /// Section inventory.
+    pub sections: Vec<SectionInfo>,
+    /// Bytes `inspect` actually read.
+    pub bytes_read: u64,
+    /// Always zero: `inspect` never maps the file.
+    pub mapped_bytes: u64,
 }
 
-// ---------------------------------------------------------------------------
-// Shared field codecs
-// ---------------------------------------------------------------------------
-
-/// Decode a dtype code, naming the reader that rejected it.
-fn dtype(code: u8, what: &'static str) -> Result<DType, FormatError> {
-    DType::from_code(code, what).map_err(FormatError::from)
-}
-
-/// Stable on-disk code for a dynamic-dimension symbol.
+/// Inspect an artifact file without mapping it.
 ///
-/// The match is exhaustive on purpose: adding a [`Symbol`] variant must fail to
-/// compile here so a code is assigned deliberately rather than by declaration
-/// order.
-fn symbol_code(symbol: Symbol) -> u8 {
-    match symbol {
-        Symbol::Batch => 0,
-        Symbol::Seq => 1,
-        Symbol::Past => 2,
-        Symbol::Total => 3,
-        Symbol::NHeads => 4,
-        Symbol::NKvHeads => 5,
-        Symbol::HeadDim => 6,
+/// `GRAPH`, `PLANS`, `QUANT` and `HASHES` are read into memory; the weight
+/// table is read from the first 64-aligned prefix of `WEIGHTS`; the weight
+/// payload is never read and no `Mmap` is constructed. `WEIGHTS`' hash is
+/// reported but not marked verified, because re-reading a 200 MB payload is not
+/// what "inspect before trusting" should cost.
+pub fn inspect_file(path: impl AsRef<Path>) -> Result<ArtifactInspection, FormatError> {
+    let path = path.as_ref();
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| FormatError::io(path.display().to_string(), error.to_string()))?;
+    let file_bytes = file
+        .metadata()
+        .map_err(|error| FormatError::io(path.display().to_string(), error.to_string()))?
+        .len();
+    let mut bytes_read = 0u64;
+    let mut header_bytes = [0u8; HEADER_BYTES];
+    read_range(&mut file, 0, &mut header_bytes, path)?;
+    bytes_read += HEADER_BYTES as u64;
+    let header = ArtifactHeader::parse(&header_bytes, file_bytes)?;
+    let mut directory = [0u8; DIRECTORY_BYTES];
+    read_range(&mut file, header.directory_offset, &mut directory, path)?;
+    bytes_read += DIRECTORY_BYTES as u64;
+    let ranges = parse_directory(&directory, &header)?;
+    let mut hashes_bytes = vec![0u8; ranges[4].length as usize];
+    read_range(&mut file, ranges[4].offset, &mut hashes_bytes, path)?;
+    bytes_read += ranges[4].length;
+    let hashes = read_hashes(&hashes_bytes, ranges[4].offset)?;
+
+    let mut graph_bytes = read_metadata_section(&mut file, ranges[0], path, &mut bytes_read)?;
+    graph_bytes.shrink_to_fit();
+    let parts = decode_graph(&graph_bytes, ranges[0].offset)?;
+    let plans_bytes = read_metadata_section(&mut file, ranges[1], path, &mut bytes_read)?;
+    let quant_bytes = read_metadata_section(&mut file, ranges[3], path, &mut bytes_read)?;
+    let quant = decode_quant(&quant_bytes, ranges[3].offset)?;
+
+    // Read only the table prefix of WEIGHTS, never the payload.
+    let mut table_header = [0u8; 24];
+    read_range(&mut file, ranges[2].offset, &mut table_header, path)?;
+    bytes_read += 24;
+    let count = u32::from_le_bytes([
+        table_header[0],
+        table_header[1],
+        table_header[2],
+        table_header[3],
+    ]) as u64;
+    if count > MAX_WEIGHTS {
+        return Err(FormatError::limit("weight table", count, MAX_WEIGHTS));
     }
-}
-
-fn symbol_from_code(code: u8) -> Result<Symbol, String> {
-    match code {
-        0 => Ok(Symbol::Batch),
-        1 => Ok(Symbol::Seq),
-        2 => Ok(Symbol::Past),
-        3 => Ok(Symbol::Total),
-        4 => Ok(Symbol::NHeads),
-        5 => Ok(Symbol::NKvHeads),
-        6 => Ok(Symbol::HeadDim),
-        other => Err(format!(
-            "shape symbol code {other} is not defined; this build knows 0..=6"
-        )),
+    let table_len = align64(24 + 24 * count)?;
+    if table_len > ranges[2].length {
+        return Err(FormatError::truncated_at(
+            "WEIGHTS table",
+            ranges[2].offset,
+            table_len,
+            ranges[2].length,
+        ));
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use crate::inference::import::{Dim, ValueShape};
-    use crate::inference::model::KvCacheLayout;
-
-    fn tiny_geometry() -> DecoderGeometry {
-        DecoderGeometry {
-            layers: 1,
-            hidden_size: 4,
-            mlp_hidden_size: 8,
-            query_heads: 2,
-            kv_heads: 1,
-            head_dim: 2,
-            vocab_size: 6,
-            positions: PositionEmbedding::Learned {
-                weight: WeightId::new(1),
-                max_positions: 3,
-            },
-            layer_norm_epsilon: Some(1e-5),
-            token_embedding: WeightId::new(0),
-            logits: ValueId::new(4),
-            kv: vec![KvInterface {
-                past_key: ValueId::new(1),
-                past_value: ValueId::new(2),
-                present_key: ValueId::new(3),
-                present_value: ValueId::new(4),
-            }],
-        }
-    }
-
-    fn tiny_graph() -> PreparedGraph {
-        use crate::inference::backend::OpParams;
-        use crate::inference::import::GraphNode;
-        PreparedGraph::new(
-            vec![
-                ValueInfo {
-                    name: "past.0.key".to_string(),
-                    dtype: DType::F32,
-                    shape: ValueShape::Dims(vec![Dim::Known(1), Dim::Known(2)]),
-                    origin: ValueOrigin::GraphInput,
-                },
-                ValueInfo {
-                    name: "past.0.value".to_string(),
-                    dtype: DType::F32,
-                    shape: ValueShape::Dims(vec![Dim::Symbol(Symbol::Past)]),
-                    origin: ValueOrigin::GraphInput,
-                },
-                ValueInfo {
-                    name: "present.0.key".to_string(),
-                    dtype: DType::F32,
-                    shape: ValueShape::Unknown,
-                    origin: ValueOrigin::GraphInput,
-                },
-                ValueInfo {
-                    name: "present.0.value".to_string(),
-                    dtype: DType::F32,
-                    shape: ValueShape::Dims(vec![Dim::unknown("past + seq")]),
-                    origin: ValueOrigin::GraphInput,
-                },
-                ValueInfo {
-                    name: "logits".to_string(),
-                    dtype: DType::F32,
-                    shape: ValueShape::Dims(vec![Dim::Known(6)]),
-                    origin: ValueOrigin::Node(0),
-                },
-                ValueInfo {
-                    name: "wpe".to_string(),
-                    dtype: DType::F32,
-                    shape: ValueShape::Dims(vec![Dim::Known(3), Dim::Known(4)]),
-                    origin: ValueOrigin::Weight(WeightId::new(1)),
-                },
-                ValueInfo {
-                    name: "wte".to_string(),
-                    dtype: DType::F32,
-                    shape: ValueShape::Dims(vec![Dim::Known(6), Dim::Known(4)]),
-                    origin: ValueOrigin::Weight(WeightId::new(0)),
-                },
-            ],
-            vec![GraphNode {
-                onnx_index: 3,
-                name: "matmul".to_string(),
-                onnx_op: "MatMul".to_string(),
-                op: OpId::MatMul,
-                inputs: vec![ValueId::new(0), ValueId::new(6)],
-                outputs: vec![ValueId::new(4)],
-                params: OpParams {
-                    axes: vec![-1, 0, 3],
-                    keep_dims: true,
-                    epsilon: 1e-5,
-                },
-            }],
-            vec![
-                ValueId::new(0),
-                ValueId::new(1),
-                ValueId::new(2),
-                ValueId::new(3),
-            ],
-            vec![ValueId::new(4)],
-        )
-        .unwrap()
-    }
-
-    fn tiny_weights() -> WeightSet {
-        WeightSet::new(vec![
-            WeightTensor::new(
-                "wte",
-                DType::F32,
-                Shape::from_dims([6, 4]),
-                vec![0x11; 6 * 4 * 4],
-                WeightSource::Initializer,
-            )
-            .unwrap(),
-            WeightTensor::new(
-                "wpe",
-                DType::F32,
-                Shape::from_dims([3, 4]),
-                vec![0x22; 3 * 4 * 4],
-                WeightSource::AttributeConstant,
-            )
-            .unwrap(),
-        ])
-        .unwrap()
-    }
-
-    fn tiny_artifact() -> PreparedArtifact {
-        PreparedArtifact::from_parts(
-            ArtifactMetadata {
-                ir_version: 7,
-                opset: OpsetImport {
-                    domain: String::new(),
-                    version: 14,
-                },
-                producer: "pytorch".to_string(),
-                producer_version: "2.8.0".to_string(),
-                graph_name: "main_graph".to_string(),
-            },
-            tiny_graph(),
-            tiny_weights(),
-            tiny_geometry(),
-            ShapeEnvelope::uniform(8).unwrap(),
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn a_minimal_artifact_round_trips_byte_identically() {
-        let artifact = tiny_artifact();
-        let bytes = artifact.to_bytes().unwrap();
-        let loaded = PreparedArtifact::from_bytes(&bytes).unwrap();
-        assert_eq!(loaded, artifact);
-        assert_eq!(loaded.to_bytes().unwrap(), bytes);
-        assert_eq!(artifact.geometry().kv_cache_config(4, 1).dtype, DType::F32);
-        assert_eq!(
-            artifact.geometry().kv_cache_config(4, 1).layout,
-            KvCacheLayout::BatchHeadsCapacityHeadDim
-        );
-    }
-
-    #[test]
-    fn the_header_layout_matches_the_documented_offsets() {
-        let artifact = tiny_artifact();
-        let bytes = artifact.to_bytes().unwrap();
-        assert_eq!(&bytes[0..8], b"FNN3PREP");
-        assert_eq!(u16::from_le_bytes([bytes[8], bytes[9]]), 1);
-        assert_eq!(u16::from_le_bytes([bytes[10], bytes[11]]), 64);
-        assert_eq!(
-            u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
-            1
-        );
-        assert_eq!(bytes[16..24], [0u8; 8]);
-        assert_eq!(
-            u64::from_le_bytes(bytes[24..32].try_into().unwrap()),
-            bytes.len() as u64
-        );
-        assert_eq!(
-            u64::from_le_bytes(bytes[32..40].try_into().unwrap()),
-            (bytes.len() - 64) as u64
-        );
-        assert_eq!(
-            u32::from_le_bytes(bytes[40..44].try_into().unwrap()),
-            crc32(&bytes[64..])
-        );
-        assert_eq!(bytes[44..64], [0u8; 20]);
-        let header = PreparedHeader::parse(&bytes).unwrap();
-        assert_eq!(header.payload_bytes, (bytes.len() - 64) as u64);
-    }
-
-    #[test]
-    fn weight_payloads_are_eight_byte_aligned_and_zero_padded() {
-        let bytes = tiny_artifact().to_bytes().unwrap();
-        // Re-walk the payload directory like a tool would, then check the
-        // alignment rule: every weight payload starts at a file offset that is a
-        // multiple of 8.
-        let payload = &bytes[HEADER_BYTES..];
-        let mut reader = Reader::new(payload);
-        let count = reader.count("directory", 8, 16).unwrap();
-        assert_eq!(count, SECTION_COUNT);
-        reader.u32("reserved").unwrap();
-        let mut lengths = Vec::new();
-        for _ in 0..count {
-            reader.u32("tag").unwrap();
-            reader.u32("reserved").unwrap();
-            lengths.push(reader.u64("length").unwrap());
-        }
-        let mut offsets = Vec::new();
-        for (position, length) in lengths.iter().enumerate() {
-            let offset = reader.pos() as u64;
-            offsets.push(offset);
-            reader.take(*length, format!("section {position}")).unwrap();
-            reader.pad_to_8("padding").unwrap();
-        }
-        assert_eq!(offsets[5] % 8, 0);
-        // The first weight payload follows its header fields, so just assert the
-        // rule the reader enforces: the section itself decodes and every payload
-        // reader position is aligned.
-        let loaded = PreparedArtifact::from_bytes(&bytes).unwrap();
-        assert_eq!(loaded.weights().len(), 2);
-        for weight in loaded.weights().iter() {
-            assert_eq!(
-                weight.byte_len() as u64,
-                weight.shape().numel().unwrap() * 4
-            );
-        }
-    }
-
-    #[test]
-    fn a_wrong_dtype_code_names_the_code_and_the_reader() {
-        let artifact = tiny_artifact();
-        let bytes = artifact.to_bytes().unwrap();
-        let mut mutated = bytes.clone();
-        // Find the WGHT section and corrupt the first weight's dtype byte: the
-        // first weight's dtype sits after the section's `u32 count`, a `u32`
-        // name length and the 3-byte name "wte".
-        let wght = find_section(&mutated, tag::WEIGHTS);
-        let dtype_position = wght + 4 + 4 + 3;
-        mutated[dtype_position] = 9;
-        // Fix the checksum so the dtype code, not the CRC, is what fails.
-        let payload = &mutated[HEADER_BYTES..];
-        let crc = crc32(payload);
-        mutated[40..44].copy_from_slice(&crc.to_le_bytes());
-        let error = PreparedArtifact::from_bytes(&mutated).unwrap_err();
-        assert!(
-            matches!(error.kind(), FormatErrorKind::UnknownDType(_)),
-            "{error}"
-        );
-        assert!(
-            error.to_string().contains("unknown dtype code 9"),
-            "{error}"
-        );
-        assert!(error.to_string().contains("weight table"), "{error}");
-    }
-
-    #[test]
-    fn an_unknown_op_code_is_reported_by_name() {
-        let artifact = tiny_artifact();
-        let mut bytes = artifact.to_bytes().unwrap();
-        let node = find_section(&bytes, tag::NODES);
-        // NODE section: u32 count, u32 onnx_index, u32 name length, name bytes,
-        // u32 op-name length, op-name bytes, then the u16 op code.
-        let name_len = u32::from_le_bytes(bytes[node + 8..node + 12].try_into().unwrap()) as usize;
-        let op_len_position = node + 12 + name_len;
-        let op_len = u32::from_le_bytes(
-            bytes[op_len_position..op_len_position + 4]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        let code_position = op_len_position + 4 + op_len;
-        bytes[code_position] = 0x01;
-        bytes[code_position + 1] = 0x02; // 0x0201, a reserved range
-        let payload = &bytes[HEADER_BYTES..];
-        let crc = crc32(payload);
-        bytes[40..44].copy_from_slice(&crc.to_le_bytes());
-        let error = PreparedArtifact::from_bytes(&bytes).unwrap_err();
-        assert!(
-            matches!(
-                error.kind(),
-                FormatErrorKind::UnknownOpCode { code: 0x0201 }
+    let mut table = vec![0u8; table_len as usize];
+    read_range(&mut file, ranges[2].offset, &mut table, path)?;
+    bytes_read += table_len;
+    let weight_section = decode_weight_table(&table, ranges[2].length, ranges[2].offset)?;
+    let plans = decode_plans(
+        &plans_bytes,
+        ranges[1].offset,
+        &parts.graph,
+        &parts.inputs,
+        &parts.outputs,
+        &weight_section.entries,
+    )?;
+    if plans.len() as u32 != header.target_count {
+        return Err(FormatError::inconsistent(
+            "PLANS section",
+            format!(
+                "the header declares {} target profiles but the section carries {}",
+                header.target_count,
+                plans.len()
             ),
-            "{error}"
-        );
-        assert!(error.to_string().contains("reserved range"), "{error}");
+        ));
     }
 
-    /// File offset of a section's first byte, by tag.
-    fn find_section(bytes: &[u8], tag: u32) -> usize {
-        let mut position = HEADER_BYTES + 8;
-        let mut offset = HEADER_BYTES + DIRECTORY_BYTES;
-        for _ in 0..SECTION_COUNT {
-            let found = u32::from_le_bytes(bytes[position..position + 4].try_into().unwrap());
-            let length = u64::from_le_bytes(bytes[position + 8..position + 16].try_into().unwrap());
-            if found == tag {
-                return offset;
-            }
-            position += 16;
-            offset += length as usize;
-            offset += (8 - (length as usize % 8)) % 8;
+    let mut verified = [true; 5];
+    // The weight payload was deliberately not read.
+    verified[3] = false;
+    let mut section_info = Vec::with_capacity(6);
+    for (position, name) in ["HEADER", "GRAPH", "PLANS", "WEIGHTS", "QUANT"]
+        .into_iter()
+        .enumerate()
+    {
+        let (offset, length, data): (u64, u64, Option<&[u8]>) = match position {
+            0 => (0, HEADER_BYTES as u64, Some(&header_bytes)),
+            1 => (ranges[0].offset, ranges[0].length, Some(&graph_bytes)),
+            2 => (ranges[1].offset, ranges[1].length, Some(&plans_bytes)),
+            3 => (ranges[2].offset, ranges[2].length, None),
+            4 => (ranges[3].offset, ranges[3].length, Some(&quant_bytes)),
+            _ => unreachable!(),
+        };
+        let stored = hashes[position].sha256;
+        let stored_ok = match data {
+            Some(data) => hash_slice(data) == stored,
+            None => true,
+        };
+        if !stored_ok {
+            return Err(FormatError::new(FormatErrorKind::HashMismatch {
+                section: name.to_string(),
+                offset,
+                stored,
+                computed: hash_slice(data.expect("matched above")),
+            }));
         }
-        panic!("section {tag} not found");
+        section_info.push(SectionInfo {
+            name,
+            offset,
+            length,
+            sha256: stored,
+            verified: verified[position],
+        });
     }
 
-    #[test]
-    fn the_envelope_is_written_in_symbol_order() {
-        let envelope = ShapeEnvelope::new([
-            DimBound::new(1, 2).unwrap(),
-            DimBound::new(3, 4).unwrap(),
-            DimBound::new(5, 6).unwrap(),
-            DimBound::new(7, 8).unwrap(),
-            DimBound::new(9, 10).unwrap(),
-            DimBound::new(11, 12).unwrap(),
-            DimBound::new(13, 14).unwrap(),
-        ]);
-        let bytes = encode_envelope(&envelope);
-        assert_eq!(bytes.len(), 112);
-        assert_eq!(u64::from_le_bytes(bytes[0..8].try_into().unwrap()), 1);
-        assert_eq!(u64::from_le_bytes(bytes[8..16].try_into().unwrap()), 2);
-        assert_eq!(u64::from_le_bytes(bytes[96..104].try_into().unwrap()), 13);
-        assert_eq!(u64::from_le_bytes(bytes[104..112].try_into().unwrap()), 14);
-        assert_eq!(decode_envelope(&bytes).unwrap(), envelope);
-    }
+    Ok(ArtifactInspection {
+        path: path.to_path_buf(),
+        file_bytes,
+        format_version: header.version,
+        target_count: header.target_count,
+        source_onnx_sha256: header.source_onnx_sha256,
+        metadata: parts.metadata.clone(),
+        nodes: parts.graph.node_count(),
+        values: parts.graph.value_count(),
+        weights: weight_section.entries.len(),
+        inputs: parts.inputs.len(),
+        outputs: parts.outputs.len(),
+        weight_bytes: weight_section.entries.iter().map(|entry| entry.len()).sum(),
+        plans: plans
+            .iter()
+            .map(|plan| PlanSummary::of(plan.target(), plan))
+            .collect(),
+        quant,
+        sections: section_info,
+        bytes_read,
+        mapped_bytes: 0,
+    })
+}
 
-    #[test]
-    fn geometry_rejects_a_vocabulary_that_the_weights_do_not_support() {
-        let mut geometry = tiny_geometry();
-        geometry.vocab_size = 7;
-        let error = PreparedArtifact::from_parts(
-            ArtifactMetadata {
-                ir_version: 7,
-                opset: OpsetImport {
-                    domain: String::new(),
-                    version: 14,
-                },
-                producer: "test".to_string(),
-                producer_version: "0".to_string(),
-                graph_name: "g".to_string(),
-            },
-            tiny_graph(),
-            tiny_weights(),
-            geometry,
-            ShapeEnvelope::uniform(8).unwrap(),
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("token embedding"), "{error}");
+fn read_metadata_section(
+    file: &mut std::fs::File,
+    range: SectionRange,
+    path: &Path,
+    bytes_read: &mut u64,
+) -> Result<Vec<u8>, FormatError> {
+    if range.length > MAX_INSPECT_SECTION_BYTES {
+        return Err(FormatError::limit(
+            format!("{} section (inspect)", range.name()),
+            range.length,
+            MAX_INSPECT_SECTION_BYTES,
+        ));
     }
-
-    #[test]
-    fn geometry_rejects_bounds_that_exclude_its_own_fixed_heads() {
-        let envelope = ShapeEnvelope::uniform(8)
-            .unwrap()
-            .with(Symbol::NHeads, DimBound::new(8, 9).unwrap());
-        let error = PreparedArtifact::from_parts(
-            ArtifactMetadata {
-                ir_version: 7,
-                opset: OpsetImport {
-                    domain: String::new(),
-                    version: 14,
-                },
-                producer: "test".to_string(),
-                producer_version: "0".to_string(),
-                graph_name: "g".to_string(),
-            },
-            tiny_graph(),
-            tiny_weights(),
-            tiny_geometry(),
-            envelope,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("fixed n_heads is 2"), "{error}");
-    }
-
-    #[test]
-    fn symbols_are_coded_stably() {
-        for (expected, symbol) in Symbol::ALL.into_iter().enumerate() {
-            assert_eq!(symbol_code(symbol), expected as u8);
-            assert_eq!(symbol_from_code(expected as u8), Ok(symbol));
-        }
-        assert!(symbol_from_code(7).is_err());
-        assert!(symbol_from_code(u8::MAX).is_err());
-    }
+    let mut bytes = vec![0u8; range.length as usize];
+    read_range(file, range.offset, &mut bytes, path)?;
+    *bytes_read += range.length;
+    Ok(bytes)
 }

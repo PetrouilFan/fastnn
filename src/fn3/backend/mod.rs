@@ -47,10 +47,14 @@ use crate::inference::ops::OpId;
 use crate::inference::shape::Shape;
 use crate::inference::tensor::{TensorMut, TensorView};
 
+use self::cpu::kernels::elementwise::gelu_erf_f32;
+
 pub mod cpu;
 
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
+
+pub(crate) mod window;
 
 /// What a backend can execute.
 ///
@@ -240,22 +244,524 @@ impl fmt::Display for Support {
     }
 }
 
+/// Which engine a plan segment runs on.
+///
+/// A plan fixes the provider per segment at build time, from a
+/// [`SegmentProvider`]'s answer. This is plan data, not a runtime `match`: the
+/// forward walks the plan and calls the engine the plan already chose.
+///
+/// [`SegmentEngine::Scalar`] always exists. [`SegmentEngine::OneDnn`] is only
+/// produced when the `cpu-onednn` feature is compiled in; a plan that names it
+/// in a build without that feature is rejected by the session, never silently
+/// executed by the other engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub enum SegmentEngine {
+    /// The portable scalar kernels in [`crate::inference::runtime::kernels`]
+    /// (and, for the forty legacy ids, `backend::cpu::kernels`).
+    #[default]
+    Scalar,
+    /// The optional oneDNN CPU engine (`cpu-onednn`).
+    OneDnn,
+}
+
+impl SegmentEngine {
+    /// Stable lowercase name used in diagnostics and plan reports.
+    pub const fn name(self) -> &'static str {
+        match self {
+            SegmentEngine::Scalar => "scalar",
+            SegmentEngine::OneDnn => "onednn",
+        }
+    }
+}
+
+impl fmt::Display for SegmentEngine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// One concrete operand of a candidate segment: extents, element type and
+/// whether its bytes exist before the first forward.
+///
+/// Shapes rather than tensors, because the planner runs before an arena
+/// exists. A provider answers from these values and the op's [`OpParams`]
+/// alone, so its claim is reproducible from the plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentOperand {
+    /// Fully static extents, outermost first.
+    pub shape: Shape,
+    /// Element type.
+    pub dtype: DType,
+    /// `true` when the slot is read-only model data (an initializer or a
+    /// folded `Constant`), i.e. its bytes exist at plan time and never change.
+    ///
+    /// A provider that prepacks an operand once, before the first forward,
+    /// must require this: an operand produced by an earlier segment has no
+    /// bytes yet and would be silently preprocessed as zeros.
+    pub constant: bool,
+}
+
+/// A provider's answer about one candidate segment.
+///
+/// The planner offers every segment to the provider once, before any memory is
+/// allocated or any primitive is created. The three answers are deliberately
+/// distinct: an op a provider never implements is not a *fallback*, it is
+/// simply outside the provider's vocabulary, and reporting every elementwise
+/// node as a fallback would drown the declaration-vs-shape distinction the
+/// report exists for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Claim {
+    /// The provider will execute exactly this segment.
+    Accepted,
+    /// The op is outside this provider's vocabulary. The planner assigns the
+    /// scalar engine and records nothing.
+    NotMine,
+    /// The op is one this provider implements, but this concrete segment is
+    /// outside its subset (rank, dtype, padding mode, a dynamic operand, ...).
+    ///
+    /// The reason is recorded in
+    /// [`crate::inference::runtime::Plan::fallbacks`], and the segment runs on
+    /// the scalar kernels.
+    Declined(String),
+}
+
+/// An elementwise activation a fused segment folds into its producer.
+///
+/// Every variant is expressible as a oneDNN eltwise post-op, and every variant
+/// has a scalar definition here ([`Activation::apply`]) that is the *same*
+/// expression the unfused scalar kernel evaluates, element for element. A fused
+/// scalar segment is therefore bit-identical to the unfused chain, which is
+/// what makes the scalar engine a usable oracle for fusion.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Activation {
+    /// `max(x, 0)` with the `f32::max` rule the legacy `Relu` kernel documents
+    /// (`Relu(NaN)` is `0`).
+    Relu,
+    /// `min(max(x, low), high)`, the ONNX `Clip`, in that evaluation order.
+    Clip {
+        /// Inclusive lower bound.
+        low: f32,
+        /// Inclusive upper bound.
+        high: f32,
+    },
+    /// `1 / (1 + exp(-x))`.
+    Sigmoid,
+    /// `tanh(x)`.
+    Tanh,
+    /// Exact (`erf`) GELU: `0.5*x*(1+erf(x/sqrt(2)))`, evaluated in `f64` and
+    /// rounded once, exactly as the legacy `Gelu` kernel does.
+    Gelu,
+    /// `x * sigmoid(x)`, the SiLU / swish ONNX exporters write as
+    /// `Mul(x, Sigmoid(x))`.
+    Swish,
+}
+
+impl Activation {
+    /// Stable lowercase name used in diagnostics and the fusion report.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Activation::Relu => "relu",
+            Activation::Clip { .. } => "clip",
+            Activation::Sigmoid => "sigmoid",
+            Activation::Tanh => "tanh",
+            Activation::Gelu => "gelu",
+            Activation::Swish => "swish",
+        }
+    }
+
+    /// The graph op this activation stands for.
+    pub const fn op(self) -> OpId {
+        match self {
+            Activation::Relu => OpId::Relu,
+            Activation::Clip { .. } => OpId::Clip,
+            Activation::Sigmoid => OpId::Sigmoid,
+            Activation::Tanh => OpId::Tanh,
+            Activation::Gelu => OpId::Gelu,
+            Activation::Swish => OpId::Sigmoid,
+        }
+    }
+
+    /// The scalar definition, identical to the unfused scalar kernel.
+    ///
+    /// `Swish` is `x * (1 / (1 + exp(-x)))`: the sigmoid is evaluated first and
+    /// multiplied afterwards, which is the order the unfused `Sigmoid` then
+    /// `Mul` chain uses.
+    #[inline]
+    pub fn apply(self, x: f32) -> f32 {
+        match self {
+            Activation::Relu => {
+                if x > 0.0 {
+                    x
+                } else {
+                    0.0
+                }
+            }
+            Activation::Clip { low, high } => x.max(low).min(high),
+            Activation::Sigmoid => 1.0 / (1.0 + (-x).exp()),
+            Activation::Tanh => x.tanh(),
+            Activation::Gelu => gelu_erf_f32(x),
+            Activation::Swish => x * (1.0 / (1.0 + (-x).exp())),
+        }
+    }
+}
+
+impl fmt::Display for Activation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Activation::Clip { low, high } => write!(f, "clip({low},{high})"),
+            other => f.write_str(other.name()),
+        }
+    }
+}
+
+/// A recognised chain of graph ops that one segment executes.
+///
+/// The planner (`runtime::fuse`) rewrites a chain into a *single* segment only
+/// when every intermediate value's declared consumers are inside the chain, so
+/// the chain's inputs are the anchor's inputs plus at most one residual
+/// operand, and its output is the last op's output. The segment then reports
+/// the anchor's engine; a provider that cannot execute the fused form answers
+/// [`Claim::NotMine`] or [`Claim::Declined`] and the scalar fused kernel runs
+/// the same arithmetic in the same order.
+///
+/// # Evaluation order
+///
+/// ```text
+/// sum:        dst = anchor(inputs) ; dst = dst + inputs[sum]
+/// activation: dst = activation(dst)
+/// ```
+///
+/// The order is fixed and matches the graph forms the recogniser accepts:
+/// an activation directly on the anchor (`conv -> relu`), a residual add
+/// directly on the anchor (`add(conv, other)` or `relu(add(conv, other))`),
+/// and the ONNX SiLU form (`mul(conv, sigmoid(conv))`, no sum). A residual add
+/// *after* an activation would need the opposite order, which oneDNN's direct
+/// convolution post-ops cannot express (its `sum` must be the first post-op),
+/// so the recogniser does not fuse it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FusedOp {
+    /// The op that does the arithmetic.
+    pub anchor: OpId,
+    /// The folded activation, applied after the sum.
+    pub activation: Option<Activation>,
+    /// Position in the segment's input list of the residual operand, when the
+    /// chain contains an `Add` on the anchor. The operand has the same shape
+    /// and element type as the result.
+    pub sum: Option<usize>,
+    /// The graph ops this segment replaces, in graph order, anchor first.
+    ///
+    /// A chain of length `n` replaces `n` segments; the planner records the
+    /// difference as the fusion's `removed` count.
+    pub chain: Vec<OpId>,
+}
+
+impl FusedOp {
+    /// The number of graph segments this one replaces (`>= 2`).
+    pub fn replaced(&self) -> usize {
+        self.chain.len()
+    }
+
+    /// The segments a fusion removes: one per folded op after the anchor.
+    pub fn removed(&self) -> usize {
+        self.chain.len().saturating_sub(1)
+    }
+
+    /// `true` when the segment reads a residual operand.
+    pub fn has_sum(&self) -> bool {
+        self.sum.is_some()
+    }
+
+    /// A stable compound name, e.g. `conv+swish` or `conv+sum+relu`.
+    pub fn name(&self) -> String {
+        let mut name = self.anchor.name().to_string();
+        if self.sum.is_some() {
+            name.push_str("+sum");
+        }
+        if let Some(activation) = self.activation {
+            name.push('+');
+            name.push_str(activation.name());
+        }
+        name
+    }
+}
+
+impl fmt::Display for FusedOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.name())
+    }
+}
+
+/// A provider's answer about one candidate segment.
+///
+/// Implementations must be pure: the same segment asked twice must get the same
+/// answer, and a claim must not depend on feature tests or process state.
+pub trait SegmentProvider: fmt::Debug {
+    /// The engine this provider claims segments for.
+    fn engine(&self) -> SegmentEngine;
+
+    /// Whether this provider can execute `op` with these concrete operands and
+    /// attributes.
+    ///
+    /// `inputs` and `outputs` are in the op's operand order and carry the
+    /// plan's static shapes. A [`Claim::Declined`] must name the property that
+    /// disqualified the segment (rank, dtype, `ceil_mode`, ...), because that
+    /// string is the plan's fallback report.
+    fn claim(
+        &self,
+        op: OpId,
+        inputs: &[SegmentOperand],
+        outputs: &[SegmentOperand],
+        params: &OpParams,
+    ) -> Claim;
+
+    /// Whether this provider can execute a *fused* segment.
+    ///
+    /// The default body answers [`Claim::NotMine`], which is exactly right for
+    /// a provider that has no fused kernel: the planner still records the
+    /// fusion (the scalar engine implements every fused form) and assigns the
+    /// segment to [`SegmentEngine::Scalar`]. A provider that claims the fused
+    /// form reads `fused.anchor`, `fused.activation` and `fused.sum`; the
+    /// operand shapes are the anchor's operands followed by the residual
+    /// operand, and `outputs` is the segment's single result.
+    fn claim_fused(
+        &self,
+        fused: &FusedOp,
+        inputs: &[SegmentOperand],
+        outputs: &[SegmentOperand],
+        params: &OpParams,
+    ) -> Claim {
+        let _ = (fused, inputs, outputs, params);
+        Claim::NotMine
+    }
+}
+
+/// The provider that claims nothing and leaves every segment scalar.
+///
+/// A plan built with this provider is exactly the plan the v3 runtime shipped
+/// before the oneDNN engine existed: all segments [`SegmentEngine::Scalar`],
+/// no fallbacks, no optional library linked.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScalarOnly;
+
+impl SegmentProvider for ScalarOnly {
+    fn engine(&self) -> SegmentEngine {
+        SegmentEngine::Scalar
+    }
+
+    fn claim(
+        &self,
+        _op: OpId,
+        _inputs: &[SegmentOperand],
+        _outputs: &[SegmentOperand],
+        _params: &OpParams,
+    ) -> Claim {
+        Claim::Accepted
+    }
+}
+
+/// How ONNX `auto_pad` resolves explicit pads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AutoPad {
+    /// `NOTSET`: `pads` is used verbatim.
+    #[default]
+    NotSet,
+    /// `SAME_UPPER`: total padding is split with the extra element at the end.
+    SameUpper,
+    /// `SAME_LOWER`: total padding is split with the extra element at the start.
+    SameLower,
+    /// `VALID`: no padding, and the window must fit.
+    Valid,
+}
+
+impl AutoPad {
+    /// Stable lowercase name used in diagnostics.
+    pub const fn name(self) -> &'static str {
+        match self {
+            AutoPad::NotSet => "notset",
+            AutoPad::SameUpper => "same_upper",
+            AutoPad::SameLower => "same_lower",
+            AutoPad::Valid => "valid",
+        }
+    }
+}
+
+/// Resampling mode of [`OpId::Resize`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResizeMode {
+    /// Nearest-neighbour sampling.
+    #[default]
+    Nearest,
+    /// Linear (bilinear in the 4-D contract) interpolation.
+    Linear,
+    /// Cubic interpolation. Imported so the importer can name the node, but
+    /// shape inference and execution reject it.
+    Cubic,
+}
+
+impl ResizeMode {
+    /// Stable lowercase name used in diagnostics.
+    pub const fn name(self) -> &'static str {
+        match self {
+            ResizeMode::Nearest => "nearest",
+            ResizeMode::Linear => "linear",
+            ResizeMode::Cubic => "cubic",
+        }
+    }
+}
+
+/// ONNX `coordinate_transformation_mode` of a `Resize`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CoordinateTransformationMode {
+    /// `half_pixel`, the ONNX default.
+    #[default]
+    HalfPixel,
+    /// `pytorch_half_pixel`.
+    PytorchHalfPixel,
+    /// `align_corners`.
+    AlignCorners,
+    /// `asymmetric`.
+    Asymmetric,
+    /// `tf_crop_and_resize`: an ROI crop, which this runtime does not represent.
+    TfCropAndResize,
+}
+
+impl CoordinateTransformationMode {
+    /// Stable lowercase name used in diagnostics.
+    pub const fn name(self) -> &'static str {
+        match self {
+            CoordinateTransformationMode::HalfPixel => "half_pixel",
+            CoordinateTransformationMode::PytorchHalfPixel => "pytorch_half_pixel",
+            CoordinateTransformationMode::AlignCorners => "align_corners",
+            CoordinateTransformationMode::Asymmetric => "asymmetric",
+            CoordinateTransformationMode::TfCropAndResize => "tf_crop_and_resize",
+        }
+    }
+}
+
+/// ONNX `nearest_mode` of a nearest-neighbour `Resize`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NearestMode {
+    /// `round_prefer_floor`, the ONNX default.
+    #[default]
+    RoundPreferFloor,
+    /// `round_prefer_ceil`.
+    RoundPreferCeil,
+    /// `floor`.
+    Floor,
+    /// `ceil`.
+    Ceil,
+}
+
+impl NearestMode {
+    /// Stable lowercase name used in diagnostics.
+    pub const fn name(self) -> &'static str {
+        match self {
+            NearestMode::RoundPreferFloor => "round_prefer_floor",
+            NearestMode::RoundPreferCeil => "round_prefer_ceil",
+            NearestMode::Floor => "floor",
+            NearestMode::Ceil => "ceil",
+        }
+    }
+}
+
+/// Boundary mode of [`OpId::Pad`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PadMode {
+    /// `constant`: pad with [`OpParams::pad_value`].
+    #[default]
+    Constant,
+    /// `reflect`: mirror the edge samples.
+    Reflect,
+    /// `edge`: repeat the edge sample.
+    Edge,
+    /// `wrap`: parseable, but rejected by shape inference and execution.
+    Wrap,
+}
+
+impl PadMode {
+    /// Stable lowercase name used in diagnostics.
+    pub const fn name(self) -> &'static str {
+        match self {
+            PadMode::Constant => "constant",
+            PadMode::Reflect => "reflect",
+            PadMode::Edge => "edge",
+            PadMode::Wrap => "wrap",
+        }
+    }
+}
+
 /// Attributes of one op invocation.
 ///
-/// This is the alpha attribute carrier. It only holds the attributes the alpha
-/// CPU reference needs; FN3-10 (#56) replaces it with op-specific typed
-/// payloads when the execution-plan format is defined. Adding a field here is
-/// cheap, but an op must reject a field it does not understand rather than
-/// ignore it.
+/// This is the one attribute carrier shared by the importer, the typed IR, the
+/// planner and the backends. An op reads only the fields its contract names and
+/// must reject a field it does not define rather than ignore it.
+///
+/// # Compatibility
+///
+/// Every field is `Default`-constructible and neutral at its default. The
+/// version-2 artifact (`FNN3ART2`) stores every field below, including the
+/// five enums, so a typed graph round-trips without losing a window, a
+/// resampling mode or a TopK attribute.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct OpParams {
-    /// Axes for transpose/reduce/softmax/concat/split/unsqueeze. Negative
-    /// values count from the end of the rank.
+    /// Axes for transpose/reduce/softmax/concat/split/unsqueeze/pad/slice.
+    /// Negative values count from the end of the rank.
     pub axes: Vec<i64>,
     /// Keep reduced axes as extent 1.
     pub keep_dims: bool,
     /// Numerical floor for normalization layers.
     pub epsilon: f32,
+    /// Sliding-window or convolution step per spatial axis.
+    pub strides: Vec<i64>,
+    /// Explicit padding, ONNX order: every begin extent, then every end
+    /// extent. Negative values crop.
+    pub pads: Vec<i64>,
+    /// Kernel dilation per spatial axis.
+    pub dilations: Vec<i64>,
+    /// Kernel extent per spatial axis (`Conv`, `MaxPool`, `AveragePool`).
+    pub kernel_shape: Vec<i64>,
+    /// Convolution groups. Zero means "unset", which is one group.
+    pub group: i64,
+    /// Round a pooling window extent up instead of down.
+    pub ceil_mode: bool,
+    /// Count padded cells in an average-pool denominator.
+    pub count_include_pad: bool,
+    /// How an op resolves explicit padding.
+    pub auto_pad: AutoPad,
+    /// Resampling mode of a `Resize`.
+    pub resize_mode: ResizeMode,
+    /// Coordinate transformation of a `Resize`.
+    pub coordinate_transformation_mode: CoordinateTransformationMode,
+    /// Nearest-neighbour rounding of a `Resize`.
+    pub nearest_mode: NearestMode,
+    /// Constant per-axis `Resize` scales, one per axis including N and C.
+    pub resize_scales: Vec<f32>,
+    /// Constant explicit `Resize` output extents, one per axis.
+    pub resize_sizes: Vec<i64>,
+    /// Boundary mode of a `Pad`.
+    pub pad_mode: PadMode,
+    /// Fill value of a constant `Pad`.
+    pub pad_value: f32,
+    /// Inclusive lower clamp bound of a `Clip`, when one was supplied.
+    pub clip_min: Option<f32>,
+    /// Inclusive upper clamp bound of a `Clip`, when one was supplied.
+    pub clip_max: Option<f32>,
+    /// Axis of a `TopK`, already normalized to `0..rank` by the importer.
+    pub topk_axis: i64,
+    /// Number of elements a `TopK` keeps. Negative means "not folded".
+    pub topk_k: i64,
+    /// `TopK` keeps the largest elements when `true`.
+    pub largest: bool,
+    /// `TopK` outputs its indices in sorted order when `true`.
+    pub sorted: bool,
+    /// Explicit `Split` sizes, one per output. Empty means an equal split.
+    pub split_sizes: Vec<i64>,
+    /// Constant `Slice` starts, one per sliced axis.
+    pub slice_starts: Vec<i64>,
+    /// Constant `Slice` ends, one per sliced axis (clamped, ONNX semantics).
+    pub slice_ends: Vec<i64>,
+    /// `Slice` steps, one per sliced axis. Empty means all ones.
+    pub slice_steps: Vec<i64>,
 }
 
 impl OpParams {
@@ -279,6 +785,121 @@ impl OpParams {
     /// Builder: set `epsilon`.
     pub fn with_epsilon(mut self, epsilon: f32) -> OpParams {
         self.epsilon = epsilon;
+        self
+    }
+
+    /// Builder: set `strides`.
+    pub fn with_strides(mut self, strides: impl IntoIterator<Item = i64>) -> OpParams {
+        self.strides = strides.into_iter().collect();
+        self
+    }
+
+    /// Builder: set explicit `pads` (begin extents, then end extents).
+    pub fn with_pads(mut self, pads: impl IntoIterator<Item = i64>) -> OpParams {
+        self.pads = pads.into_iter().collect();
+        self
+    }
+
+    /// Builder: set `dilations`.
+    pub fn with_dilations(mut self, dilations: impl IntoIterator<Item = i64>) -> OpParams {
+        self.dilations = dilations.into_iter().collect();
+        self
+    }
+
+    /// Builder: set `kernel_shape`.
+    pub fn with_kernel_shape(mut self, kernel_shape: impl IntoIterator<Item = i64>) -> OpParams {
+        self.kernel_shape = kernel_shape.into_iter().collect();
+        self
+    }
+
+    /// Builder: set `group`.
+    pub fn with_group(mut self, group: i64) -> OpParams {
+        self.group = group;
+        self
+    }
+
+    /// Builder: set `ceil_mode`.
+    pub fn with_ceil_mode(mut self, ceil_mode: bool) -> OpParams {
+        self.ceil_mode = ceil_mode;
+        self
+    }
+
+    /// Builder: set `count_include_pad`.
+    pub fn with_count_include_pad(mut self, count_include_pad: bool) -> OpParams {
+        self.count_include_pad = count_include_pad;
+        self
+    }
+
+    /// Builder: set `auto_pad`.
+    pub fn with_auto_pad(mut self, auto_pad: AutoPad) -> OpParams {
+        self.auto_pad = auto_pad;
+        self
+    }
+
+    /// Builder: set every `Resize` attribute.
+    pub fn with_resize(
+        mut self,
+        mode: ResizeMode,
+        coordinate_transformation_mode: CoordinateTransformationMode,
+        nearest_mode: NearestMode,
+    ) -> OpParams {
+        self.resize_mode = mode;
+        self.coordinate_transformation_mode = coordinate_transformation_mode;
+        self.nearest_mode = nearest_mode;
+        self
+    }
+
+    /// Builder: set the folded constant `Resize` scales.
+    pub fn with_resize_scales(mut self, scales: impl IntoIterator<Item = f32>) -> OpParams {
+        self.resize_scales = scales.into_iter().collect();
+        self
+    }
+
+    /// Builder: set the folded constant `Resize` sizes.
+    pub fn with_resize_sizes(mut self, sizes: impl IntoIterator<Item = i64>) -> OpParams {
+        self.resize_sizes = sizes.into_iter().collect();
+        self
+    }
+
+    /// Builder: set the `Pad` mode and fill value.
+    pub fn with_pad(mut self, mode: PadMode, value: f32) -> OpParams {
+        self.pad_mode = mode;
+        self.pad_value = value;
+        self
+    }
+
+    /// Builder: set the inclusive `Clip` bounds.
+    pub fn with_clip(mut self, clip_min: Option<f32>, clip_max: Option<f32>) -> OpParams {
+        self.clip_min = clip_min;
+        self.clip_max = clip_max;
+        self
+    }
+
+    /// Builder: set every `TopK` attribute.
+    pub fn with_topk(mut self, axis: i64, k: i64, largest: bool, sorted: bool) -> OpParams {
+        self.topk_axis = axis;
+        self.topk_k = k;
+        self.largest = largest;
+        self.sorted = sorted;
+        self
+    }
+
+    /// Builder: set explicit `Split` sizes.
+    pub fn with_split_sizes(mut self, sizes: impl IntoIterator<Item = i64>) -> OpParams {
+        self.split_sizes = sizes.into_iter().collect();
+        self
+    }
+
+    /// Builder: set the constant `Slice` bounds.
+    pub fn with_slice(
+        mut self,
+        starts: impl IntoIterator<Item = i64>,
+        ends: impl IntoIterator<Item = i64>,
+        steps: impl IntoIterator<Item = i64>,
+    ) -> OpParams {
+        self.slice_starts = starts.into_iter().collect();
+        self.slice_ends = ends.into_iter().collect();
+        self.slice_steps = steps.into_iter().collect();
         self
     }
 }

@@ -334,6 +334,13 @@ pub enum ImportProblemKind {
         /// What is unnamed, e.g. `"initializer"`.
         what: &'static str,
     },
+    /// A caller-supplied shape binding does not match the model.
+    ShapeBinding {
+        /// The graph input name as the caller spelled it.
+        input: String,
+        /// Why the binding cannot be applied.
+        detail: String,
+    },
     /// A node was given the wrong number of operands.
     OperandCount {
         /// What the operator requires.
@@ -495,6 +502,10 @@ impl fmt::Display for ImportProblemKind {
             ImportProblemKind::MissingName { what } => {
                 write!(f, "the {what} has no name; every value must be addressable")
             }
+            ImportProblemKind::ShapeBinding { input, detail } => write!(
+                f,
+                "the shape binding for graph input `{input}` cannot be applied: {detail}"
+            ),
             ImportProblemKind::OperandCount { expected, found } => write!(
                 f,
                 "the operator takes {expected} operands, the node supplies {found}"

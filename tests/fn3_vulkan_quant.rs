@@ -287,7 +287,7 @@ struct WeightKey {
 impl WeightKey {
     fn of_view(view: &TensorView<'_>) -> Option<WeightKey> {
         Some(WeightKey {
-            identity: view.storage().identity(),
+            identity: view.storage()?.identity(),
             offset: view.meta().byte_offset().ok()?,
             len: view.meta().byte_len().ok()?,
         })

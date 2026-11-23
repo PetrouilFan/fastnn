@@ -15,6 +15,7 @@
 //! device.rs       DeviceId, DeviceRequest, resolution (no silent fallback)
 //! storage.rs      AlignedBuffer (64-byte), Arc-shared Storage
 //! tensor.rs       TensorMeta, TensorView, TensorMut, Tensor
+//! ir/             typed graph: DimExpr, TensorType, SourceLoc, Graph
 //! ops/            OpId registry with stable discriminants
 //! backend/        Backend trait, Capabilities, Support; backend/cpu/ reference
 //! model/          ExecutionPlan, ModelWeights, PreparedModel, Session
@@ -52,27 +53,42 @@
 //! - [`Fn3Error`]: the only error type, with actionable context.
 //! - `tests/fn3_contracts.rs`: pinned behaviour downstream workers rely on.
 
+pub mod api;
 pub mod backend;
 pub mod cli;
 pub mod device;
-pub(crate) mod digest;
+pub mod digest;
 pub mod dtype;
 pub mod error;
 pub mod import;
+pub mod ir;
 pub mod model;
 pub mod ops;
 pub mod quant;
+pub mod runtime;
 pub mod shape;
 pub mod storage;
 pub mod tensor;
 
+pub use api::{
+    doctor, doctor_with_shapes, inspect, load, prepare, prepare_with_shapes, DoctorIssue,
+    DoctorReport, DtypeUse, DynamicSymbolUse, PrepareReport, TargetPlanReport,
+};
 pub use backend::cpu::CpuBackend;
 pub use backend::{Backend, Capabilities, CapabilityFeatures, OpParams, Support};
 pub use device::{DeviceId, DeviceRequest, DeviceResolveError, PhysicalDeviceId};
 pub use dtype::DType;
 pub use error::{Fn3Error, Fn3Result};
+pub use model::format::{
+    Artifact, ArtifactHeader, ArtifactInspection, PlanSummary, Precision, PreparedArtifact,
+    SectionHash, SectionInfo,
+};
 pub use model::{ExecutionPlan, Instruction, ModelWeights, PreparedModel, Session};
 pub use ops::OpId;
+pub use runtime::{
+    Arena as RuntimeArena, HostTensor, Plan as RuntimePlan, Segment, SegmentOp,
+    Session as RuntimeSession, SessionThreads, Slot, SlotId, SlotSource, Threading,
+};
 pub use shape::{DimBound, LiveDims, Shape, ShapeEnvelope, Strides, Symbol};
 pub use storage::{AlignedBuffer, Storage};
 pub use tensor::{Tensor, TensorMeta, TensorMut, TensorView};

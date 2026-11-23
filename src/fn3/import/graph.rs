@@ -47,9 +47,11 @@
 //! Nothing iterates a hash map. The same bytes therefore produce the same value
 //! table, the same node order and the same weight layout.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::inference::backend::OpParams;
+use crate::inference::backend::{
+    AutoPad, CoordinateTransformationMode, NearestMode, OpParams, PadMode, ResizeMode,
+};
 use crate::inference::dtype::DType;
 use crate::inference::model::{KvCacheConfig, KvCacheLayout};
 use crate::inference::ops::OpId;
@@ -78,15 +80,17 @@ pub const MAX_IR_VERSION: i64 = 10;
 
 /// Smallest opset this importer implements.
 ///
-/// Opset 13 moved `Squeeze`/`Unsqueeze`/`Split`/`Slice` axes and split sizes
-/// from attributes to inputs; this importer implements the input form only.
-pub const MIN_OPSET: i64 = 13;
+/// Opset 12 is the last revision where `Split` carries its sizes in the `split`
+/// attribute; opset 13 moved them to an input. Both forms are implemented.
+/// `Squeeze`/`Unsqueeze`/`Slice` are read in their opset-13 input form (Slice
+/// moved to inputs in opset 10).
+pub const MIN_OPSET: i64 = 12;
 
 /// Largest opset this importer implements.
 ///
 /// Opset 18 moved `ReduceMean` axes from an attribute to an input, which this
 /// mapping would silently ignore. The pinned model is opset 14.
-pub const MAX_OPSET: i64 = 17;
+pub const MAX_OPSET: i64 = 22;
 
 /// Position of one value in [`GraphIr`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -387,12 +391,12 @@ impl GraphIr {
     /// Build a graph from parts a caller already validated.
     ///
     /// The importer builds a `GraphIr` while decoding an ONNX file. A reader of
-    /// a serialized model ([`crate::inference::model::format::PreparedGraph`], which
-    /// validates the same invariants) needs the identical container without an
+    /// a serialized model ([`crate::inference::ir::Graph`], which validates the
+    /// same invariants) needs the identical container without an
     /// ONNX file present, and private fields make that otherwise impossible.
     /// This is the additive seam those callers use; it performs no validation,
     /// so the caller owns the invariants listed on
-    /// [`crate::inference::model::format::PreparedGraph`].
+    /// [`crate::inference::ir::Graph`].
     pub fn from_parts(
         values: Vec<ValueInfo>,
         nodes: Vec<GraphNode>,
@@ -562,7 +566,8 @@ pub struct ImportSummary {
     pub values: usize,
     /// `GraphProto.initializer` entries.
     pub initializers: usize,
-    /// Attribute constants lifted into the weight table.
+    /// Values beyond the initializers that were lifted into the weight table:
+    /// `ConstantOfShape` fill values and folded `Constant` nodes.
     pub attribute_constants: usize,
     /// Total weight payload bytes.
     pub weight_bytes: u64,
@@ -614,6 +619,36 @@ pub struct ModelProvenance {
     pub graph_name: String,
 }
 
+/// The graph-level result of one import, before architecture detection.
+///
+/// [`Builder::decode`] produces it, [`Builder::run`] adds decoder geometry and
+/// [`super::import_onnx_graph`] adds the typed IR. Keeping the two stages
+/// separate is what lets a CNN — which has no decoder interface — import at
+/// all, without relaxing the decoder contract for the models that do.
+pub(crate) struct GraphParts {
+    /// ONNX IR version of the source.
+    pub(crate) ir_version: i64,
+    /// Exporter name.
+    pub(crate) producer: String,
+    /// Exporter version.
+    pub(crate) producer_version: String,
+    /// Default-domain opset.
+    pub(crate) opset: OpsetImport,
+    /// Source graph name.
+    pub(crate) graph_name: String,
+    /// Values, nodes and the graph interface.
+    pub(crate) graph: GraphIr,
+    /// Weight table, in file order.
+    pub(crate) weights: WeightSet,
+    /// Counts and censuses.
+    pub(crate) summary: ImportSummary,
+    /// Declared-shape warnings.
+    pub(crate) warnings: Vec<ImportWarning>,
+    /// Per-node attributes the typed IR reads, when they differ from the
+    /// [`GraphNode::params`] the artifact format serializes.
+    pub(crate) typed_params: Vec<crate::inference::backend::OpParams>,
+}
+
 /// A validated ONNX model, ready for a planner.
 ///
 /// Immutable after construction. Nothing here borrows the model file: names,
@@ -652,7 +687,7 @@ impl ModelImport {
         geometry: DecoderGeometry,
         provenance: ModelProvenance,
     ) -> ModelImport {
-        let summary = summarize(&graph, &weights);
+        let summary = summarize(&graph, &weights, None, 0);
         ModelImport {
             ir_version: provenance.ir_version,
             producer: provenance.producer,
@@ -741,6 +776,8 @@ enum Atom {
     Int(i64),
     /// A known boolean.
     Bool(bool),
+    /// A known single-precision float.
+    Float(f32),
     /// A symbolic extent used as an integer.
     Dim(Dim),
     /// A value that is not statically known.
@@ -752,6 +789,14 @@ impl Atom {
         match self {
             Atom::Int(value) => Some(*value),
             Atom::Dim(Dim::Known(extent)) => i64::try_from(*extent).ok(),
+            _ => None,
+        }
+    }
+
+    fn as_f32(&self) -> Option<f32> {
+        match self {
+            Atom::Float(value) => Some(*value),
+            Atom::Int(value) => Some(*value as f32),
             _ => None,
         }
     }
@@ -774,6 +819,7 @@ impl Atom {
         match self {
             Atom::Int(value) => value.to_string(),
             Atom::Bool(value) => value.to_string(),
+            Atom::Float(value) => value.to_string(),
             Atom::Dim(dim) => dim.to_string(),
             Atom::Unknown => "?".to_string(),
         }
@@ -832,6 +878,20 @@ fn atom_sub(left: &Atom, right: &Atom) -> Atom {
 fn atom_mul(left: &Atom, right: &Atom) -> Atom {
     match (left.as_i64(), right.as_i64()) {
         (Some(a), Some(b)) => Atom::Int(a.wrapping_mul(b)),
+        _ => Atom::Unknown,
+    }
+}
+
+/// `left / right` on tracked elements, with integer truncation.
+///
+/// ONNX `Div` on two integers truncates toward zero, which is Rust's `/`; a
+/// float operand or a zero divisor stays [`Atom::Unknown`] rather than
+/// guessing. The pinned YOLOv8 export computes a Slice bound this way
+/// (`(dim + 1) / 2`), so folding it is what keeps that Slice statically shaped.
+fn atom_div(left: &Atom, right: &Atom) -> Atom {
+    match (left.as_i64(), right.as_i64()) {
+        (Some(_), Some(0)) => Atom::Unknown,
+        (Some(a), Some(b)) => Atom::Int(a / b),
         _ => Atom::Unknown,
     }
 }
@@ -1046,7 +1106,18 @@ impl PlannedValue {
 struct PlannedOp {
     op: OpId,
     operands: Vec<Operand>,
+    /// Attributes the imported [`GraphNode`] carries. They must survive the
+    /// 3.0 artifact format, which stores `axes`, `keep_dims` and `epsilon`
+    /// only, so a field the format does not carry goes in `typed` instead.
     params: OpParams,
+    /// Attributes the typed IR reads when they differ from `params`.
+    ///
+    /// `Reshape`, `Slice` and `Split` need their constant operands to be
+    /// visible to [`crate::inference::ir::infer_shapes`], which reads
+    /// [`OpParams`] and never a tensor payload. Putting those bounds in
+    /// `params` would also change what the decoder's artifact round trip
+    /// stores, so they ride here instead and only the typed graph sees them.
+    typed: Option<OpParams>,
     outputs: Vec<PlannedValue>,
 }
 
@@ -1061,6 +1132,7 @@ impl PlannedOp {
             op,
             operands,
             params,
+            typed: None,
             outputs: vec![output],
         }]
     }
@@ -1543,6 +1615,41 @@ impl<'a, 'b> Attrs<'a, 'b> {
         }
     }
 
+    /// A `FLOATS` attribute.
+    fn floats(&mut self, name: &str) -> Result<Option<&'b [f32]>, PlanError> {
+        let Some(attribute) = self.take(name) else {
+            return Ok(None);
+        };
+        match &attribute.value {
+            proto::AttributeValue::Floats(values) => Ok(Some(values)),
+            other => {
+                let error = self.kind_error(name, "FLOATS", other.kind_name());
+                Err(error)
+            }
+        }
+    }
+
+    /// A `STRING` attribute, which ONNX encodes as raw bytes.
+    fn string(&mut self, name: &str) -> Result<Option<&'b str>, PlanError> {
+        let Some(attribute) = self.take(name) else {
+            return Ok(None);
+        };
+        match &attribute.value {
+            proto::AttributeValue::String(bytes) => {
+                std::str::from_utf8(bytes).map(Some).map_err(|_| {
+                    ImportProblemKind::UnsupportedAttribute {
+                        attribute: name.to_string(),
+                        detail: "the value is not valid UTF-8".to_string(),
+                    }
+                })
+            }
+            other => {
+                let error = self.kind_error(name, "STRING", other.kind_name());
+                Err(error)
+            }
+        }
+    }
+
     /// A `TENSOR` attribute.
     fn tensor(&mut self, name: &str) -> Result<Option<&'b proto::Tensor<'a>>, PlanError> {
         let Some(attribute) = self.take(name) else {
@@ -1583,7 +1690,7 @@ fn accepted_attributes(op_type: &str) -> &'static str {
         "Reshape" => "allowzero",
         "Flatten" => "axis",
         "Concat" => "axis",
-        "Split" => "axis, num_outputs",
+        "Split" => "axis, num_outputs, split",
         "Slice" => "(none)",
         "Squeeze" | "Unsqueeze" => "(none)",
         "Shape" => "start, end",
@@ -1602,6 +1709,21 @@ fn accepted_attributes(op_type: &str) -> &'static str {
         "Softmax" => "axis",
         "ReduceMean" | "ReduceSum" => "axes, keepdims",
         "ArgMax" => "axis, keepdims, select_last_index",
+        "Conv" => "auto_pad, dilations, group, kernel_shape, pads, strides",
+        "MaxPool" => "auto_pad, ceil_mode, dilations, kernel_shape, pads, storage_order, strides",
+        "AveragePool" => {
+            "auto_pad, ceil_mode, count_include_pad, dilations, kernel_shape, pads, strides"
+        }
+        "GlobalAveragePool" => "(none)",
+        "BatchNormalization" => "epsilon, momentum, training_mode",
+        "Resize" => {
+            "coordinate_transformation_mode, cubic_coeff_a, exclude_outside, \
+             extrapolation_value, mode, nearest_mode"
+        }
+        "Pad" => "mode, pads, value",
+        "Clip" => "min, max",
+        "Sigmoid" | "Max" | "Min" => "(none)",
+        "TopK" => "axis, k, largest, sorted",
         _ => "(none)",
     }
 }
@@ -1886,23 +2008,68 @@ fn build_weight(
         .map_err(|error| shape_problem(error.to_string()))
 }
 
+/// Build a weight from an attribute payload the importer synthesized.
+fn attribute_weight(
+    name: &str,
+    dtype: DType,
+    dims: Vec<u64>,
+    bytes: Vec<u8>,
+) -> Result<WeightTensor, PlanError> {
+    if dims.len() > MAX_RANK {
+        return Err(ImportProblemKind::LimitExceeded {
+            what: "constant rank",
+            requested: dims.len() as u64,
+            limit: MAX_RANK as u64,
+        });
+    }
+    WeightTensor::new(
+        name,
+        dtype,
+        Shape::from_dims(dims),
+        bytes,
+        WeightSource::AttributeConstant,
+    )
+    .map_err(|error| shape_problem(error.to_string()))
+}
+
 /// The tracked form of a weight's value, so shape arithmetic can fold through
 /// initializers.
 fn weight_abstract(weight: &WeightTensor) -> Abstract {
     let shape = ValueShape::from_dims(weight.shape().dims().iter().copied());
-    if weight.dtype() == DType::I64 && weight.shape().numel().unwrap_or(0) <= 4096 {
-        let items: Vec<Atom> = weight
-            .bytes()
-            .chunks_exact(8)
-            .map(|chunk| {
-                let mut word = [0u8; 8];
-                word.copy_from_slice(chunk);
-                Atom::Int(i64::from_le_bytes(word))
-            })
-            .collect();
-        return Abstract::values(DType::I64, shape, AtomSeries::from_atoms(items));
+    let elements = weight.shape().numel().unwrap_or(0);
+    if elements > MAX_TRACKED_ELEMENTS as u64 {
+        return Abstract::tensor(weight.dtype(), shape);
     }
-    Abstract::tensor(weight.dtype(), shape)
+    match weight.dtype() {
+        DType::I64 => {
+            let items: Vec<Atom> = weight
+                .bytes()
+                .chunks_exact(8)
+                .map(|chunk| {
+                    let mut word = [0u8; 8];
+                    word.copy_from_slice(chunk);
+                    Atom::Int(i64::from_le_bytes(word))
+                })
+                .collect();
+            Abstract::values(DType::I64, shape, AtomSeries::from_atoms(items))
+        }
+        // Float constants are tracked so `Resize` scales, `Clip` bounds and
+        // `Pad` fill values can be folded at import; a data initializer of the
+        // same dtype usually exceeds the sequence budget and stays a tensor.
+        DType::F32 => {
+            let items: Vec<Atom> = weight
+                .bytes()
+                .chunks_exact(4)
+                .map(|chunk| {
+                    let mut word = [0u8; 4];
+                    word.copy_from_slice(chunk);
+                    Atom::Float(f32::from_le_bytes(word))
+                })
+                .collect();
+            Abstract::values(DType::F32, shape, AtomSeries::from_atoms(items))
+        }
+        _ => Abstract::tensor(weight.dtype(), shape),
+    }
 }
 
 /// A planned value from a `PlannedValue`.
@@ -2058,17 +2225,28 @@ fn plan_reshape(
         });
     }
     let output = resolve_reshape(&shape, &target)?;
+    // The typed IR resolves a reshape from `OpParams::axes`; export the raw
+    // ONNX target (0 copies, -1 infers) when every element is a constant. A
+    // symbolic target cannot be encoded as `i64` and stays runtime-only.
+    let typed_target: Option<Vec<i64>> = target
+        .items
+        .as_ref()
+        .and_then(|items| items.iter().map(Atom::as_i64).collect::<Option<Vec<i64>>>());
     let series = series_of(&ins[0]).cloned();
     let value = match series {
         Some(series) => PlannedValue::values(dtype, output, series),
         None => PlannedValue::tensor(dtype, output),
     };
-    Ok(PlannedOp::single(
+    let mut operation = PlannedOp::single(
         OpId::Reshape,
         vec![Operand::Input(0), Operand::Input(1)],
         OpParams::new(),
         value,
-    ))
+    );
+    if let Some(target) = typed_target {
+        operation[0].typed = Some(OpParams::new().with_axes(target));
+    }
+    Ok(operation)
 }
 
 /// `Flatten(data, axis)`.
@@ -2421,12 +2599,36 @@ fn plan_slice(
         Some(atoms) => PlannedValue::values(dtype, output, AtomSeries::from_atoms(atoms)),
         None => PlannedValue::tensor(dtype, output),
     };
-    Ok(PlannedOp::single(
+    // The typed IR reads slice bounds from `OpParams`, never from a payload, so
+    // export them when every bound is a constant. A symbolic bound leaves the
+    // node unrepresentable to the typed pass, which reports it by name.
+    let typed = typed_slice_params(&starts, &ends, &axes, &steps);
+    let mut operation = PlannedOp::single(
         OpId::Slice,
         (0..ins.len()).map(Operand::Input).collect(),
         OpParams::new(),
         value,
-    ))
+    );
+    if let Some(typed) = typed {
+        operation[0].typed = Some(typed);
+    }
+    Ok(operation)
+}
+
+/// `OpParams` for a `Slice` whose bounds are all constants.
+fn typed_slice_params(
+    starts: &[Atom],
+    ends: &[Atom],
+    axes: &[i64],
+    steps: &[i64],
+) -> Option<OpParams> {
+    let starts: Vec<i64> = starts.iter().map(Atom::as_i64).collect::<Option<_>>()?;
+    let ends: Vec<i64> = ends.iter().map(Atom::as_i64).collect::<Option<_>>()?;
+    Some(
+        OpParams::new()
+            .with_axes(axes.to_vec())
+            .with_slice(starts, ends, steps.to_vec()),
+    )
 }
 
 /// The extent of one sliced axis.
@@ -2896,11 +3098,12 @@ fn plan_binary(
     }
     let shape = broadcast_shapes(&left_shape, &right_shape)?;
     let value = match (series_of(&ins[0]), series_of(&ins[1])) {
-        (Some(left), Some(right)) if op != OpId::Div && op != OpId::Pow => {
+        (Some(left), Some(right)) if !matches!(op, OpId::Pow | OpId::Maximum | OpId::Minimum) => {
             let series = left.zip(right, |left, right| match op {
                 OpId::Add => atom_add(left, right),
                 OpId::Sub => atom_sub(left, right),
                 OpId::Mul => atom_mul(left, right),
+                OpId::Div => atom_div(left, right),
                 _ => Atom::Unknown,
             });
             PlannedValue::values(dtype, shape, series)
@@ -2993,6 +3196,7 @@ fn plan_gemm(
         op: OpId::MatMul,
         operands: vec![Operand::Input(0), Operand::Input(1)],
         params: OpParams::new(),
+        typed: None,
         outputs: vec![PlannedValue::tensor(dtype, shape.clone())],
     }];
     if ins.len() == 3 {
@@ -3007,6 +3211,7 @@ fn plan_gemm(
             op: OpId::Add,
             operands: vec![Operand::Intermediate(0), Operand::Input(2)],
             params: OpParams::new(),
+            typed: None,
             outputs: vec![PlannedValue::tensor(dtype, output)],
         });
     }
@@ -3135,6 +3340,1066 @@ fn plan_argmax(
     ))
 }
 
+// ---------------------------------------------------------------------------
+// Convolution, pooling, normalization and the remaining CNN operators
+// ---------------------------------------------------------------------------
+
+/// Parse the ONNX `auto_pad` attribute.
+fn auto_pad_attribute(attrs: &mut Attrs<'_, '_>) -> Result<AutoPad, PlanError> {
+    let Some(value) = attrs.string("auto_pad")? else {
+        return Ok(AutoPad::NotSet);
+    };
+    match value {
+        "NOTSET" => Ok(AutoPad::NotSet),
+        "SAME_UPPER" => Ok(AutoPad::SameUpper),
+        "SAME_LOWER" => Ok(AutoPad::SameLower),
+        "VALID" => Ok(AutoPad::Valid),
+        other => Err(ImportProblemKind::UnsupportedAttribute {
+            attribute: "auto_pad".to_string(),
+            detail: format!(
+                "`{other}` is not an ONNX auto_pad value; expected NOTSET, SAME_UPPER, \
+                 SAME_LOWER or VALID"
+            ),
+        }),
+    }
+}
+
+/// Parse a per-spatial-axis positive extent list.
+fn positive_extents(values: &[i64], expected: usize, what: &str) -> Result<Vec<u64>, PlanError> {
+    if values.len() != expected {
+        return Err(shape_problem(format!(
+            "{what} has {} extents for a {expected}-axis spatial rank",
+            values.len()
+        )));
+    }
+    let mut extents = Vec::with_capacity(expected);
+    for &value in values {
+        let extent = u64::try_from(value)
+            .ok()
+            .filter(|extent| *extent > 0)
+            .ok_or_else(|| shape_problem(format!("{what} contains the non-positive {value}")))?;
+        extents.push(extent);
+    }
+    Ok(extents)
+}
+
+/// A positive extent list with an ONNX default when it is absent.
+fn positive_extents_or(
+    values: Option<&[i64]>,
+    expected: usize,
+    default: u64,
+    what: &str,
+) -> Result<Vec<u64>, PlanError> {
+    match values {
+        Some(values) => positive_extents(values, expected, what),
+        None => Ok(vec![default; expected]),
+    }
+}
+
+/// Resolve explicit pads, or the pads `auto_pad` derives, as begin/end pairs.
+fn window_pads(
+    auto_pad: AutoPad,
+    explicit: Option<&[i64]>,
+    spatial: usize,
+    input: &[Option<u64>],
+    kernel: &[u64],
+    strides: &[u64],
+    dilations: &[u64],
+    what: &str,
+) -> Result<Vec<(i64, i64)>, PlanError> {
+    match auto_pad {
+        AutoPad::NotSet => {
+            let Some(pads) = explicit else {
+                return Ok(vec![(0, 0); spatial]);
+            };
+            if pads.len() != 2 * spatial {
+                return Err(shape_problem(format!(
+                    "{what} has {} pads for a {spatial}-axis spatial rank; ONNX supplies \
+                     {spatial} begin extents followed by {spatial} end extents",
+                    pads.len()
+                )));
+            }
+            let mut pairs = Vec::with_capacity(spatial);
+            for axis in 0..spatial {
+                let (begin, end) = (pads[axis], pads[spatial + axis]);
+                if begin < 0 || end < 0 {
+                    return Err(shape_problem(format!(
+                        "{what} has the negative pads ({begin}, {end}) on spatial axis {axis}; \
+                         convolution and pooling pads are non-negative"
+                    )));
+                }
+                pairs.push((begin, end));
+            }
+            Ok(pairs)
+        }
+        AutoPad::Valid => {
+            if explicit.is_some() {
+                return Err(shape_problem(format!(
+                    "{what} sets auto_pad = VALID and explicit pads; ONNX forbids combining them"
+                )));
+            }
+            Ok(vec![(0, 0); spatial])
+        }
+        upper @ (AutoPad::SameUpper | AutoPad::SameLower) => {
+            if explicit.is_some() {
+                return Err(shape_problem(format!(
+                    "{what} sets auto_pad = {} and explicit pads; ONNX forbids combining them",
+                    upper.name()
+                )));
+            }
+            let mut pairs = Vec::with_capacity(spatial);
+            for axis in 0..spatial {
+                let Some(extent) = input[axis] else {
+                    return Err(shape_problem(format!(
+                        "{what} uses auto_pad = {} on a symbolic spatial axis {axis}; that \
+                         needs the extent's value",
+                        upper.name()
+                    )));
+                };
+                let effective = dilations[axis] * (kernel[axis] - 1) + 1;
+                let out = extent.div_ceil(strides[axis]);
+                let total =
+                    ((out.saturating_sub(1)) * strides[axis] + effective).saturating_sub(extent);
+                let (begin, end) = if upper == AutoPad::SameUpper {
+                    (total / 2, total - total / 2)
+                } else {
+                    (total - total / 2, total / 2)
+                };
+                pairs.push((
+                    i64::try_from(begin).map_err(|_| {
+                        shape_problem(format!("{what} auto_pad begin extent overflows i64"))
+                    })?,
+                    i64::try_from(end).map_err(|_| {
+                        shape_problem(format!("{what} auto_pad end extent overflows i64"))
+                    })?,
+                ));
+            }
+            Ok(pairs)
+        }
+    }
+}
+
+/// One windowed output extent, or an unproven [`Dim`] for a symbolic input.
+fn window_dim(
+    input: &Dim,
+    kernel: u64,
+    stride: u64,
+    dilation: u64,
+    begin: i64,
+    end: i64,
+    ceil_mode: bool,
+    what: &str,
+) -> Dim {
+    let Some(extent) = input.as_known() else {
+        return Dim::unknown(format!("{what} of {input}"));
+    };
+    Dim::Known(window_extent(
+        extent, kernel, stride, dilation, begin, end, ceil_mode,
+    ))
+}
+
+/// The ONNX window formula: floor or ceil division, with pooling's last-window
+/// adjustment.
+fn window_extent(
+    input: u64,
+    kernel: u64,
+    stride: u64,
+    dilation: u64,
+    begin: i64,
+    end: i64,
+    ceil_mode: bool,
+) -> u64 {
+    let effective = dilation * (kernel - 1) + 1;
+    let total = i128::from(input) + i128::from(begin) + i128::from(end);
+    let stride = i128::from(stride);
+    let delta = total - i128::from(effective);
+    let mut out = if ceil_mode {
+        -((-delta).div_euclid(stride))
+    } else {
+        delta.div_euclid(stride)
+    } + 1;
+    if ceil_mode && out > 0 && (out - 1) * stride >= i128::from(input) + i128::from(begin) {
+        out -= 1;
+    }
+    u64::try_from(out.max(0)).unwrap_or(0)
+}
+
+/// `Conv(data, weight, bias?)`.
+fn plan_conv(
+    _ctx: &NodeRef,
+    attrs: &mut Attrs<'_, '_>,
+    ins: &[Abstract],
+) -> Result<Vec<PlannedOp>, PlanError> {
+    if !(2..=3).contains(&ins.len()) {
+        return Err(ImportProblemKind::OperandCount {
+            expected: 3,
+            found: ins.len(),
+        });
+    }
+    let (dtype, shape) = input_tensor(ins, 0, "Conv data")?;
+    let (weight_dtype, weight_shape) = input_tensor(ins, 1, "Conv weight")?;
+    if dtype != weight_dtype {
+        return Err(dtype_problem(format!(
+            "Conv data is {dtype}, the weight is {weight_dtype}"
+        )));
+    }
+    let auto_pad = auto_pad_attribute(attrs)?;
+    let group = attrs.int("group")?.unwrap_or(1);
+    if group <= 0 {
+        return Err(shape_problem(format!("Conv group {group} is not positive")));
+    }
+    let kernel_attr = attrs.ints("kernel_shape")?.map(<[i64]>::to_vec);
+    let dilations_attr = attrs.ints("dilations")?.map(<[i64]>::to_vec);
+    let strides_attr = attrs.ints("strides")?.map(<[i64]>::to_vec);
+    let pads_attr = attrs.ints("pads")?.map(<[i64]>::to_vec);
+    let Some(rank) = shape.rank() else {
+        return Ok(PlannedOp::single(
+            OpId::Conv,
+            (0..ins.len()).map(Operand::Input).collect(),
+            OpParams::new().with_group(group).with_auto_pad(auto_pad),
+            PlannedValue::tensor(dtype, ValueShape::Unknown),
+        ));
+    };
+    if rank < 3 {
+        return Err(shape_problem(format!(
+            "Conv needs an [N, C, spatial...] operand, found {}",
+            shape.render()
+        )));
+    }
+    let spatial = rank - 2;
+    let kernel = match &kernel_attr {
+        Some(values) => positive_extents(values, spatial, "Conv kernel_shape")?,
+        None => {
+            if weight_shape.rank().is_none() {
+                return Err(shape_problem("Conv weight rank is unknown".to_string()));
+            }
+            let mut kernel = Vec::with_capacity(spatial);
+            for (axis, dim) in weight_shape.dims().iter().skip(2).enumerate() {
+                let Some(extent) = dim.as_known().filter(|extent| *extent > 0) else {
+                    return Err(shape_problem(format!(
+                        "Conv weight kernel axis {axis} is {dim}; kernel_shape is absent and the \
+                         weight does not pin it"
+                    )));
+                };
+                kernel.push(extent);
+            }
+            if kernel.len() != spatial {
+                return Err(shape_problem(format!(
+                    "Conv weight {} does not have {spatial} kernel axes",
+                    weight_shape.render()
+                )));
+            }
+            kernel
+        }
+    };
+    let strides = positive_extents_or(strides_attr.as_deref(), spatial, 1, "Conv strides")?;
+    let dilations = positive_extents_or(dilations_attr.as_deref(), spatial, 1, "Conv dilations")?;
+    let spatial_input: Vec<Option<u64>> =
+        shape.dims()[2..].iter().map(|dim| dim.as_known()).collect();
+    let pads = window_pads(
+        auto_pad,
+        pads_attr.as_deref(),
+        spatial,
+        &spatial_input,
+        &kernel,
+        &strides,
+        &dilations,
+        "Conv",
+    )?;
+    let in_channels = shape.dims()[1].as_known().ok_or_else(|| {
+        shape_problem(format!(
+            "Conv input channels are {}; this importer needs a constant channel count",
+            shape.dims()[1]
+        ))
+    })?;
+    let group_u64 = group as u64;
+    let weight_in = weight_shape.dims().get(1).and_then(Dim::as_known);
+    if let Some(weight_in) = weight_in {
+        if weight_in.saturating_mul(group_u64) != in_channels {
+            return Err(shape_problem(format!(
+                "Conv weight has {weight_in} input channels for group = {group}, but the data \
+                 has {in_channels}; expected {}",
+                in_channels / group_u64
+            )));
+        }
+    }
+    let out_channels = weight_shape.dims().first().and_then(Dim::as_known);
+    let Some(out_channels) = out_channels else {
+        return Err(shape_problem(format!(
+            "Conv weight {} has no constant output channel count",
+            weight_shape.render()
+        )));
+    };
+    if out_channels % group_u64 != 0 {
+        return Err(shape_problem(format!(
+            "Conv output channels {out_channels} are not divisible by group {group}"
+        )));
+    }
+    for (axis, extent) in kernel.iter().enumerate() {
+        if let Some(declared) = weight_shape.dims().get(axis + 2).and_then(Dim::as_known) {
+            if declared != *extent {
+                return Err(shape_problem(format!(
+                    "Conv kernel_shape says {extent} on spatial axis {axis}, the weight declares \
+                     {declared}"
+                )));
+            }
+        }
+    }
+    if ins.len() == 3 {
+        let (bias_dtype, bias_shape) = input_tensor(ins, 2, "Conv bias")?;
+        if bias_dtype != dtype {
+            return Err(dtype_problem(format!(
+                "Conv bias is {bias_dtype}, the data is {dtype}"
+            )));
+        }
+        if bias_shape.rank() != Some(1)
+            || bias_shape.dims().first().and_then(Dim::as_known) != Some(out_channels)
+        {
+            return Err(shape_problem(format!(
+                "Conv bias must be rank 1 [{out_channels}], found {}",
+                bias_shape.render()
+            )));
+        }
+    }
+    let mut dims = Vec::with_capacity(rank);
+    dims.push(shape.dims()[0].clone());
+    dims.push(Dim::Known(out_channels));
+    for axis in 0..spatial {
+        let (begin, end) = pads[axis];
+        dims.push(window_dim(
+            &shape.dims()[axis + 2],
+            kernel[axis],
+            strides[axis],
+            dilations[axis],
+            begin,
+            end,
+            false,
+            "Conv output extent",
+        ));
+    }
+    let params = OpParams::new()
+        .with_kernel_shape(kernel.iter().map(|extent| *extent as i64))
+        .with_strides(strides.iter().map(|extent| *extent as i64))
+        .with_dilations(dilations.iter().map(|extent| *extent as i64))
+        .with_pads(pads_attr.unwrap_or_default())
+        .with_group(group)
+        .with_auto_pad(auto_pad);
+    Ok(PlannedOp::single(
+        OpId::Conv,
+        (0..ins.len()).map(Operand::Input).collect(),
+        params,
+        PlannedValue::tensor(dtype, ValueShape::Dims(dims)),
+    ))
+}
+
+/// `MaxPool`/`AveragePool`.
+fn plan_pool(
+    ctx: &NodeRef,
+    attrs: &mut Attrs<'_, '_>,
+    ins: &[Abstract],
+    output_count: usize,
+    op: OpId,
+) -> Result<Vec<PlannedOp>, PlanError> {
+    expect_inputs(ins, 1)?;
+    if output_count != 1 {
+        return Err(ImportProblemKind::UnsupportedOutputCount {
+            found: output_count,
+            expected: 1,
+        });
+    }
+    let (dtype, shape) = input_tensor(ins, 0, "pool data")?;
+    let auto_pad = auto_pad_attribute(attrs)?;
+    let kernel_attr = attrs.ints("kernel_shape")?.map(<[i64]>::to_vec);
+    let strides_attr = attrs.ints("strides")?.map(<[i64]>::to_vec);
+    // `dilations`, `storage_order` and `count_include_pad` are MaxPool-only
+    // attributes. Reading them for AveragePool would silently accept a field
+    // ONNX does not define for it, so they are read only where they exist and
+    // an AveragePool that carries one is reported as an unknown attribute.
+    let dilations_attr = if op == OpId::MaxPool {
+        attrs.ints("dilations")?.map(<[i64]>::to_vec)
+    } else {
+        None
+    };
+    let pads_attr = attrs.ints("pads")?.map(<[i64]>::to_vec);
+    let ceil_mode = attrs.int("ceil_mode")?.unwrap_or(0) != 0;
+    let count_include_pad = if op == OpId::AveragePool {
+        attrs.int("count_include_pad")?.unwrap_or(0) != 0
+    } else {
+        false
+    };
+    if op == OpId::MaxPool {
+        if let Some(order) = attrs.int("storage_order")? {
+            if order != 0 {
+                return Err(ImportProblemKind::UnsupportedAttribute {
+                    attribute: "storage_order".to_string(),
+                    detail: "storage_order = 1 orders the MaxPool indices column-major; this \
+                             build does not map the indices output"
+                        .to_string(),
+                });
+            }
+        }
+    }
+    let Some(rank) = shape.rank() else {
+        return Ok(PlannedOp::single(
+            op,
+            vec![Operand::Input(0)],
+            OpParams::new()
+                .with_auto_pad(auto_pad)
+                .with_ceil_mode(ceil_mode),
+            PlannedValue::tensor(dtype, ValueShape::Unknown),
+        ));
+    };
+    if rank < 3 {
+        return Err(shape_problem(format!(
+            "{} needs an [N, C, spatial...] operand, found {}",
+            op,
+            shape.render()
+        )));
+    }
+    let spatial = rank - 2;
+    let kernel = match &kernel_attr {
+        Some(values) => positive_extents(values, spatial, "kernel_shape")?,
+        None => {
+            return Err(shape_problem(format!(
+                "{op} needs the kernel_shape attribute"
+            )))
+        }
+    };
+    let strides = positive_extents_or(strides_attr.as_deref(), spatial, 1, "strides")?;
+    let dilations = positive_extents_or(dilations_attr.as_deref(), spatial, 1, "dilations")?;
+    let spatial_input: Vec<Option<u64>> =
+        shape.dims()[2..].iter().map(|dim| dim.as_known()).collect();
+    let pads = window_pads(
+        auto_pad,
+        pads_attr.as_deref(),
+        spatial,
+        &spatial_input,
+        &kernel,
+        &strides,
+        &dilations,
+        ctx.op_type.as_str(),
+    )?;
+    let mut dims = Vec::with_capacity(rank);
+    dims.push(shape.dims()[0].clone());
+    dims.push(shape.dims()[1].clone());
+    for axis in 0..spatial {
+        let (begin, end) = pads[axis];
+        dims.push(window_dim(
+            &shape.dims()[axis + 2],
+            kernel[axis],
+            strides[axis],
+            dilations[axis],
+            begin,
+            end,
+            ceil_mode,
+            "pool output extent",
+        ));
+    }
+    let params = OpParams::new()
+        .with_kernel_shape(kernel.iter().map(|extent| *extent as i64))
+        .with_strides(strides.iter().map(|extent| *extent as i64))
+        .with_dilations(dilations.iter().map(|extent| *extent as i64))
+        .with_pads(pads_attr.unwrap_or_default())
+        .with_count_include_pad(count_include_pad)
+        .with_auto_pad(auto_pad)
+        .with_ceil_mode(ceil_mode);
+    Ok(PlannedOp::single(
+        op,
+        vec![Operand::Input(0)],
+        params,
+        PlannedValue::tensor(dtype, ValueShape::Dims(dims)),
+    ))
+}
+
+/// `GlobalAveragePool`.
+fn plan_global_average_pool(
+    _ctx: &NodeRef,
+    _attrs: &mut Attrs<'_, '_>,
+    ins: &[Abstract],
+) -> Result<Vec<PlannedOp>, PlanError> {
+    expect_inputs(ins, 1)?;
+    let (dtype, shape) = input_tensor(ins, 0, "GlobalAveragePool data")?;
+    let Some(rank) = shape.rank() else {
+        return Ok(PlannedOp::single(
+            OpId::GlobalAveragePool,
+            vec![Operand::Input(0)],
+            OpParams::new(),
+            PlannedValue::tensor(dtype, ValueShape::Unknown),
+        ));
+    };
+    if rank < 3 {
+        return Err(shape_problem(format!(
+            "GlobalAveragePool needs an [N, C, spatial...] operand, found {}",
+            shape.render()
+        )));
+    }
+    let mut dims = Vec::with_capacity(rank);
+    dims.push(shape.dims()[0].clone());
+    dims.push(shape.dims()[1].clone());
+    dims.extend(std::iter::repeat_n(Dim::Known(1), rank - 2));
+    Ok(PlannedOp::single(
+        OpId::GlobalAveragePool,
+        vec![Operand::Input(0)],
+        OpParams::new(),
+        PlannedValue::tensor(dtype, ValueShape::Dims(dims)),
+    ))
+}
+
+/// `BatchNormalization` in its inference form.
+fn plan_batch_norm(
+    _ctx: &NodeRef,
+    attrs: &mut Attrs<'_, '_>,
+    ins: &[Abstract],
+    output_count: usize,
+) -> Result<Vec<PlannedOp>, PlanError> {
+    if ins.len() != 5 {
+        return Err(ImportProblemKind::OperandCount {
+            expected: 5,
+            found: ins.len(),
+        });
+    }
+    if output_count != 1 {
+        return Err(ImportProblemKind::UnsupportedOutputCount {
+            found: output_count,
+            expected: 1,
+        });
+    }
+    let (dtype, shape) = input_tensor(ins, 0, "BatchNormalization data")?;
+    let epsilon = attrs.float("epsilon")?.unwrap_or(1e-5);
+    if !epsilon.is_finite() || epsilon < 0.0 {
+        return Err(shape_problem(format!(
+            "BatchNormalization epsilon {epsilon} must be finite and non-negative"
+        )));
+    }
+    // `momentum` only affects training; ONNX defines it as unused at inference.
+    let _momentum = attrs.float("momentum")?;
+    if attrs.int("training_mode")?.unwrap_or(0) != 0 {
+        return Err(ImportProblemKind::UnsupportedAttribute {
+            attribute: "training_mode".to_string(),
+            detail: "training_mode = 1 produces running-statistic outputs; this is an \
+                     inference-only runtime"
+                .to_string(),
+        });
+    }
+    let channels = shape.dims().get(1).cloned();
+    for (index, name) in ["scale", "B", "mean", "var"].iter().enumerate() {
+        let (parameter_dtype, parameter_shape) =
+            input_tensor(ins, index + 1, "BatchNorm parameter")?;
+        if parameter_dtype != dtype {
+            return Err(dtype_problem(format!(
+                "BatchNormalization {name} is {parameter_dtype}, the data is {dtype}"
+            )));
+        }
+        if parameter_shape.rank() != Some(1) || parameter_shape.dims().first() != channels.as_ref()
+        {
+            return Err(shape_problem(format!(
+                "BatchNormalization {name} must be rank 1 matching the channel axis, found {}",
+                parameter_shape.render()
+            )));
+        }
+    }
+    Ok(PlannedOp::single(
+        OpId::BatchNorm,
+        (0..5).map(Operand::Input).collect(),
+        OpParams::new().with_epsilon(epsilon),
+        PlannedValue::tensor(dtype, shape),
+    ))
+}
+
+/// Parse a `Resize` mode string.
+fn resize_mode_attribute(attrs: &mut Attrs<'_, '_>) -> Result<ResizeMode, PlanError> {
+    match attrs.string("mode")?.unwrap_or("nearest") {
+        "nearest" => Ok(ResizeMode::Nearest),
+        "linear" => Ok(ResizeMode::Linear),
+        "cubic" => Ok(ResizeMode::Cubic),
+        other => Err(ImportProblemKind::UnsupportedAttribute {
+            attribute: "mode".to_string(),
+            detail: format!(
+                "`{other}` is not an ONNX Resize mode; expected nearest, linear or cubic"
+            ),
+        }),
+    }
+}
+
+/// `Resize(data, roi?, scales?, sizes?)`.
+fn plan_resize(
+    _ctx: &NodeRef,
+    attrs: &mut Attrs<'_, '_>,
+    ins: &[Abstract],
+) -> Result<Vec<PlannedOp>, PlanError> {
+    if !(1..=4).contains(&ins.len()) {
+        return Err(ImportProblemKind::OperandCount {
+            expected: 3,
+            found: ins.len(),
+        });
+    }
+    let (dtype, shape) = input_tensor(ins, 0, "Resize data")?;
+    let resize_mode = resize_mode_attribute(attrs)?;
+    let coordinate_transformation_mode = match attrs
+        .string("coordinate_transformation_mode")?
+        .unwrap_or("half_pixel")
+    {
+        "half_pixel" => CoordinateTransformationMode::HalfPixel,
+        "pytorch_half_pixel" => CoordinateTransformationMode::PytorchHalfPixel,
+        "align_corners" => CoordinateTransformationMode::AlignCorners,
+        "asymmetric" => CoordinateTransformationMode::Asymmetric,
+        "tf_crop_and_resize" => CoordinateTransformationMode::TfCropAndResize,
+        other => {
+            return Err(ImportProblemKind::UnsupportedAttribute {
+                attribute: "coordinate_transformation_mode".to_string(),
+                detail: format!(
+                    "`{other}` is not an ONNX coordinate transformation mode; expected \
+                     half_pixel, pytorch_half_pixel, align_corners, asymmetric or \
+                     tf_crop_and_resize"
+                ),
+            })
+        }
+    };
+    let nearest_mode = match attrs
+        .string("nearest_mode")?
+        .unwrap_or("round_prefer_floor")
+    {
+        "round_prefer_floor" => NearestMode::RoundPreferFloor,
+        "round_prefer_ceil" => NearestMode::RoundPreferCeil,
+        "floor" => NearestMode::Floor,
+        "ceil" => NearestMode::Ceil,
+        other => {
+            return Err(ImportProblemKind::UnsupportedAttribute {
+                attribute: "nearest_mode".to_string(),
+                detail: format!(
+                    "`{other}` is not an ONNX nearest mode; expected round_prefer_floor, \
+                     round_prefer_ceil, floor or ceil"
+                ),
+            })
+        }
+    };
+    // `cubic_coeff_a` is emitted by PyTorch even for nearest/linear and only
+    // affects cubic mode; consume it so it is not reported as unknown.
+    let _cubic_coeff_a = attrs.float("cubic_coeff_a")?;
+    if attrs.int("exclude_outside")?.unwrap_or(0) != 0 {
+        return Err(ImportProblemKind::UnsupportedAttribute {
+            attribute: "exclude_outside".to_string(),
+            detail: "exclude_outside = 1 is only defined for cubic interpolation".to_string(),
+        });
+    }
+    let _extrapolation_value = attrs.float("extrapolation_value")?;
+    if resize_mode == ResizeMode::Cubic {
+        return Err(ImportProblemKind::UnsupportedAttribute {
+            attribute: "mode".to_string(),
+            detail: "cubic Resize has no shape rule or kernel in this revision".to_string(),
+        });
+    }
+    if coordinate_transformation_mode == CoordinateTransformationMode::TfCropAndResize {
+        return Err(ImportProblemKind::UnsupportedAttribute {
+            attribute: "coordinate_transformation_mode".to_string(),
+            detail: "tf_crop_and_resize is an ROI crop, which this runtime does not represent"
+                .to_string(),
+        });
+    }
+    // `roi` is read and then ignored, which is what the operator says it is:
+    // ONNX defines its values only for `tf_crop_and_resize`, and that mode is
+    // rejected above. An exporter that writes the placeholder as four zeros
+    // instead of an empty tensor therefore describes the same resize as one
+    // that omits it. The shape is still validated so a mis-typed operand is
+    // reported here rather than silently dropped. A two-operand node has no
+    // roi: ONNX requires exactly one of scales/sizes, so a lone roi is not a
+    // node this importer has to read.
+    if ins.len() >= 3 {
+        let _ = input_tensor(ins, 1, "Resize roi")?;
+    }
+    // `X, roi?, scales?, sizes?` with at most one of scales/sizes. Empty
+    // optional inputs are dropped while the operand list is built, so the
+    // length says how many are present, not their positions: two operands mean
+    // `X` and one target, three mean `X`, a roi and one target. The target's
+    // dtype decides whether it is f32 scales or i64 sizes.
+    let (scales_index, sizes_index) = match ins.len() {
+        4 => (Some(2), Some(3)),
+        present @ (2 | 3) => {
+            let index = present - 1;
+            let (target_dtype, _, _) = input_series(ins, index, "Resize target operand")?;
+            if target_dtype == DType::I64 {
+                (None, Some(index))
+            } else {
+                (Some(index), None)
+            }
+        }
+        _ => (None, None),
+    };
+    let mut scales: Vec<f32> = Vec::new();
+    if let Some(index) = scales_index {
+        let (scales_dtype, _, series) = input_series(ins, index, "Resize scales")?;
+        if scales_dtype != DType::F32 {
+            return Err(dtype_problem(format!(
+                "Resize scales are {scales_dtype}, expected f32"
+            )));
+        }
+        let items = series
+            .items
+            .as_ref()
+            .ok_or_else(|| shape_problem("Resize scales are not statically known".to_string()))?;
+        scales = items
+            .iter()
+            .map(|atom| {
+                atom.as_f32()
+                    .filter(|scale| scale.is_finite() && *scale > 0.0)
+                    .ok_or_else(|| {
+                        shape_problem(format!(
+                            "Resize scale {} is not a positive finite f32",
+                            atom.render()
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<f32>, PlanError>>()?;
+    }
+    let mut sizes: Vec<i64> = Vec::new();
+    if let Some(index) = sizes_index {
+        let (sizes_dtype, _, series) = input_series(ins, index, "Resize sizes")?;
+        if sizes_dtype != DType::I64 {
+            return Err(ImportProblemKind::IndexDType {
+                actual: sizes_dtype,
+                operand: "Resize sizes".to_string(),
+            });
+        }
+        sizes = int_list(&series, "Resize sizes")?;
+    }
+    if !scales.is_empty() && !sizes.is_empty() {
+        return Err(shape_problem(
+            "Resize supplies both scales and sizes; ONNX allows exactly one".to_string(),
+        ));
+    }
+    if scales.is_empty() && sizes.is_empty() {
+        return Err(shape_problem(
+            "Resize supplies neither scales nor sizes; this importer needs one constant form"
+                .to_string(),
+        ));
+    }
+    let Some(rank) = shape.rank() else {
+        return Ok(PlannedOp::single(
+            OpId::Resize,
+            (0..ins.len()).map(Operand::Input).collect(),
+            OpParams::new()
+                .with_resize(resize_mode, coordinate_transformation_mode, nearest_mode)
+                .with_resize_scales(scales)
+                .with_resize_sizes(sizes),
+            PlannedValue::tensor(dtype, ValueShape::Unknown),
+        ));
+    };
+    let output = if !sizes.is_empty() {
+        if sizes.len() != rank {
+            return Err(shape_problem(format!(
+                "Resize sizes has {} extents for a rank-{rank} operand",
+                sizes.len()
+            )));
+        }
+        ValueShape::Dims(
+            sizes
+                .iter()
+                .map(|size| {
+                    u64::try_from(*size)
+                        .ok()
+                        .filter(|size| *size > 0)
+                        .map(Dim::Known)
+                        .ok_or_else(|| shape_problem(format!("Resize size {size} is not positive")))
+                })
+                .collect::<Result<Vec<Dim>, PlanError>>()?,
+        )
+    } else {
+        if scales.len() != rank {
+            return Err(shape_problem(format!(
+                "Resize scales has {} extents for a rank-{rank} operand",
+                scales.len()
+            )));
+        }
+        ValueShape::Dims(
+            shape
+                .dims()
+                .iter()
+                .zip(&scales)
+                .map(|(dim, scale)| match dim.as_known() {
+                    Some(extent) => Dim::Known((extent as f64 * f64::from(*scale)).floor() as u64),
+                    None => Dim::unknown(format!("resize of {dim} by {scale}")),
+                })
+                .collect(),
+        )
+    };
+    let params = OpParams::new()
+        .with_resize(resize_mode, coordinate_transformation_mode, nearest_mode)
+        .with_resize_scales(scales)
+        .with_resize_sizes(sizes);
+    Ok(PlannedOp::single(
+        OpId::Resize,
+        (0..ins.len()).map(Operand::Input).collect(),
+        params,
+        PlannedValue::tensor(dtype, output),
+    ))
+}
+
+/// `Pad(data, pads?, constant_value?)`.
+fn plan_pad(
+    _ctx: &NodeRef,
+    attrs: &mut Attrs<'_, '_>,
+    ins: &[Abstract],
+) -> Result<Vec<PlannedOp>, PlanError> {
+    if !(1..=3).contains(&ins.len()) {
+        return Err(ImportProblemKind::OperandCount {
+            expected: 3,
+            found: ins.len(),
+        });
+    }
+    let (dtype, shape) = input_tensor(ins, 0, "Pad data")?;
+    let mode = match attrs.string("mode")?.unwrap_or("constant") {
+        "constant" => PadMode::Constant,
+        "reflect" => PadMode::Reflect,
+        "edge" => PadMode::Edge,
+        "wrap" => PadMode::Wrap,
+        other => {
+            return Err(ImportProblemKind::UnsupportedAttribute {
+                attribute: "mode".to_string(),
+                detail: format!(
+                    "`{other}` is not an ONNX Pad mode; expected constant, reflect, edge or wrap"
+                ),
+            })
+        }
+    };
+    if mode == PadMode::Wrap {
+        return Err(ImportProblemKind::UnsupportedAttribute {
+            attribute: "mode".to_string(),
+            detail: "wrap padding is not implemented; constant, reflect and edge are".to_string(),
+        });
+    }
+    let attribute_pads = attrs.ints("pads")?.map(<[i64]>::to_vec);
+    if attribute_pads.is_some() && ins.len() >= 2 {
+        return Err(ImportProblemKind::UnsupportedAttribute {
+            attribute: "pads".to_string(),
+            detail: "the node supplies both the opset-2 `pads` attribute and an opset-11 pads \
+                     input"
+                .to_string(),
+        });
+    }
+    let pads: Vec<i64> = match (&attribute_pads, ins.len()) {
+        (Some(values), _) => values.clone(),
+        (None, 2..) => {
+            let (pads_dtype, _, series) = input_series(ins, 1, "Pad pads")?;
+            if pads_dtype != DType::I64 {
+                return Err(ImportProblemKind::IndexDType {
+                    actual: pads_dtype,
+                    operand: "Pad pads".to_string(),
+                });
+            }
+            int_list(&series, "Pad pads")?
+        }
+        _ => Vec::new(),
+    };
+    if pads.is_empty() {
+        return Err(shape_problem(
+            "Pad has no pads; a Pad node without pads is not representable".to_string(),
+        ));
+    }
+    let mut pad_value = attrs.float("value")?.unwrap_or(0.0);
+    if ins.len() >= 3 {
+        let (value_dtype, _, series) = input_series(ins, 2, "Pad constant_value")?;
+        if value_dtype != DType::F32 {
+            return Err(dtype_problem(format!(
+                "Pad constant_value is {value_dtype}, expected f32"
+            )));
+        }
+        pad_value = series
+            .only()
+            .and_then(Atom::as_f32)
+            .ok_or_else(|| shape_problem("Pad constant_value is not a known scalar".to_string()))?;
+    }
+    let Some(rank) = shape.rank() else {
+        return Ok(PlannedOp::single(
+            OpId::Pad,
+            (0..ins.len()).map(Operand::Input).collect(),
+            OpParams::new().with_pads(pads).with_pad(mode, pad_value),
+            PlannedValue::tensor(dtype, ValueShape::Unknown),
+        ));
+    };
+    if pads.len() != 2 * rank {
+        return Err(shape_problem(format!(
+            "Pad has {} pad extents for a rank-{rank} operand; ONNX supplies {rank} begin \
+             extents followed by {rank} end extents",
+            pads.len()
+        )));
+    }
+    let mut dims = Vec::with_capacity(rank);
+    for axis in 0..rank {
+        let begin = pads[axis];
+        let end = pads[rank + axis];
+        match shape.dims()[axis].as_known() {
+            Some(extent) => {
+                let padded = extent as i128 + i128::from(begin) + i128::from(end);
+                if padded < 0 {
+                    return Err(shape_problem(format!(
+                        "Pad crops axis {axis} of extent {extent} by {begin} + {end}, leaving \
+                         {padded} elements"
+                    )));
+                }
+                dims.push(Dim::Known(padded as u64));
+            }
+            None => dims.push(Dim::unknown(format!(
+                "padding {begin} + {end} of {}",
+                shape.dims()[axis]
+            ))),
+        }
+    }
+    Ok(PlannedOp::single(
+        OpId::Pad,
+        (0..ins.len()).map(Operand::Input).collect(),
+        OpParams::new().with_pads(pads).with_pad(mode, pad_value),
+        PlannedValue::tensor(dtype, ValueShape::Dims(dims)),
+    ))
+}
+
+/// `Clip(data, min?, max?)`.
+fn plan_clip(
+    _ctx: &NodeRef,
+    attrs: &mut Attrs<'_, '_>,
+    ins: &[Abstract],
+) -> Result<Vec<PlannedOp>, PlanError> {
+    if !(1..=3).contains(&ins.len()) {
+        return Err(ImportProblemKind::OperandCount {
+            expected: 3,
+            found: ins.len(),
+        });
+    }
+    let (dtype, shape) = input_tensor(ins, 0, "Clip data")?;
+    let attribute_min = attrs.float("min")?;
+    let attribute_max = attrs.float("max")?;
+    if (attribute_min.is_some() || attribute_max.is_some()) && ins.len() > 1 {
+        return Err(ImportProblemKind::UnsupportedAttribute {
+            attribute: "min/max".to_string(),
+            detail: "the node supplies both the opset-6 min/max attributes and the opset-11 \
+                     min/max inputs"
+                .to_string(),
+        });
+    }
+    let mut clip_min = attribute_min;
+    let mut clip_max = attribute_max;
+    if ins.len() >= 2 {
+        let (min_dtype, _, series) = input_series(ins, 1, "Clip min")?;
+        if min_dtype != DType::F32 {
+            return Err(dtype_problem(format!(
+                "Clip min is {min_dtype}, expected f32"
+            )));
+        }
+        clip_min = Some(
+            series
+                .only()
+                .and_then(Atom::as_f32)
+                .ok_or_else(|| shape_problem("Clip min is not a known scalar".to_string()))?,
+        );
+    }
+    if ins.len() >= 3 {
+        let (max_dtype, _, series) = input_series(ins, 2, "Clip max")?;
+        if max_dtype != DType::F32 {
+            return Err(dtype_problem(format!(
+                "Clip max is {max_dtype}, expected f32"
+            )));
+        }
+        clip_max = Some(
+            series
+                .only()
+                .and_then(Atom::as_f32)
+                .ok_or_else(|| shape_problem("Clip max is not a known scalar".to_string()))?,
+        );
+    }
+    if let (Some(min), Some(max)) = (clip_min, clip_max) {
+        if min > max {
+            return Err(shape_problem(format!("Clip min {min} is above max {max}")));
+        }
+    }
+    Ok(PlannedOp::single(
+        OpId::Clip,
+        (0..ins.len()).map(Operand::Input).collect(),
+        OpParams::new().with_clip(clip_min, clip_max),
+        PlannedValue::tensor(dtype, shape),
+    ))
+}
+
+/// `TopK(data, k?)`.
+fn plan_top_k(
+    _ctx: &NodeRef,
+    attrs: &mut Attrs<'_, '_>,
+    ins: &[Abstract],
+    output_count: usize,
+) -> Result<Vec<PlannedOp>, PlanError> {
+    if !(1..=2).contains(&ins.len()) {
+        return Err(ImportProblemKind::OperandCount {
+            expected: 2,
+            found: ins.len(),
+        });
+    }
+    if output_count != 2 {
+        return Err(ImportProblemKind::UnsupportedOutputCount {
+            found: output_count,
+            expected: 2,
+        });
+    }
+    let (dtype, shape) = input_tensor(ins, 0, "TopK data")?;
+    let axis = attrs.int("axis")?.unwrap_or(-1);
+    let largest = attrs.int("largest")?.unwrap_or(1) != 0;
+    let sorted = attrs.int("sorted")?.unwrap_or(1) != 0;
+    let attribute_k = attrs.int("k")?;
+    if attribute_k.is_some() && ins.len() == 2 {
+        return Err(ImportProblemKind::UnsupportedAttribute {
+            attribute: "k".to_string(),
+            detail: "the node supplies both the opset-1 `k` attribute and an opset-10 k input"
+                .to_string(),
+        });
+    }
+    let k = match (attribute_k, ins.len()) {
+        (Some(k), _) => k,
+        (None, 2) => {
+            let (k_dtype, _, series) = input_series(ins, 1, "TopK k")?;
+            if k_dtype != DType::I64 {
+                return Err(ImportProblemKind::IndexDType {
+                    actual: k_dtype,
+                    operand: "TopK k".to_string(),
+                });
+            }
+            int_list(&series, "TopK k")?
+                .first()
+                .copied()
+                .ok_or_else(|| shape_problem("TopK k is empty".to_string()))?
+        }
+        (None, _) => {
+            return Err(shape_problem(
+                "TopK has no k attribute and no k input".to_string(),
+            ))
+        }
+    };
+    if k < 0 {
+        return Err(shape_problem(format!("TopK k {k} is negative")));
+    }
+    let Some(rank) = shape.rank() else {
+        return Ok(vec![PlannedOp {
+            op: OpId::TopK,
+            operands: (0..ins.len()).map(Operand::Input).collect(),
+            params: OpParams::new().with_topk(axis, k, largest, sorted),
+            typed: None,
+            outputs: vec![
+                PlannedValue::tensor(dtype, ValueShape::Unknown),
+                PlannedValue::tensor(DType::I64, ValueShape::Unknown),
+            ],
+        }]);
+    };
+    let axis = normalize_axis(axis, rank, "TopK")?;
+    let mut dims = shape.dims().to_vec();
+    dims[axis] = Dim::Known(k as u64);
+    Ok(vec![PlannedOp {
+        op: OpId::TopK,
+        operands: (0..ins.len()).map(Operand::Input).collect(),
+        params: OpParams::new().with_topk(axis as i64, k, largest, sorted),
+        typed: None,
+        outputs: vec![
+            PlannedValue::tensor(dtype, ValueShape::Dims(dims.clone())),
+            PlannedValue::tensor(DType::I64, ValueShape::Dims(dims)),
+        ],
+    }])
+}
+
 /// Slice one tracked sequence along axis 0.
 fn fold_slice(
     series: &AtomSeries,
@@ -3161,6 +4426,11 @@ fn fold_slice(
 }
 
 /// `Split` (the only mapped operator with more than one output).
+///
+/// Opset 12 carries the sizes in the `split` attribute, opset 13 in an optional
+/// second input, and opset 18 adds `num_outputs` for an equal split. All three
+/// forms are accepted; the resolved sizes are exported to the typed IR because
+/// its shape pass reads attributes, never tensor payloads.
 fn plan_split_full(
     _ctx: &NodeRef,
     attrs: &mut Attrs<'_, '_>,
@@ -3181,11 +4451,28 @@ fn plan_split_full(
     }
     let (dtype, shape) = input_tensor(ins, 0, "Split data")?;
     let axis = attrs.int("axis")?.unwrap_or(0);
+    if let Some(declared) = attrs.int("num_outputs")? {
+        if declared != output_count as i64 {
+            return Err(shape_problem(format!(
+                "Split declares num_outputs = {declared} but has {output_count} outputs"
+            )));
+        }
+    }
+    let attribute_sizes = attrs.ints("split")?.map(<[i64]>::to_vec);
+    if attribute_sizes.is_some() && ins.len() == 2 {
+        return Err(ImportProblemKind::UnsupportedAttribute {
+            attribute: "split".to_string(),
+            detail: "the node supplies both the opset-12 `split` attribute and an opset-13 \
+                     split input"
+                .to_string(),
+        });
+    }
     let Some(rank) = shape.rank() else {
         return Ok(vec![PlannedOp {
             op: OpId::Split,
             operands: (0..ins.len()).map(Operand::Input).collect(),
             params: OpParams::new().with_axes([axis]),
+            typed: None,
             outputs: (0..output_count)
                 .map(|_| PlannedValue::tensor(dtype, ValueShape::Unknown))
                 .collect(),
@@ -3193,31 +4480,32 @@ fn plan_split_full(
     };
     let axis = normalize_axis(axis, rank, "Split")?;
     let extent = shape.dims()[axis].as_known();
-    let sizes: Option<Vec<u64>> = if ins.len() == 2 {
-        let (sizes_dtype, _, series) = input_series(ins, 1, "Split sizes")?;
-        if sizes_dtype != DType::I64 {
-            return Err(ImportProblemKind::IndexDType {
-                actual: sizes_dtype,
-                operand: "Split sizes".to_string(),
-            });
-        }
-        match int_list(&series, "Split sizes") {
-            Ok(values) => {
-                let mut sizes = Vec::with_capacity(values.len());
-                for value in values {
-                    match u64::try_from(value) {
-                        Ok(value) => sizes.push(value),
-                        Err(_) => {
-                            return Err(shape_problem(format!("Split size {value} is negative")))
-                        }
-                    }
-                }
-                Some(sizes)
+    let raw_sizes: Option<Vec<i64>> = match (ins.len(), attribute_sizes) {
+        (2, _) => {
+            let (sizes_dtype, _, series) = input_series(ins, 1, "Split sizes")?;
+            if sizes_dtype != DType::I64 {
+                return Err(ImportProblemKind::IndexDType {
+                    actual: sizes_dtype,
+                    operand: "Split sizes".to_string(),
+                });
             }
-            Err(_) => None,
+            int_list(&series, "Split sizes").ok()
         }
-    } else {
-        None
+        (_, Some(values)) => Some(values),
+        _ => None,
+    };
+    let sizes: Option<Vec<u64>> = match &raw_sizes {
+        Some(values) => {
+            let mut sizes = Vec::with_capacity(values.len());
+            for value in values {
+                match u64::try_from(*value) {
+                    Ok(value) => sizes.push(value),
+                    Err(_) => return Err(shape_problem(format!("Split size {value} is negative"))),
+                }
+            }
+            Some(sizes)
+        }
+        None => None,
     };
     if let Some(sizes) = &sizes {
         if sizes.len() != output_count {
@@ -3250,10 +4538,15 @@ fn plan_split_full(
             PlannedValue::tensor(dtype, ValueShape::Dims(dims))
         })
         .collect();
+    let mut typed = OpParams::new().with_axes([axis as i64]);
+    if let Some(sizes) = &sizes {
+        typed = typed.with_split_sizes(sizes.iter().map(|size| *size as i64));
+    }
     Ok(vec![PlannedOp {
         op: OpId::Split,
         operands: (0..ins.len()).map(Operand::Input).collect(),
         params: OpParams::new().with_axes([axis as i64]),
+        typed: Some(typed),
         outputs,
     }])
 }
@@ -3337,6 +4630,19 @@ fn dispatch(
         "ReduceMean" => plan_reduce(ctx, attrs, ins, OpId::ReduceMean),
         "ReduceSum" => plan_reduce(ctx, attrs, ins, OpId::ReduceSum),
         "ArgMax" => plan_argmax(ctx, attrs, ins),
+        // The CNN operator set.
+        "Conv" => plan_conv(ctx, attrs, ins),
+        "MaxPool" => plan_pool(ctx, attrs, ins, output_count, OpId::MaxPool),
+        "AveragePool" => plan_pool(ctx, attrs, ins, output_count, OpId::AveragePool),
+        "GlobalAveragePool" => plan_global_average_pool(ctx, attrs, ins),
+        "BatchNormalization" => plan_batch_norm(ctx, attrs, ins, output_count),
+        "Resize" => plan_resize(ctx, attrs, ins),
+        "Pad" => plan_pad(ctx, attrs, ins),
+        "Clip" => plan_clip(ctx, attrs, ins),
+        "Sigmoid" => plan_unary(ctx, attrs, ins, OpId::Sigmoid),
+        "Max" => plan_binary(ctx, attrs, ins, OpId::Maximum),
+        "Min" => plan_binary(ctx, attrs, ins, OpId::Minimum),
+        "TopK" => plan_top_k(ctx, attrs, ins, output_count),
         "If" | "Loop" | "Scan" => Err(ImportProblemKind::ControlFlow {
             op_type: ctx.op_type.clone(),
         }),
@@ -3362,6 +4668,25 @@ fn dispatch(
 
 /// Decode and import a complete ONNX model.
 pub(crate) fn build_model(bytes: &[u8]) -> Result<ModelImport, super::error::ImportError> {
+    Builder::new(decode_bytes(bytes)?).run()
+}
+
+/// Decode and import a model's graph, without decoder architecture detection.
+pub(crate) fn build_graph_parts(
+    bytes: &[u8],
+    bindings: &BTreeMap<String, Vec<u64>>,
+) -> Result<GraphParts, super::error::ImportError> {
+    let (parts, diagnostics) = Builder::new(decode_bytes(bytes)?)
+        .with_bindings(bindings)
+        .decode();
+    if let Some(error) = diagnostics.finish() {
+        return Err(error);
+    }
+    parts.ok_or_else(|| super::error::ImportError::single(ImportProblemKind::MissingGraph))
+}
+
+/// The one size check and protobuf decode both entry points share.
+fn decode_bytes(bytes: &[u8]) -> Result<proto::Model<'_>, super::error::ImportError> {
     // One comparison before a single byte is decoded: the model size is the
     // budget the format and the importer share, and a refusal names it.
     if !model_bytes_within_cap(bytes.len() as u64) {
@@ -3373,15 +4698,30 @@ pub(crate) fn build_model(bytes: &[u8]) -> Result<ModelImport, super::error::Imp
             },
         ));
     }
-    let model = match proto::decode_model(bytes) {
-        Ok(model) => model,
-        Err(error) => {
-            return Err(super::error::ImportError::single(ImportProblemKind::Proto(
-                error,
-            )))
-        }
+    proto::decode_model(bytes)
+        .map_err(|error| super::error::ImportError::single(ImportProblemKind::Proto(error)))
+}
+
+/// The graph inputs and their declared shapes, read without shape inference.
+///
+/// `doctor` needs this exactly when the typed pass refuses the model, so the
+/// builder's diagnostics are ignored rather than returned: a value table with a
+/// contradiction still has an interface.
+pub(crate) fn declared_inputs_of(
+    bytes: &[u8],
+) -> Result<Vec<(String, String)>, super::error::ImportError> {
+    let model = decode_bytes(bytes)?;
+    let (parts, _diagnostics) = Builder::new(model).decode();
+    let Some(parts) = parts else {
+        return Ok(Vec::new());
     };
-    Builder::new(model).run()
+    Ok(parts
+        .graph
+        .inputs()
+        .iter()
+        .map(|&id| parts.graph.value(id))
+        .map(|value| (value.name.clone(), value.shape.to_string()))
+        .collect())
 }
 
 /// A declared dtype and shape from `ValueInfoProto`.
@@ -3400,14 +4740,23 @@ struct Builder<'a> {
     abstracts: Vec<Abstract>,
     by_name: BTreeMap<String, ValueId>,
     nodes: Vec<GraphNode>,
+    /// Typed-IR attributes, parallel to `nodes`. See [`GraphParts`].
+    typed_params: Vec<crate::inference::backend::OpParams>,
     weights: Vec<WeightTensor>,
     weight_ids: BTreeMap<String, WeightId>,
     declared: BTreeMap<String, DeclaredValue>,
+    /// Concrete extents for graph inputs, as supplied by the caller.
+    bindings: BTreeMap<String, Vec<u64>>,
+    /// Bindings that matched a declared graph input.
+    used_bindings: BTreeSet<String>,
     inputs: Vec<ValueId>,
     outputs: Vec<ValueId>,
     /// Set when a parser budget was reached, so `run` can stop before geometry
     /// detection instead of reporting a cascade of architecture problems.
     over_budget: bool,
+    /// `Constant` nodes folded into weights. They produce no fn3 node but stay
+    /// in the source census.
+    folded_constants: usize,
 }
 
 impl<'a> Builder<'a> {
@@ -3420,24 +4769,88 @@ impl<'a> Builder<'a> {
             abstracts: Vec::new(),
             by_name: BTreeMap::new(),
             nodes: Vec::new(),
+            typed_params: Vec::new(),
             weights: Vec::new(),
             weight_ids: BTreeMap::new(),
             declared: BTreeMap::new(),
+            bindings: BTreeMap::new(),
+            used_bindings: BTreeSet::new(),
             inputs: Vec::new(),
             outputs: Vec::new(),
             over_budget: false,
+            folded_constants: 0,
         }
     }
 
-    fn run(mut self) -> Result<ModelImport, super::error::ImportError> {
+    /// Attach the caller's input-shape bindings.
+    fn with_bindings(mut self, bindings: &BTreeMap<String, Vec<u64>>) -> Builder<'a> {
+        self.bindings = bindings.clone();
+        self
+    }
+
+    fn run(self) -> Result<ModelImport, super::error::ImportError> {
+        let (parts, mut diagnostics) = self.decode();
+        let Some(parts) = parts else {
+            return Err(diagnostics
+                .finish()
+                .expect("a missing graph or an exhausted budget is a problem"));
+        };
+        let GraphParts {
+            ir_version,
+            producer,
+            producer_version,
+            opset,
+            graph_name,
+            graph,
+            weights,
+            summary,
+            warnings,
+            typed_params: _,
+        } = parts;
+        let Some(geometry) = detect_geometry(&graph, &weights, &mut diagnostics) else {
+            // Defensive: every `None` path in the detector records a problem, so
+            // this only fires if one is added without one. Report it instead of
+            // panicking.
+            diagnostics.push_global(ImportProblemKind::Architecture {
+                detail: "architecture detection produced no geometry".to_string(),
+            });
+            return Err(diagnostics
+                .finish()
+                .expect("a missing geometry is a problem"));
+        };
+        if let Some(error) = diagnostics.finish() {
+            return Err(error);
+        }
+        Ok(ModelImport {
+            ir_version,
+            producer,
+            producer_version,
+            opset,
+            graph_name,
+            graph,
+            weights,
+            geometry,
+            summary,
+            warnings,
+        })
+    }
+
+    /// Decode, validate and assemble the graph without architecture detection.
+    ///
+    /// This is the graph-level half of [`Builder::run`]. A CNN has no decoder
+    /// geometry, so [`super::import_onnx_graph`] uses this directly; the
+    /// decoder path adds [`detect_geometry`] afterwards.
+    ///
+    /// Some problems are recorded while the graph is still assembled, so the
+    /// caller decides whether to stop: the decoder path runs architecture
+    /// detection over the partial graph to report those problems too, while
+    /// [`super::import_onnx_graph`] rejects any non-empty diagnostics.
+    fn decode(mut self) -> (Option<GraphParts>, Diagnostics) {
         self.check_header();
         let Some(graph) = self.model.graph.take() else {
             self.diagnostics
                 .push_global(ImportProblemKind::MissingGraph);
-            return Err(self
-                .diagnostics
-                .finish()
-                .expect("a missing graph is a problem"));
+            return (None, self.diagnostics);
         };
         if graph.sparse_initializer_count > 0 {
             self.diagnostics
@@ -3445,8 +4858,10 @@ impl<'a> Builder<'a> {
                     count: graph.sparse_initializer_count,
                 });
         }
+        let source_nodes = graph.nodes.len();
         self.register_declared(&graph);
         self.register_inputs(&graph);
+        self.report_unused_bindings();
         self.register_initializers(&graph);
         self.register_nodes(&graph);
         if self.over_budget {
@@ -3454,10 +4869,7 @@ impl<'a> Builder<'a> {
             // the artifact format) accepts. Running architecture detection over a
             // truncated graph would produce a page of misleading "missing
             // operand" problems after the one that matters.
-            return Err(self
-                .diagnostics
-                .finish()
-                .expect("reaching a parser budget is a problem"));
+            return (None, self.diagnostics);
         }
         self.resolve_outputs(&graph);
 
@@ -3467,6 +4879,16 @@ impl<'a> Builder<'a> {
             inputs: std::mem::take(&mut self.inputs),
             outputs: std::mem::take(&mut self.outputs),
         };
+        if graph_ir.nodes.len() != self.typed_params.len() {
+            self.diagnostics
+                .push_global(ImportProblemKind::Architecture {
+                    detail: format!(
+                        "internal: {} imported nodes carry {} typed attribute sets",
+                        graph_ir.nodes.len(),
+                        self.typed_params.len()
+                    ),
+                });
+        }
         let weights = match WeightSet::new(std::mem::take(&mut self.weights)) {
             Ok(weights) => weights,
             Err(error) => {
@@ -3477,24 +4899,12 @@ impl<'a> Builder<'a> {
                 WeightSet::default()
             }
         };
-        let geometry = detect_geometry(&graph_ir, &weights, &mut self.diagnostics);
-        let summary = summarize(&graph_ir, &weights);
-        let Some(geometry) = geometry else {
-            // Defensive: every `None` path in the detector records a problem, so
-            // this only fires if one is added without one. Report it instead of
-            // panicking.
-            self.diagnostics
-                .push_global(ImportProblemKind::Architecture {
-                    detail: "architecture detection produced no geometry".to_string(),
-                });
-            return Err(self
-                .diagnostics
-                .finish()
-                .expect("a missing geometry is a problem"));
-        };
-        if let Some(error) = self.diagnostics.finish() {
-            return Err(error);
-        }
+        let summary = summarize(
+            &graph_ir,
+            &weights,
+            Some(source_nodes),
+            self.folded_constants,
+        );
         let opset = self
             .model
             .opset_imports
@@ -3504,19 +4914,25 @@ impl<'a> Builder<'a> {
                 domain: String::new(),
                 version: opset.version,
             })
-            .expect("a clean import has a default-domain opset");
-        Ok(ModelImport {
-            ir_version: self.model.ir_version,
-            producer: self.model.producer_name.to_string(),
-            producer_version: self.model.producer_version.to_string(),
-            opset,
-            graph_name: graph.name.to_string(),
-            graph: graph_ir,
-            weights,
-            geometry,
-            summary,
-            warnings: std::mem::take(&mut self.warnings),
-        })
+            .unwrap_or(OpsetImport {
+                domain: String::new(),
+                version: 0,
+            });
+        (
+            Some(GraphParts {
+                ir_version: self.model.ir_version,
+                producer: self.model.producer_name.to_string(),
+                producer_version: self.model.producer_version.to_string(),
+                opset,
+                graph_name: graph.name.to_string(),
+                graph: graph_ir,
+                weights,
+                summary,
+                warnings: std::mem::take(&mut self.warnings),
+                typed_params: std::mem::take(&mut self.typed_params),
+            }),
+            self.diagnostics,
+        )
     }
 
     /// Model-level checks that do not need the graph.
@@ -3559,9 +4975,10 @@ impl<'a> Builder<'a> {
                 .push_global(ImportProblemKind::UnsupportedOpset {
                     version,
                     supported: format!(
-                        "{MIN_OPSET}..={MAX_OPSET}: the importer implements the opset-13 \
-                             input form for Squeeze/Unsqueeze/Split/Slice and the attribute form \
-                             of ReduceMean axes"
+                        "{MIN_OPSET}..={MAX_OPSET}: the importer implements the opset-12 \
+                             Split attribute form, the opset-13 input form for \
+                             Squeeze/Unsqueeze/Split/Slice and the attribute form of ReduceMean \
+                             axes"
                     ),
                 }),
             Some(_) => {}
@@ -3599,10 +5016,41 @@ impl<'a> Builder<'a> {
                     continue;
                 }
             };
-            let shape = match &ty.dims {
+            let mut shape = match &ty.dims {
                 Some(dims) => ValueShape::Dims(dims.iter().map(declared_dim).collect()),
                 None => ValueShape::Unknown,
             };
+            // A caller-supplied binding replaces a graph input's declared
+            // extents. A dynamic ONNX export spells those as `dim_param` names
+            // with no numeric meaning, and every extent downstream — a
+            // `Reshape` target, a `Concat` axis, a convolution's geometry —
+            // depends on them being concrete.
+            let is_input = graph
+                .inputs
+                .iter()
+                .any(|input| input.name == value_info.name);
+            if is_input {
+                if let Some(extents) = self.bindings.get(value_info.name) {
+                    match &shape {
+                        ValueShape::Dims(dims) if dims.len() != extents.len() => {
+                            self.diagnostics
+                                .push_global(ImportProblemKind::ShapeBinding {
+                                    input: value_info.name.to_string(),
+                                    detail: format!(
+                                        "the binding has {} extents, the model declares rank {}",
+                                        extents.len(),
+                                        dims.len()
+                                    ),
+                                });
+                        }
+                        _ => {
+                            shape =
+                                ValueShape::Dims(extents.iter().copied().map(Dim::Known).collect());
+                            self.used_bindings.insert(value_info.name.to_string());
+                        }
+                    }
+                }
+            }
             self.declared
                 .insert(value_info.name.to_string(), DeclaredValue { dtype, shape });
         }
@@ -3650,6 +5098,104 @@ impl<'a> Builder<'a> {
                 }
                 Err(kind) => self.diagnostics.push_global(kind),
             }
+        }
+    }
+
+    /// Fold one `Constant` node into a weight value.
+    ///
+    /// The typed IR has no constant payload, and a runtime `Constant` op would
+    /// execute once per step to materialise a value the file already fixed.
+    /// Folding it into the weight table makes the value an initializer-like
+    /// operand, which is also how `ConstantOfShape`'s fill value is handled.
+    fn register_constant(&mut self, ctx: &NodeRef, node: &proto::Node<'_>) {
+        let mut attrs = Attrs::new(&node.attributes);
+        let result = (|| -> Result<WeightTensor, PlanError> {
+            let name = node
+                .outputs
+                .first()
+                .copied()
+                .filter(|name| !name.is_empty())
+                .ok_or(ImportProblemKind::MissingName {
+                    what: "Constant output",
+                })?;
+            let mut forms: Vec<&'static str> = Vec::new();
+            let mut weight: Option<WeightTensor> = None;
+            if let Some(tensor) = attrs.tensor("value")? {
+                forms.push("value");
+                weight = Some(build_weight(
+                    tensor,
+                    WeightSource::AttributeConstant,
+                    || name.to_string(),
+                )?);
+            }
+            if let Some(value) = attrs.float("value_float")? {
+                forms.push("value_float");
+                weight = Some(attribute_weight(
+                    name,
+                    DType::F32,
+                    Vec::new(),
+                    value.to_le_bytes().to_vec(),
+                )?);
+            }
+            if let Some(values) = attrs.floats("value_floats")? {
+                forms.push("value_floats");
+                let bytes = values
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect();
+                weight = Some(attribute_weight(
+                    name,
+                    DType::F32,
+                    vec![values.len() as u64],
+                    bytes,
+                )?);
+            }
+            if let Some(value) = attrs.int("value_int")? {
+                forms.push("value_int");
+                weight = Some(attribute_weight(
+                    name,
+                    DType::I64,
+                    Vec::new(),
+                    value.to_le_bytes().to_vec(),
+                )?);
+            }
+            if let Some(values) = attrs.ints("value_ints")? {
+                forms.push("value_ints");
+                let bytes = values
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect();
+                weight = Some(attribute_weight(
+                    name,
+                    DType::I64,
+                    vec![values.len() as u64],
+                    bytes,
+                )?);
+            }
+            if forms.len() > 1 {
+                return Err(ImportProblemKind::UnsupportedAttribute {
+                    attribute: "Constant".to_string(),
+                    detail: format!(
+                        "the node carries more than one value payload ({}); exactly one is \
+                         allowed",
+                        forms.join(", ")
+                    ),
+                });
+            }
+            weight.ok_or_else(|| missing_attribute("value"))
+        })();
+        let mut problems = attrs.finish(Some(
+            "value, value_float, value_floats, value_int, value_ints",
+        ));
+        match result {
+            Ok(weight) => {
+                self.add_weight(weight, Some(ctx));
+                self.folded_constants += 1;
+            }
+            Err(error) => problems.push(error),
+        }
+        for problem in problems {
+            self.diagnostics.push(Some(ctx.clone()), problem);
         }
     }
 
@@ -3831,13 +5377,38 @@ impl<'a> Builder<'a> {
                 );
                 continue;
             }
+            // A `Constant` is data, not work: fold it into the weight table so
+            // no runtime op materialises it and the typed IR sees an ordinary
+            // initializer-like value.
+            if node.op_type == "Constant" {
+                self.register_constant(&ctx, node);
+                continue;
+            }
             let mut input_ids = Vec::with_capacity(node.inputs.len());
             let mut input_abstracts = Vec::with_capacity(node.inputs.len());
             let mut failed = false;
             let mut omitted_before_present = false;
-            for name in &node.inputs {
+            for (position, name) in node.inputs.iter().enumerate() {
                 if name.is_empty() {
-                    omitted_before_present = true;
+                    // ONNX `Resize` in opset 13+ carries `X, roi?, scales?,
+                    // sizes?`; a sizes-only node omits `scales`, which is a
+                    // hole in the middle. The planner identifies the surviving
+                    // tail by dtype, so the hole is allowed there and nowhere
+                    // else.
+                    // `Resize` in opset 13+ carries `X, roi?, scales?,
+                    // sizes?`; an exporter may omit `roi` (position 1), `scales`
+                    // (position 2) or both and keep `sizes`. Any hole the
+                    // planner can resolve by dtype is allowed.
+                    let resize_scales_hole = node.op_type == "Resize"
+                        && matches!(position, 1 | 2)
+                        && node
+                            .inputs
+                            .iter()
+                            .skip(position + 1)
+                            .any(|later| !later.is_empty());
+                    if !resize_scales_hole {
+                        omitted_before_present = true;
+                    }
                     continue;
                 }
                 if omitted_before_present {
@@ -3895,6 +5466,24 @@ impl<'a> Builder<'a> {
                 Some(planned) => self.register_planned(&ctx, node, &input_ids, planned),
                 None => self.poison_outputs(&ctx, node),
             }
+        }
+    }
+
+    /// A binding that matched nothing is a caller mistake, not a model
+    /// property: name it rather than ignore it.
+    fn report_unused_bindings(&mut self) {
+        let unused: Vec<String> = self
+            .bindings
+            .keys()
+            .filter(|name| !self.used_bindings.contains(*name))
+            .cloned()
+            .collect();
+        for name in unused {
+            self.diagnostics
+                .push_global(ImportProblemKind::ShapeBinding {
+                    input: name,
+                    detail: "the model declares no graph input with this name".to_string(),
+                });
         }
     }
 
@@ -3986,6 +5575,12 @@ impl<'a> Builder<'a> {
                 outputs: outputs.clone(),
                 params: operation.params.clone(),
             });
+            self.typed_params.push(
+                operation
+                    .typed
+                    .clone()
+                    .unwrap_or_else(|| operation.params.clone()),
+            );
             intermediates.push(
                 outputs
                     .first()
@@ -4535,12 +6130,25 @@ fn detect_layer_norm_epsilon(
 // ---------------------------------------------------------------------------
 
 /// Count nodes, operators, weights and dtypes.
-fn summarize(graph: &GraphIr, weights: &WeightSet) -> ImportSummary {
+/// Count the graph's nodes and weights.
+///
+/// `source_nodes` is `GraphProto.node.len()` and `folded_constants` is how many
+/// `Constant` nodes were folded into weights: a folded node still belongs in the
+/// ONNX census even though it produces no fn3 node. The artifact path, which
+/// has no source file, passes the emitted count and zero.
+fn summarize(
+    graph: &GraphIr,
+    weights: &WeightSet,
+    source_nodes: Option<usize>,
+    folded_constants: usize,
+) -> ImportSummary {
     // The ONNX census counts *ONNX nodes*: a `Gemm` that becomes MatMul + Add is
     // still one ONNX node.
     let mut onnx_node_ops: BTreeMap<u32, &str> = BTreeMap::new();
     let mut ops: BTreeMap<u16, usize> = BTreeMap::new();
     for node in graph.nodes() {
+        // A composition (`Gemm` -> MatMul + Add) is one ONNX node, so the
+        // source census is keyed by source index, not by emitted node.
         onnx_node_ops
             .entry(node.onnx_index)
             .or_insert(&node.onnx_op);
@@ -4550,13 +6158,17 @@ fn summarize(graph: &GraphIr, weights: &WeightSet) -> ImportSummary {
     for op_type in onnx_node_ops.values() {
         *onnx_ops.entry(op_type).or_insert(0) += 1;
     }
+    if folded_constants > 0 {
+        *onnx_ops.entry("Constant").or_insert(0) += folded_constants;
+    }
     let mut dtypes: BTreeMap<u8, usize> = BTreeMap::new();
     for value in graph.values() {
         *dtypes.entry(value.dtype.code()).or_insert(0) += 1;
     }
     let initializers = weights.initializers().count();
+    let onnx_nodes = source_nodes.unwrap_or(onnx_node_ops.len());
     ImportSummary {
-        onnx_nodes: onnx_node_ops.len(),
+        onnx_nodes,
         fn3_nodes: graph.nodes().len(),
         values: graph.value_count(),
         initializers,

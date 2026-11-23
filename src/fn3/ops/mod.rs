@@ -117,11 +117,43 @@ pub enum OpId {
     /// backend may compose it from `MatMul`/`Softmax`/`Where`, but must report
     /// `Support::Unsupported` for the fused id rather than approximating it.
     MaskedAttention = 40,
+    /// N-dimensional convolution over NCHW/NCDHW operands with `groups`,
+    /// `dilations`, `strides`, `pads` and `auto_pad`.
+    ///
+    /// Imported but not executed: no backend kernel exists yet (#102/#104).
+    Conv = 41,
+    /// Sliding-window maximum over the spatial axes, with `ceil_mode`,
+    /// `dilations`, `strides` and `pads`.
+    MaxPool = 42,
+    /// Sliding-window mean over the spatial axes, with `ceil_mode`,
+    /// `count_include_pad`, `dilations`, `strides` and `pads`.
+    AveragePool = 43,
+    /// Mean over every spatial axis, producing `[N, C, 1, ...]`.
+    GlobalAveragePool = 44,
+    /// Inference-mode batch normalization: `(x - mean) / sqrt(var + eps) *
+    /// scale + bias` with 1-D per-channel parameters.
+    BatchNorm = 45,
+    /// Spatial resampling, nearest or linear, from constant `scales` or
+    /// constant `sizes`.
+    Resize = 46,
+    /// N-dimensional padding with constant, reflect or edge mode; negative
+    /// pads crop.
+    Pad = 47,
+    /// Elementwise clamp to a constant interval.
+    Clip = 48,
+    /// Logistic sigmoid, `1 / (1 + exp(-x))`.
+    Sigmoid = 49,
+    /// Elementwise maximum with NumPy broadcasting.
+    Maximum = 50,
+    /// Elementwise minimum with NumPy broadcasting.
+    Minimum = 51,
+    /// Largest (or smallest) `k` elements and their indices along one axis.
+    TopK = 52,
 }
 
 impl OpId {
     /// Every op id defined in this revision, in discriminant order.
-    pub const ALL: [OpId; 40] = [
+    pub const ALL: [OpId; 52] = [
         OpId::Gather,
         OpId::MatMul,
         OpId::Add,
@@ -162,6 +194,18 @@ impl OpId {
         OpId::Cos,
         OpId::ScatterND,
         OpId::MaskedAttention,
+        OpId::Conv,
+        OpId::MaxPool,
+        OpId::AveragePool,
+        OpId::GlobalAveragePool,
+        OpId::BatchNorm,
+        OpId::Resize,
+        OpId::Pad,
+        OpId::Clip,
+        OpId::Sigmoid,
+        OpId::Maximum,
+        OpId::Minimum,
+        OpId::TopK,
     ];
 
     /// Stable numeric discriminant. This is the value written into plans.
@@ -212,6 +256,18 @@ impl OpId {
             OpId::Cos => "cos",
             OpId::ScatterND => "scatter_nd",
             OpId::MaskedAttention => "masked_attention",
+            OpId::Conv => "conv",
+            OpId::MaxPool => "max_pool",
+            OpId::AveragePool => "average_pool",
+            OpId::GlobalAveragePool => "global_average_pool",
+            OpId::BatchNorm => "batch_norm",
+            OpId::Resize => "resize",
+            OpId::Pad => "pad",
+            OpId::Clip => "clip",
+            OpId::Sigmoid => "sigmoid",
+            OpId::Maximum => "maximum",
+            OpId::Minimum => "minimum",
+            OpId::TopK => "top_k",
         }
     }
 
@@ -259,6 +315,18 @@ impl OpId {
             OpId::Cos => "elementwise cosine",
             OpId::ScatterND => "indexed scatter into a copy",
             OpId::MaskedAttention => "fused causal attention over a KV cache extent",
+            OpId::Conv => "n-dimensional convolution with groups and auto_pad",
+            OpId::MaxPool => "sliding-window maximum over the spatial axes",
+            OpId::AveragePool => "sliding-window mean over the spatial axes",
+            OpId::GlobalAveragePool => "mean over every spatial axis",
+            OpId::BatchNorm => "per-channel batch normalization (inference form)",
+            OpId::Resize => "spatial resampling from constant scales or sizes",
+            OpId::Pad => "n-dimensional padding, with negative pads cropping",
+            OpId::Clip => "elementwise clamp to a constant interval",
+            OpId::Sigmoid => "logistic sigmoid",
+            OpId::Maximum => "elementwise maximum with broadcasting",
+            OpId::Minimum => "elementwise minimum with broadcasting",
+            OpId::TopK => "top-k values and indices along one axis",
         }
     }
 
@@ -275,9 +343,11 @@ impl OpId {
             | OpId::Concat
             | OpId::Slice
             | OpId::Split
-            | OpId::Expand => OpFamily::DataMovement,
+            | OpId::Expand
+            | OpId::Resize
+            | OpId::Pad => OpFamily::DataMovement,
             OpId::Shape | OpId::ConstantOfShape | OpId::Range => OpFamily::Shape,
-            OpId::MatMul => OpFamily::LinearAlgebra,
+            OpId::MatMul | OpId::Conv => OpFamily::LinearAlgebra,
             OpId::Add
             | OpId::Sub
             | OpId::Mul
@@ -291,9 +361,19 @@ impl OpId {
             | OpId::Relu
             | OpId::Sin
             | OpId::Cos
-            | OpId::Cast => OpFamily::Elementwise,
-            OpId::Softmax | OpId::LayerNorm => OpFamily::Normalization,
-            OpId::ReduceMean | OpId::ReduceSum | OpId::ArgMax => OpFamily::Reduction,
+            | OpId::Cast
+            | OpId::Clip
+            | OpId::Sigmoid
+            | OpId::Maximum
+            | OpId::Minimum => OpFamily::Elementwise,
+            OpId::Softmax | OpId::LayerNorm | OpId::BatchNorm => OpFamily::Normalization,
+            OpId::ReduceMean
+            | OpId::ReduceSum
+            | OpId::ArgMax
+            | OpId::MaxPool
+            | OpId::AveragePool
+            | OpId::GlobalAveragePool
+            | OpId::TopK => OpFamily::Reduction,
             OpId::Equal
             | OpId::Less
             | OpId::Greater
@@ -358,6 +438,18 @@ impl OpId {
             38 => Some(OpId::Cos),
             39 => Some(OpId::ScatterND),
             40 => Some(OpId::MaskedAttention),
+            41 => Some(OpId::Conv),
+            42 => Some(OpId::MaxPool),
+            43 => Some(OpId::AveragePool),
+            44 => Some(OpId::GlobalAveragePool),
+            45 => Some(OpId::BatchNorm),
+            46 => Some(OpId::Resize),
+            47 => Some(OpId::Pad),
+            48 => Some(OpId::Clip),
+            49 => Some(OpId::Sigmoid),
+            50 => Some(OpId::Maximum),
+            51 => Some(OpId::Minimum),
+            52 => Some(OpId::TopK),
             _ => None,
         }
     }

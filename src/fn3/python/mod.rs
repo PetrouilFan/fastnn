@@ -6,15 +6,15 @@
 //! versioned artifact, one loaded model, an explicit device, and sessions that
 //! own their cache. It is a thin adaptation of `crate::inference`, not a second
 //! implementation: every number a Python caller sees is produced by the same
-//! `Session::prefill` / `Session::decode` the CLI and the Rust tests call.
+//! `Session::run` the CLI and the Rust tests call.
 //!
 //! ```text
-//! prepare(onnx, artifact)          import ──► PreparedArtifact ──► file
-//! inspect(artifact)                file ──► geometry / size / checksums
-//! load(artifact, source=…, device=…)   artifact + source ──► Model
-//! Model.session()                  one independent KV cache + plan cache
-//! Session.prefill(tokens)          logits [batch, 1, vocab]
-//! Session.decode(tokens)           logits [batch, 1, vocab], cache grows by n
+//! prepare(onnx, artifact)            import ──► PreparedArtifact ──► file
+//! inspect(artifact)                  header / graph / plans / hashes, no map
+//! load(artifact, target=…)           mmap + stored plan ──► Model
+//! Model.session()                    one independent arena + worker pool
+//! Session.run({name: values})        one forward ──► {name: Tensor}
+//! doctor(onnx)                       diagnose before preparing
 //! ```
 //!
 //! # Where the code lives
@@ -37,7 +37,7 @@
 //! * **Copies are explicit.** Logits leave the session as one immutable `bytes`
 //!   copy; NumPy views that copy instead of copying it again. A task result can
 //!   therefore outlive the session.
-//! * **The GIL is released** around prepare, load, prefill and decode. Python
+//! * **The GIL is released** around prepare, load and a session forward. Python
 //!   objects are only touched with the GIL held.
 
 mod device;
@@ -56,10 +56,12 @@ Use the `fastnn.inference` package rather than this module: it adds path handlin
 docstrings and re-exports these objects. Everything here is the same Rust
 execution path the CLI uses.
 
-prepare(onnx, artifact, ...) -> PrepareReport
+prepare(onnx, artifact, target=\"cpu\", precision=\"f32\") -> PrepareReport
 inspect(artifact) -> ArtifactInfo
-load(artifact, source=..., device=..., capacity=..., weight_int8=...) -> Model
+load(artifact, target=None, device=None) -> Model
+doctor(onnx) -> DoctorReport
 devices() -> list[Device]
+targets() -> tuple[str, ...]
 ";
 
 /// Attach the `inference` submodule to `_core` and register it for `import`.
@@ -77,19 +79,20 @@ pub fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
         "prepare",
         "inspect",
         "load",
+        "doctor",
         "devices",
+        "targets",
         "Device",
-        "Geometry",
-        "Envelope",
         "Metadata",
+        "PlanInfo",
+        "Section",
         "PrepareReport",
         "ArtifactInfo",
+        "DoctorIssue",
+        "DoctorReport",
         "Model",
         "Session",
-        "SessionStats",
-        "WeightInt8Report",
-        "WeightInt8Route",
-        "Logits",
+        "Tensor",
     ];
     names.extend_from_slice(errors::NAMES);
     module.add("__all__", names)?;

@@ -18,7 +18,7 @@
 //! ```bash
 //! FN3_PERF=1 FN3_VK_DEVICE_UUID=471b2bda-51e1-6451-e692-ff5d1e146f1e \
 //! FN3_VK_REQUIRE_PHYSICAL=1 FASTNN_FN3_ONNX_MODEL=/path/to/model.onnx \
-//!   flock /tmp/opencode/fn3-bench.lock -c \
+//!   flock /tmp/opencode/fn3-vulkan-perf.lock -c \
 //!   'CARGO_BUILD_JOBS=5 cargo test --release --features vulkan \
 //!      --test fn3_vulkan_perf -- --nocapture --test-threads=1'
 //! ```

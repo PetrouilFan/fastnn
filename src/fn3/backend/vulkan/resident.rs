@@ -444,9 +444,12 @@ struct PersistentKey {
 
 impl PersistentKey {
     /// Key of a host view, or `None` when the view cannot be a persistent
-    /// tensor (strided, resident, or zero bytes).
+    /// tensor (strided, resident, byte-window backed, or zero bytes).
     fn of_view(view: &TensorView<'_>) -> Option<PersistentKey> {
-        if view.storage().is_resident() || !view.is_contiguous() {
+        // A byte-window view has no owning allocation to key on, so it can
+        // never have been uploaded by `prepare_persistent`.
+        let storage = view.storage()?;
+        if storage.is_resident() || !view.is_contiguous() {
             return None;
         }
         let len = view.meta().byte_len().ok()?;
@@ -455,7 +458,7 @@ impl PersistentKey {
         }
         let offset = view.meta().byte_offset().ok()?;
         Some(PersistentKey {
-            identity: view.storage().generation(),
+            identity: storage.generation(),
             offset,
             len,
         })
@@ -731,9 +734,15 @@ impl super::VulkanBackend {
     /// bytes". A resident tensor that cannot be bound whole is an error, never a
     /// silent fallback to a host read of an empty buffer.
     pub fn resident_input(&self, view: &TensorView<'_>) -> Fn3Result<Option<Arc<Buffer>>> {
-        if view.storage().is_resident() {
+        let Some(storage) = view.storage() else {
+            // A byte-window view owns no allocation, so no device copy of it can
+            // exist: the caller stages its host bytes, exactly as for any other
+            // non-resident input.
+            return Ok(None);
+        };
+        if storage.is_resident() {
             require_whole_buffer(view, "vulkan resident input")?;
-            let buffer = self.resident_storage_buffer(view.storage())?;
+            let buffer = self.resident_storage_buffer(storage)?;
             let bytes = view.meta().byte_len()? as u64;
             if bytes > buffer.size() {
                 return Err(Fn3Error::OutOfBounds {
@@ -786,7 +795,8 @@ impl super::VulkanBackend {
                     return Err(Error::internal(format!(
                         "persistent tensor \"{}\" reached a host upload after prepare ({} bytes); \
                          bind it with VulkanBackend::resident_input",
-                        view.storage().residency_label(),
+                        view.storage()
+                            .map_or("window", |storage| storage.residency_label()),
                         key.len
                     ))
                     .to_fn3());

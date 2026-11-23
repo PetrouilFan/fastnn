@@ -180,6 +180,6 @@ Date: YYYY-MM-DD
 ## See also
 
 - [Development](development.md) -- Codebase walkthrough and how-to guides
-- [Architecture](architecture.md) -- AOT compiler pipeline documentation
+- [Architecture](../archive/internals/architecture.md) -- AOT compiler pipeline documentation
 - [docs/index.md](../index.md) -- Documentation home
 - [CONTRIBUTING.md](../../CONTRIBUTING.md) -- Repository setup, PR process, coding standards

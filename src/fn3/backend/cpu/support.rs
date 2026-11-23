@@ -63,6 +63,19 @@
 //! here is the honest answer: the backend has no fused kernel to advertise, and
 //! `Capabilities::features.masked_attention` stays `false`.
 //!
+//! # The CNN op ids
+//!
+//! The twelve CNN ids (`Conv` … `TopK`, 41..=52) are **`Full`** as of the v3
+//! segment runtime. Their scalar kernels live in
+//! [`crate::inference::runtime::kernels`], and
+//! [`crate::inference::backend::cpu::dispatch_kernels`] routes them there, so
+//! `CpuBackend::supports(Conv) == Full` is backed by a kernel that
+//! `execute_op` can reach. The kernels are NCHW `f32` scalar loops: the
+//! documented contract of each one is its whole implemented surface, and a
+//! request outside it (a `cubic` `Resize`, a `wrap` `Pad`, a grouped `Conv`
+//! whose channel split does not match) is rejected with `UnsupportedOp` rather
+//! than approximated.
+//!
 //! # Why every other id is `Full`
 //!
 //! `Support::Full` is only claimed for an id that has a kernel in
@@ -77,8 +90,8 @@
 use crate::inference::backend::Support;
 use crate::inference::ops::OpId;
 
-/// Every op id the alpha CPU reference executes.
-pub(crate) const IMPLEMENTED: [OpId; 39] = [
+/// Every op id the CPU reference executes.
+pub(crate) const IMPLEMENTED: [OpId; 51] = [
     OpId::Gather,
     OpId::MatMul,
     OpId::Add,
@@ -118,6 +131,19 @@ pub(crate) const IMPLEMENTED: [OpId; 39] = [
     OpId::Sin,
     OpId::Cos,
     OpId::ScatterND,
+    // The CNN set: scalar NCHW kernels in `runtime::kernels`.
+    OpId::Conv,
+    OpId::MaxPool,
+    OpId::AveragePool,
+    OpId::GlobalAveragePool,
+    OpId::BatchNorm,
+    OpId::Resize,
+    OpId::Pad,
+    OpId::Clip,
+    OpId::Sigmoid,
+    OpId::Maximum,
+    OpId::Minimum,
+    OpId::TopK,
 ];
 
 /// The support answer for `op`.
@@ -162,6 +188,7 @@ mod tests {
             if op == OpId::MaskedAttention {
                 assert!(matches!(support, Support::Unsupported { .. }));
                 assert!(support.reason().unwrap().contains("#61"));
+                assert!(!IMPLEMENTED.contains(&op), "{op} must have no kernel");
             } else {
                 assert!(support.is_full(), "{op} reports {support}");
                 assert!(
@@ -172,6 +199,33 @@ mod tests {
             assert!(
                 !matches!(support, Support::Partial { .. }),
                 "{op} must not report Partial"
+            );
+        }
+    }
+
+    #[test]
+    fn the_twelve_cnn_ids_report_full_with_a_kernel_behind_them() {
+        // `Support::Full` is only honest when the dispatch table reaches a
+        // kernel, so this pins the twelve ids to the CNN kernel module rather
+        // than to a list someone may forget to update.
+        for op in [
+            OpId::Conv,
+            OpId::MaxPool,
+            OpId::AveragePool,
+            OpId::GlobalAveragePool,
+            OpId::BatchNorm,
+            OpId::Resize,
+            OpId::Pad,
+            OpId::Clip,
+            OpId::Sigmoid,
+            OpId::Maximum,
+            OpId::Minimum,
+            OpId::TopK,
+        ] {
+            assert!(support(op).is_full(), "{op}");
+            assert!(
+                crate::inference::runtime::kernels::is_cnn_op(op),
+                "{op} is not routed to the CNN kernels"
             );
         }
     }

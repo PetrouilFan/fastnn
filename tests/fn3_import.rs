@@ -1223,16 +1223,19 @@ fn a_missing_opset_is_reported() {
 #[test]
 fn an_unsupported_opset_is_reported_with_its_range() {
     let mut model = synthetic_gpt2();
-    model.opset = Some(18);
+    // Opset 23 is past the supported range; 18..=22 are accepted because the
+    // operators this importer implements did not change shape or attribute
+    // spelling across them, and a current YOLO export declares 22.
+    model.opset = Some(23);
     let error = import(&model).unwrap_err();
     assert!(
         error.contains(|kind| matches!(
             kind,
-            ImportProblemKind::UnsupportedOpset { version: 18, .. }
+            ImportProblemKind::UnsupportedOpset { version: 23, .. }
         )),
         "{error}"
     );
-    assert!(error.to_string().contains("13..=17"), "{error}");
+    assert!(error.to_string().contains("12..=22"), "{error}");
 }
 
 #[test]

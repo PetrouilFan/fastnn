@@ -39,7 +39,7 @@ ONNX ──import──► GraphIr ──prepare──► PreparedArtifact ─�
                                               prefill / decode ──► logits
 ```
 
-Contracts live in `docs/roadmap/fn3-architecture.md` and
+Contracts live in `docs/archive/roadmap/fn3-architecture.md` and
 `src/fn3/AGENTS.md`. The dependency direction is a DAG
 (`dtype/device/ops → error → shape/storage → tensor → backend → model`); do not
 import upward. `src/fn3/` imports no 2.x module and 2.x imports nothing from it.
@@ -93,10 +93,10 @@ deleted training tree.
 
 ## Performance reports
 
-`tools/bench/perf_report.py` writes one JSON report per measurement:
+`tools/perf/perf_report.py` writes one JSON report per measurement:
 
 ```bash
-PYTHONPATH=. .venv/bin/python tools/bench/perf_report.py \
+PYTHONPATH=. .venv/bin/python tools/perf/perf_report.py \
   --model evit-depth-5m=/path/to/efficientvit_depth_5m.onnx \
   --input pixel_values=1,3,336,448 --threads 4 --repeat 20 \
   --require-quiet 2 --out docs/reports/perf-evit-depth-5m-cpu.json
@@ -109,7 +109,7 @@ every output. `--require-quiet N` refuses to measure when the load average is
 above `N`: a benchmark taken on a busy host is noise, and the number is recorded
 in the report so a reader can tell the two apart.
 
-`tools/bench/compare_perf.py --base A --head B` prints the transitions and
+`tools/perf/compare_perf.py --base A --head B` prints the transitions and
 fails when the median grows past 15 % or the peak RSS past 20 %, or when an
 output digest changed. `tools/ci/perf-lane.sh` runs both, and skips with an
 explanation when the model or the baseline is absent, because a model is not
@@ -152,6 +152,8 @@ parity row that disagrees: the disagreement is the finding.
 
 ## Benchmarks
 
-`tools/bench/` is the 3.0 reproducible harness (`cargo run --release --bin
-fn3-bench` with `--no-default-features`); `benches/cpu_baselines.rs` covers the
-2.x CPU kernels. Both emit JSON with the build and host identity recorded.
+The 3.0 Rust benchmark harness was removed with the 2.x surface (tag
+`archive/3.0`). The v3 harness is issue #106: fixed runner, cold and
+warm latency, p50/p95/p99, memory and a same-machine ORT control.
+`tools/perf/` keeps the report schema and the comparison budgets until
+that harness replaces them.

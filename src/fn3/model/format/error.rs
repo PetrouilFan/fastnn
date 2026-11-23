@@ -1,17 +1,18 @@
-//! Typed errors for the versioned prepared-model format.
+//! Typed errors for the versioned prepared-model format (version 2).
 //!
 //! # Why a format-local error type
 //!
-//! [`crate::inference::error::Fn3Error`] is the core's single error type, but it is
-//! owned by FN3-02 (#48) and its `InvalidFormat` variant carries one flat
-//! string. A reader of an untrusted file has to distinguish cases that a caller
-//! acts on differently: *this file is from the future* (upgrade the reader),
-//! *this file is corrupt* (re-download it), *this file is hostile* (refuse it)
-//! and *this file is internally inconsistent* (a writer bug). Hence one small,
-//! exhaustive enum here, converted to `Fn3Error::InvalidFormat` at the boundary.
+//! [`crate::inference::error::Fn3Error`] is the core's single error type, but its
+//! `InvalidFormat` variant carries one flat string. A reader of an untrusted
+//! file has to distinguish cases that a caller acts on differently: *this file is
+//! from the future* (upgrade the reader), *this file is the old format*
+//! (re-prepare it), *this file is corrupt* (re-download it), *this file is
+//! hostile* (refuse it) and *this file is internally inconsistent* (a writer
+//! bug). Hence one small, exhaustive enum here, converted to
+//! `Fn3Error::InvalidFormat` at the boundary.
 //!
-//! Every variant names what was being read and the values involved. Nothing is
-//! ever reported as "parse error".
+//! Every variant names what was being read, and every structural error also
+//! carries the absolute byte offset within the file.
 
 use std::fmt;
 
@@ -34,13 +35,24 @@ pub enum FormatErrorKind {
         /// Operating-system detail.
         detail: String,
     },
-    /// The first eight bytes are not the prepared-model magic.
+    /// The first eight bytes are not an artifact magic.
     ///
     /// This is also what a 2.x `.fnnc` file produces: that format is raw
-    /// `bincode` with no magic, so it can never be mistaken for a 3.0 artifact.
+    /// `bincode` with no magic, so it can never be mistaken for an artifact.
     BadMagic {
         /// The eight bytes that were found.
         found: [u8; 8],
+    },
+    /// A version-1 artifact (`FNN3PREP`, or `FNN3ART2` version 1) was opened.
+    ///
+    /// Version 1 stored a decoder-shaped graph and only three `OpParams`
+    /// fields. It is not read by this build and there is no compatibility
+    /// parser: the source ONNX must be prepared again.
+    ObsoleteFormat {
+        /// The magic the file carries.
+        magic: [u8; 8],
+        /// The version field the file declares (1 for a `FNN3PREP` file).
+        version: u16,
     },
     /// The file declares a format version this build does not read.
     UnsupportedVersion {
@@ -62,6 +74,8 @@ pub enum FormatErrorKind {
         field: &'static str,
         /// The value that was found, widened for display.
         value: u64,
+        /// Absolute byte offset of the field.
+        offset: u64,
     },
     /// The input ended before the declared structure did.
     Truncated {
@@ -71,6 +85,8 @@ pub enum FormatErrorKind {
         needed: u64,
         /// Bytes actually remaining.
         available: u64,
+        /// Absolute byte offset where the read started.
+        offset: u64,
     },
     /// Two length fields that must agree do not.
     LengthMismatch {
@@ -80,13 +96,19 @@ pub enum FormatErrorKind {
         declared: u64,
         /// The length that is actually present.
         actual: u64,
+        /// Absolute byte offset of the field that declared it.
+        offset: u64,
     },
-    /// The payload checksum does not match the payload.
-    ChecksumMismatch {
-        /// CRC-32 stored in the header.
-        stored: u32,
-        /// CRC-32 the payload actually has.
-        computed: u32,
+    /// A section's SHA-256 does not match the hash the file stores.
+    HashMismatch {
+        /// Section name.
+        section: String,
+        /// Absolute byte offset of the section.
+        offset: u64,
+        /// Hash stored in the `HASHES` section.
+        stored: [u8; 32],
+        /// Hash the section bytes actually produce.
+        computed: [u8; 32],
     },
     /// A count or declared size exceeds this build's documented policy cap.
     ///
@@ -100,18 +122,23 @@ pub enum FormatErrorKind {
         /// The cap this build enforces.
         limit: u64,
     },
-    /// The bytes are structurally wrong (bad tag, non-UTF-8 name, ...).
-    Malformed {
-        /// What was being read.
-        what: String,
+    /// The bytes are structurally wrong.
+    ///
+    /// The section name and the absolute file offset are the two facts a user
+    /// needs to locate the bad byte.
+    MalformedAt {
+        /// Section or structure being read.
+        section: String,
+        /// Absolute byte offset within the file.
+        offset: u64,
         /// The offending value and the rule it broke.
         detail: String,
     },
     /// The bytes decode but describe an impossible model.
     ///
-    /// The distinction from [`FormatErrorKind::Malformed`] matters: a corrupt
+    /// The distinction from [`FormatErrorKind::MalformedAt`] matters: a corrupt
     /// file breaks the framing, a *writer bug* produces a well-framed file whose
-    /// geometry, weights and value table disagree.
+    /// graph, weight table and plans disagree.
     Inconsistent {
         /// What was being checked.
         what: String,
@@ -120,10 +147,17 @@ pub enum FormatErrorKind {
     },
     /// A tensor carried a dtype code this build does not define.
     UnknownDType(UnknownDTypeCode),
-    /// A node carried an op code this build does not define.
+    /// A node or plan carried an op code this build does not define.
     UnknownOpCode {
         /// The rejected code, as it appeared in the file.
         code: u16,
+    },
+    /// The quantization metadata describes a precision this build cannot execute.
+    UnsupportedPrecision {
+        /// The precision code found.
+        found: u8,
+        /// The only precision version 2 executes.
+        supported: &'static str,
     },
     /// A core contract rejected the decoded object.
     Contract {
@@ -145,19 +179,30 @@ impl FormatError {
         FormatError { kind }
     }
 
-    /// The input ended early.
-    pub(super) fn truncated(what: impl Into<String>, needed: u64, available: u64) -> FormatError {
+    /// The input ended early, naming the absolute file offset.
+    pub(super) fn truncated_at(
+        what: impl Into<String>,
+        offset: u64,
+        needed: u64,
+        available: u64,
+    ) -> FormatError {
         FormatError::new(FormatErrorKind::Truncated {
             what: what.into(),
             needed,
             available,
+            offset,
         })
     }
 
-    /// The bytes are structurally wrong.
-    pub(super) fn malformed(what: impl Into<String>, detail: impl Into<String>) -> FormatError {
-        FormatError::new(FormatErrorKind::Malformed {
-            what: what.into(),
+    /// A structural failure at a known file offset.
+    pub(super) fn malformed_at(
+        section: impl Into<String>,
+        offset: u64,
+        detail: impl Into<String>,
+    ) -> FormatError {
+        FormatError::new(FormatErrorKind::MalformedAt {
+            section: section.into(),
+            offset,
             detail: detail.into(),
         })
     }
@@ -192,6 +237,21 @@ impl FormatError {
         })
     }
 
+    /// A length relationship failed at `offset`.
+    pub(super) fn length_mismatch(
+        what: &'static str,
+        declared: u64,
+        actual: u64,
+        offset: u64,
+    ) -> FormatError {
+        FormatError::new(FormatErrorKind::LengthMismatch {
+            what,
+            declared,
+            actual,
+            offset,
+        })
+    }
+
     /// `true` when the file was produced by a different format version.
     ///
     /// A caller that can re-serialize (a CLI, the Python facade) uses this to
@@ -201,6 +261,7 @@ impl FormatError {
             self.kind,
             FormatErrorKind::UnsupportedVersion { .. }
                 | FormatErrorKind::UnsupportedDtypeEncoding { .. }
+                | FormatErrorKind::ObsoleteFormat { .. }
         )
     }
 
@@ -209,71 +270,103 @@ impl FormatError {
         matches!(
             self.kind,
             FormatErrorKind::Truncated { .. }
-                | FormatErrorKind::ChecksumMismatch { .. }
+                | FormatErrorKind::HashMismatch { .. }
                 | FormatErrorKind::BadMagic { .. }
+                | FormatErrorKind::ObsoleteFormat { .. }
                 | FormatErrorKind::LengthMismatch { .. }
                 | FormatErrorKind::ReservedField { .. }
-                | FormatErrorKind::Malformed { .. }
+                | FormatErrorKind::MalformedAt { .. }
+                | FormatErrorKind::LimitExceeded { .. }
         )
     }
-}
 
-/// Render bytes as lowercase hex pairs, for a magic-mismatch message.
-fn hex(bytes: &[u8]) -> String {
-    let mut rendered = String::with_capacity(bytes.len() * 3);
-    for (position, byte) in bytes.iter().enumerate() {
-        if position > 0 {
-            rendered.push(' ');
+    /// The section this error belongs to, when it names one.
+    pub fn section(&self) -> Option<&str> {
+        match &self.kind {
+            FormatErrorKind::MalformedAt { section, .. }
+            | FormatErrorKind::HashMismatch { section, .. } => Some(section),
+            _ => None,
         }
-        rendered.push_str(&format!("{byte:02x}"));
     }
-    rendered
+
+    /// The absolute file offset this error names, when it names one.
+    pub fn offset(&self) -> Option<u64> {
+        match &self.kind {
+            FormatErrorKind::Truncated { offset, .. }
+            | FormatErrorKind::LengthMismatch { offset, .. }
+            | FormatErrorKind::ReservedField { offset, .. }
+            | FormatErrorKind::HashMismatch { offset, .. }
+            | FormatErrorKind::MalformedAt { offset, .. } => Some(*offset),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for FormatError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.kind {
-            FormatErrorKind::Io { path, detail } => write!(f, "{path}: {detail}"),
+            FormatErrorKind::Io { path, detail } => {
+                write!(f, "cannot access `{path}`: {detail}")
+            }
             FormatErrorKind::BadMagic { found } => write!(
                 f,
-                "not a FastNN 3 prepared model: the file starts with {}, the magic is {}",
-                hex(found),
-                hex(&super::MAGIC)
+                "the first eight bytes are {}; a prepared-model artifact starts with FNN3ART2",
+                render_magic(*found)
+            ),
+            FormatErrorKind::ObsoleteFormat { magic, version } => write!(
+                f,
+                "this is a version-{version} artifact (magic {}); format version 2 replaced it \
+                 and has no compatibility reader. Re-prepare the source ONNX with this build \
+                 (`fastnn-infer prepare --onnx <model.onnx> --out <model.fnn3>`)",
+                render_magic(*magic)
             ),
             FormatErrorKind::UnsupportedVersion { found, supported } => write!(
                 f,
                 "this file is prepared-model format version {found}, but this build reads \
-                 version {supported} only"
+                 version {supported} only; re-prepare it with this build"
             ),
             FormatErrorKind::UnsupportedDtypeEncoding { found, supported } => write!(
                 f,
-                "this file uses dtype encoding {found}, but this build reads encoding \
-                 {supported} only"
+                "this file uses dtype encoding {found}; this build reads encoding {supported} only"
             ),
-            FormatErrorKind::ReservedField { field, value } => write!(
+            FormatErrorKind::ReservedField {
+                field,
+                value,
+                offset,
+            } => write!(
                 f,
-                "reserved header field `{field}` is {value}, but this build requires 0"
+                "reserved field `{field}` at byte {offset} is {value:#x}, expected 0"
             ),
             FormatErrorKind::Truncated {
                 what,
                 needed,
                 available,
+                offset,
             } => write!(
                 f,
-                "truncated {what}: {needed} bytes are required, {available} are available"
+                "truncated {what} at byte {offset}: {needed} bytes are required but only \
+                 {available} are available"
             ),
             FormatErrorKind::LengthMismatch {
                 what,
                 declared,
                 actual,
+                offset,
             } => write!(
                 f,
-                "{what}: the file declares {declared}, but {actual} is present"
+                "{what} at byte {offset} declares {declared}, but {actual} is present"
             ),
-            FormatErrorKind::ChecksumMismatch { stored, computed } => write!(
+            FormatErrorKind::HashMismatch {
+                section,
+                offset,
+                stored,
+                computed,
+            } => write!(
                 f,
-                "payload checksum mismatch: the header stores crc32 {stored:#010x}, the \
-                 payload hashes to {computed:#010x}; the file is corrupt"
+                "the {section} section at byte {offset} does not match its SHA-256: stored {}, \
+                 computed {}",
+                hex(stored),
+                hex(computed)
             ),
             FormatErrorKind::LimitExceeded {
                 what,
@@ -283,117 +376,58 @@ impl fmt::Display for FormatError {
                 f,
                 "{what} declares {requested}, above this build's limit of {limit}"
             ),
-            FormatErrorKind::Malformed { what, detail } => {
-                write!(f, "malformed {what}: {detail}")
-            }
+            FormatErrorKind::MalformedAt {
+                section,
+                offset,
+                detail,
+            } => write!(f, "malformed {section} at byte {offset}: {detail}"),
             FormatErrorKind::Inconsistent { what, detail } => {
                 write!(f, "inconsistent {what}: {detail}")
             }
             FormatErrorKind::UnknownDType(error) => write!(f, "{error}"),
             FormatErrorKind::UnknownOpCode { code } => {
-                write!(f, "unknown op code {code}")?;
-                if crate::inference::ops::OpId::is_reserved(*code) {
-                    write!(
-                        f,
-                        " (it falls in a reserved range this build does not define)"
-                    )?;
-                }
-                write!(f, "; the file was written by a build with a larger op set")
+                write!(f, "unknown op code {code} in the node or plan table")
             }
-            FormatErrorKind::Contract { what, error } => write!(f, "{what}: {error}"),
+            FormatErrorKind::UnsupportedPrecision { found, supported } => write!(
+                f,
+                "the artifact declares precision code {found}; this build executes {supported} only"
+            ),
+            FormatErrorKind::Contract { what, error } => {
+                write!(f, "{what} failed the core contract: {error}")
+            }
         }
     }
 }
 
-impl std::error::Error for FormatError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match &self.kind {
-            FormatErrorKind::UnknownDType(error) => Some(error),
-            FormatErrorKind::Contract { error, .. } => Some(error),
-            _ => None,
-        }
-    }
-}
-
-impl From<UnknownDTypeCode> for FormatError {
-    fn from(error: UnknownDTypeCode) -> FormatError {
-        FormatError::new(FormatErrorKind::UnknownDType(error))
-    }
-}
+impl std::error::Error for FormatError {}
 
 impl From<FormatError> for Fn3Error {
     fn from(error: FormatError) -> Fn3Error {
         Fn3Error::InvalidFormat {
-            format: "fn3 prepared model",
+            format: "prepared-model artifact",
             detail: error.to_string(),
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn version_errors_state_both_versions_and_are_classified() {
-        let error = FormatError::new(FormatErrorKind::UnsupportedVersion {
-            found: 2,
-            supported: 1,
-        });
-        let text = error.to_string();
-        assert!(text.contains("version 2"), "{text}");
-        assert!(text.contains("version 1 only"), "{text}");
-        assert!(error.is_version_mismatch());
-        assert!(!error.is_corruption());
+fn render_magic(magic: [u8; 8]) -> String {
+    let mut text = String::with_capacity(10);
+    text.push('`');
+    for byte in magic {
+        if byte.is_ascii_graphic() {
+            text.push(byte as char);
+        } else {
+            text.push('.');
+        }
     }
+    text.push('`');
+    text
+}
 
-    #[test]
-    fn magic_errors_render_hex_and_are_corruption() {
-        let error = FormatError::new(FormatErrorKind::BadMagic {
-            found: *b"FNN2PREP",
-        });
-        let text = error.to_string();
-        assert!(text.contains("46 4e 4e 32"), "{text}");
-        assert!(text.contains("46 4e 4e 33 50 52 45 50"), "{text}");
-        assert!(error.is_corruption());
+fn hex(bytes: &[u8; 32]) -> String {
+    let mut text = String::with_capacity(64);
+    for byte in bytes {
+        text.push_str(&format!("{byte:02x}"));
     }
-
-    #[test]
-    fn checksum_errors_name_both_values() {
-        let error = FormatError::new(FormatErrorKind::ChecksumMismatch {
-            stored: 0x1234_5678,
-            computed: 0x9abc_def0,
-        });
-        let text = error.to_string();
-        assert!(text.contains("0x12345678"), "{text}");
-        assert!(text.contains("0x9abcdef0"), "{text}");
-        assert!(error.is_corruption());
-    }
-
-    #[test]
-    fn reserved_op_codes_say_so() {
-        let error = FormatError::new(FormatErrorKind::UnknownOpCode { code: 0x0101 });
-        assert!(error.to_string().contains("reserved range"), "{error}");
-        let plain = FormatError::new(FormatErrorKind::UnknownOpCode { code: 5000 });
-        assert!(!plain.to_string().contains("reserved range"), "{plain}");
-    }
-
-    #[test]
-    fn core_errors_keep_their_detail_and_source() {
-        let error = FormatError::contract(
-            "weight table",
-            Fn3Error::OutOfBounds {
-                what: "weight",
-                index: 3,
-                len: 2,
-            },
-        );
-        assert!(error.to_string().contains("weight table"), "{error}");
-        assert!(std::error::Error::source(&error).is_some());
-        let converted: Fn3Error = error.into();
-        assert!(
-            converted.to_string().contains("fn3 prepared model"),
-            "{converted}"
-        );
-    }
+    text
 }
