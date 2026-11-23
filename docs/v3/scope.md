@@ -283,12 +283,11 @@ both are manual and opt-in. Everything else in this table is policy owned by
 | ResNet/MobileNet/ViT | ImageNet-subset top-1 and top-5 | F32 within 0.2 point of the oracle; quantized modes within 0.5 point of F32 |
 | GPT-2-style decoder, quantized | top-1/top-5 and perplexity | Same top-1 and top-5 agreement as F32; perplexity within 1% of F32 |
 
-The F32 decoder gate is implemented by
-[`tests/fn3_trained_parity.rs`](../../tests/fn3_trained_parity.rs) and needs an
-external trained model plus its committed ORT rows, so it is not part of the
-default test run: even these budgets are currently manual gates. The 3.0
-weight-only INT8 artifact gate (`fn3_trained_int8`) was removed with the surface
-it tested — the v3 artifact has no W8A16 payload — and W8A8 is #103. No performance number appears in this
+The 3.0 decoder and weight-only INT8 gates were removed with the surfaces they
+tested: the v3 runtime has no decoder path until phase 6 (#108) and no W8A16
+artifact payload. W8A8 is #103. These accuracy budgets therefore have no
+automated gate in this tree yet; the CNN gates in `tests/fn3_cnn_run.rs` and
+`tests/fn3_onednn.rs` are the ones that run. No performance number appears in this
 document: performance evidence belongs to #106 and must name the machine, thread
 count, median, p95 and memory.
 

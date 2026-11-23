@@ -906,7 +906,7 @@ impl OpParams {
 
 /// An execution backend bound to one device.
 ///
-/// Implementations must be thread-safe (`Send + Sync`): a `PreparedModel`
+/// Implementations must be thread-safe (`Send + Sync`): a prepared model
 /// shares one backend handle between sessions and every session may run on its
 /// own thread. Per-step mutable state belongs to the session, never to the
 /// backend.

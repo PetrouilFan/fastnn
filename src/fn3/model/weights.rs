@@ -34,7 +34,6 @@ use std::collections::BTreeMap;
 use crate::inference::device::DeviceId;
 use crate::inference::dtype::DType;
 use crate::inference::error::Fn3Error;
-use crate::inference::model::ModelWeights;
 use crate::inference::shape::Shape;
 use crate::inference::storage::Storage;
 use crate::inference::tensor::{Tensor, TensorMeta};
@@ -281,19 +280,6 @@ impl WeightSet {
             .map(|weight| weight.byte_len() as u64)
             .sum()
     }
-
-    /// Copy every weight into host tensors and assemble [`ModelWeights`].
-    ///
-    /// The resulting tensors are on [`DeviceId::Cpu`]; a planner that runs on
-    /// another device uploads them and builds its own `ModelWeights`, which is
-    /// why this conversion is a separate, explicit call.
-    pub fn to_model_weights(&self) -> Result<ModelWeights, Fn3Error> {
-        let mut named = Vec::with_capacity(self.entries.len());
-        for weight in &self.entries {
-            named.push((weight.name.clone(), weight.to_tensor()?));
-        }
-        ModelWeights::with_names(named)
-    }
 }
 
 #[cfg(test)]
@@ -394,33 +380,5 @@ mod tests {
             error.to_string().contains("duplicate weight name"),
             "{error}"
         );
-    }
-
-    #[test]
-    fn model_weights_share_one_device_and_keep_names() {
-        let set = WeightSet::new(vec![
-            WeightTensor::new(
-                "a",
-                DType::F32,
-                shape(&[2]),
-                vec![0; 8],
-                WeightSource::Initializer,
-            )
-            .unwrap(),
-            WeightTensor::new(
-                "b",
-                DType::F32,
-                shape(&[1]),
-                vec![0; 4],
-                WeightSource::Initializer,
-            )
-            .unwrap(),
-        ])
-        .unwrap();
-        let weights = set.to_model_weights().unwrap();
-        assert_eq!(weights.len(), 2);
-        assert_eq!(weights.device(), Some(DeviceId::Cpu));
-        assert!(weights.named("b").is_some());
-        assert!(weights.named("missing").is_none());
     }
 }

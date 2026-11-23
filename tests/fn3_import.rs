@@ -487,8 +487,9 @@ fn pinned_weights_cover_every_byte_of_the_declared_layout() {
             weight.name()
         );
     }
-    let tensors = imported.to_model_weights().expect("host tensors");
-    assert_eq!(tensors.len(), imported.weights().len());
+    // The weight table is the import's output; the artifact encoder reads it
+    // directly, so there is no host-tensor copy to check here.
+    assert!(imported.weights().total_bytes() > 0);
 }
 
 // ---------------------------------------------------------------------------

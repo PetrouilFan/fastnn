@@ -28,6 +28,11 @@
 //! neither is committed. When they are absent the test prints how to generate
 //! the dump and returns, exactly like the parity test.
 
+// This binary exercises the optional engine: without the feature there is no
+// engine to exercise, so the target compiles to nothing rather than failing
+// every assertion that expects one.
+#![cfg(feature = "cpu-onednn")]
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 

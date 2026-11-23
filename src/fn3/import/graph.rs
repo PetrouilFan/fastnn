@@ -53,7 +53,6 @@ use crate::inference::backend::{
     AutoPad, CoordinateTransformationMode, NearestMode, OpParams, PadMode, ResizeMode,
 };
 use crate::inference::dtype::DType;
-use crate::inference::model::{KvCacheConfig, KvCacheLayout};
 use crate::inference::ops::OpId;
 use crate::inference::shape::{Shape, Symbol};
 
@@ -499,6 +498,50 @@ impl DecoderGeometry {
     }
 }
 
+/// Layout of a decoder's key and value cache.
+///
+/// The only layout v3 defines: `[batch, n_kv_heads, capacity_tokens, head_dim]`
+/// for keys and values, so an appended token's vector is contiguous. Phase 6
+/// (#108) is what allocates and appends; this type is the importer's description
+/// of the interface, not a buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KvCacheLayout {
+    /// `[batch, n_kv_heads, capacity_tokens, head_dim]`.
+    BatchHeadsCapacityHeadDim,
+}
+
+impl KvCacheLayout {
+    /// Stable name used in diagnostics and reports.
+    pub const fn name(self) -> &'static str {
+        match self {
+            KvCacheLayout::BatchHeadsCapacityHeadDim => "batch,heads,capacity,head_dim",
+        }
+    }
+}
+
+/// The KV cache a decoder's geometry implies.
+///
+/// `capacity_tokens` is an allocation bound, never a semantic length: the
+/// session that allocates it (#108) owns the live extent. This is a description
+/// derived from the graph, so it carries no buffer and no policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KvCacheConfig {
+    /// Number of transformer layers that each own a key and value cache.
+    pub layers: u64,
+    /// Cache capacity in tokens (the safety bound, not the live extent).
+    pub capacity_tokens: u64,
+    /// Batch size.
+    pub batch: u64,
+    /// Key/value head count.
+    pub n_kv_heads: u64,
+    /// Per-head width.
+    pub head_dim: u64,
+    /// Element type of the cache.
+    pub dtype: DType,
+    /// Layout of keys and values.
+    pub layout: KvCacheLayout,
+}
+
 /// A declared shape that contradicts a fully static inferred shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportWarning {
@@ -755,13 +798,6 @@ impl ModelImport {
     /// Split into the two things a planner consumes.
     pub fn into_parts(self) -> (GraphIr, WeightSet) {
         (self.graph, self.weights)
-    }
-
-    /// Copy every weight into host tensors on the CPU.
-    pub fn to_model_weights(
-        &self,
-    ) -> Result<crate::inference::model::ModelWeights, crate::inference::error::Fn3Error> {
-        self.weights.to_model_weights()
     }
 }
 

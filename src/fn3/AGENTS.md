@@ -18,22 +18,21 @@ authority is `docs/archive/roadmap/fn3-architecture.md`.
   `SegmentProvider`, `ScalarOnly`). `backend/window.rs` owns the pad/dilation/
   output-extent rules shared by the scalar kernels and the oneDNN engine, so a
   provider cannot disagree with `ir::infer` about a window. `backend/cpu/` is
-  the portable reference backend (`dispatch_kernels` is the one table for the
-  forty legacy ops); `backend/cpu/onednn/` is the opt-in oneDNN engine
+  the portable scalar backend (`dispatch_kernels` is the one table the runtime
+  and the Vulkan backend call); `backend/cpu/onednn/` is the opt-in oneDNN engine
   (`cpu-onednn`), split into `ffi.rs` (hand-written C API + RAII handles),
   `geometry.rs` (pure claim/prepare rules) and `mod.rs` (engine, prepack,
   blocks, the fused-epilogue rules and the channels-last layout policy).
-  `backend/vulkan/` holds the platform and kernel families, where `resident.rs`
-  owns device-resident storage, the persistent table and the residency counters
-  (FN3-26 / #72).
+  `backend/vulkan/` holds the platform and kernel families (`resident.rs` owns
+  device-resident storage, the persistent table and the residency counters).
+  It is compiled behind `vulkan`, but no session reaches it until phase 6
+  (#108): this tree has no Vulkan test and no v3 execution path that selects
+  it.
 - `import/`: strict ONNX reader and graph construction. `import_onnx_model` adds
   the decoder geometry profile; `import_onnx_graph` stops at the typed graph, so
   a CNN imports without being forced through that profile.
-- `model/mod.rs`: `ExecutionPlan`, `ModelWeights`, `PreparedModel`.
-- `model/kv.rs`: bounded per-layer KV buffers, the live extent, two-phase
-  append.
-- `model/session.rs`: `Session`, `SessionPhase`, plan cache, slots, step commit.
-- `model/plan.rs`: bounded `Plan`, slot table, folds, `PlanId` and cache.
+- `model/mod.rs`: the artifact module tree and the weight store; session state
+  is not here.
 - `runtime/`: the v3 segment executor. `plan.rs` builds one slot per value
   (weights are read-only `SlotSource::Weight` slots backed by the importer's
   bytes or by an artifact mapping, never copied), a liveness-based offset table, and one `Segment` per
@@ -55,8 +54,8 @@ authority is `docs/archive/roadmap/fn3-architecture.md`.
   and `kernels/fused.rs` is the scalar reference for every fused form (same
   arithmetic order as the unfused chain, so a fused scalar plan is bit-identical
   to an unfused one).
-- `model/specialize.rs`: shape resolution, constant folding, typed `OpParams`
-  and the `Planner`.
+- `import/graph.rs` also owns the decoder geometry profile, including
+  `KvCacheConfig`/`KvCacheLayout`; allocation belongs to phase 6 (#108).
 - `model/format/`: the versioned prepared-model artifact, format version 2
   (`FNN3ART2`). `artifact.rs` owns the fixed header, directory, hashes and the
   mmap reader; `graph.rs` owns the typed-IR codec and the full `OpParams`;
@@ -70,10 +69,10 @@ authority is `docs/archive/roadmap/fn3-architecture.md`.
 - Dependency direction is a DAG (`dtype/device/ops → error → shape/storage →
   tensor → backend → model`), with `runtime` on top of `tensor`, `storage` and
   `backend`. It has exactly one upward edge:
-  `backend::cpu::dispatch_kernels` calls `runtime::kernels::dispatch` for the
-  twelve CNN ids, so `Support::Full` and the kernel behind it cannot drift
-  apart. Anything else that imports upward is a bug. `src/fn3/` imports no 2.x
-  module and 2.x imports nothing from `inference`.
+  `backend::cpu::dispatch_kernels` calls `runtime::kernels::dispatch`, so
+  `Support::Full` and the kernel behind it cannot drift apart. Anything else
+  that imports upward is a bug. `src/fn3/` imports no 2.x module and 2.x
+  imports nothing from `inference`.
 - The v3 executor never allocates from its arena during a forward: the plan's
   offsets are fixed and `Arena::allocation_count` is constant after
   `Session::new`. Segment operands are bound as disjoint arena windows (a
@@ -133,14 +132,12 @@ authority is `docs/archive/roadmap/fn3-architecture.md`.
 - Plan preflight asks `Backend::admits` for the plan's concrete operand shapes
   and dtypes; the default body is `supports`. An `admits` override may confirm
   a `Partial` subset, never widen `Unsupported`.
-- `PreparedModel` is immutable and `Send + Sync`; all mutable inference state
-  lives in `Session`, which is `Send` but deliberately `!Sync`. A failed step
-  changes neither the KV live extent nor the step counter.
-- A `Session` executes every instruction through the one backend it was opened
-  with; a backend whose device differs from the model's is rejected before any
-  work. Value slots and the KV cache are device-resident when the backend can
-  allocate there (`SessionOptions::default()`) and host-staged otherwise
-  (`SessionOptions::staged()`, `FN3_VK_STAGED=1`); neither is a CPU path.
+- The prepared artifact is immutable and `Send + Sync`; all mutable inference
+  state lives in `runtime::Session`, which is `Send` but deliberately `!Sync`.
+  A failed forward leaves the arena and every output untouched.
+- The Vulkan invariants below describe `backend/vulkan/`, which is compiled but
+  unreachable from a session in this tree (#108). They are the contract for
+  that backend's own work, not a statement about the CPU runtime.
 - A `Storage` is host-backed or device-resident (`Storage::from_resident`). A
   resident storage has **no host bytes**: every host accessor returns
   `Fn3Error::NotImplemented` and `to_host`/`download` is the only
@@ -181,11 +178,12 @@ authority is `docs/archive/roadmap/fn3-architecture.md`.
 ```bash
 cargo fmt --check
 cargo build --no-default-features
-cargo test --lib inference
-cargo test --test fn3_contracts
-cargo test --test fn3_cpu_reference
+cargo test --lib
 cargo test --test fn3_cnn_import
 cargo test --test fn3_cnn_run
+cargo test --test fn3_constant_folding
+cargo test --test fn3_shape_binding
+cargo test --test fn3_artifact_v2
 cargo test --no-default-features --features cpu-onednn --test fn3_onednn
 cargo build --no-default-features --features cpu-onednn
 cargo doc --no-deps --no-default-features
@@ -207,5 +205,5 @@ threads; that feature is instrumentation only, adds no clock read or session
 field to a shipped build, and keeps its counters in the session rather than in
 process-global state.
 
-`cargo test --lib` must also pass: it proves the 2.x tree still compiles beside
-`src/fn3/`. Contract changes need a new or updated `tests/fn3_contracts.rs` case.
+Contract changes need a new or updated test beside the code; there is no
+separate contract file after the 2.x tree was deleted.

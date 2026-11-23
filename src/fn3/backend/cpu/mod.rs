@@ -63,7 +63,6 @@ pub(crate) mod kernels;
 #[cfg(feature = "cpu-onednn")]
 pub(crate) mod onednn;
 pub(crate) mod parallel;
-pub mod quant;
 pub(crate) mod simd;
 pub(crate) mod support;
 

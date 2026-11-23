@@ -134,8 +134,9 @@ pub use budget::{
 pub use error::{ImportError, ImportProblem, ImportProblemKind, NodeRef, ProtoError, MAX_PROBLEMS};
 pub use graph::{
     DecoderGeometry, Dim, GraphIr, GraphNode, ImportSummary, ImportWarning, ImportWarningKind,
-    KvInterface, ModelImport, ModelProvenance, OpsetImport, PositionEmbedding, ValueId, ValueInfo,
-    ValueOrigin, ValueShape, MAX_IR_VERSION, MAX_OPSET, MIN_IR_VERSION, MIN_OPSET,
+    KvCacheConfig, KvCacheLayout, KvInterface, ModelImport, ModelProvenance, OpsetImport,
+    PositionEmbedding, ValueId, ValueInfo, ValueOrigin, ValueShape, MAX_IR_VERSION, MAX_OPSET,
+    MIN_IR_VERSION, MIN_OPSET,
 };
 pub use typed::ImportedGraph;
 

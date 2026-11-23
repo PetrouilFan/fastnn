@@ -57,11 +57,9 @@ ci::run "Library tests" \
     "cargo test --lib -- --test-threads=1"
 # Every integration target, not a hand-picked three.
 #
-# This lane used to run only fn3_contracts, fn3_ci_smoke and two fn3_cli tests,
-# which left most of the crate's integration tests compiled nowhere and executed
-# nowhere: the IR shape and memory-planning suites, the import/format/planner
-# suites, the CNN import and parity gates and the arena liveness regression all
-# existed and none of them ran. A test that never runs is not coverage.
+# This lane used to run two integration tests out of a much larger suite, which
+# left most of the crate's integration tests compiled nowhere and executed
+# nowhere. A test that never runs is not coverage.
 ci::run "Integration tests (every target)" \
     "cargo test --no-fail-fast --tests"
 # The binary is exercised as a binary: its own argv parsing, exit codes and

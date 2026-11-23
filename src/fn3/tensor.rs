@@ -71,7 +71,7 @@
 //! it may not write an output slot through a pointer obtained from an input,
 //! and it may not assume that two `TensorMut` outputs point at distinct
 //! allocations unless it checked. Plan construction rejects a slot that is both
-//! input and output ([`crate::inference::model::ExecutionPlan`]).
+//! input and output (the plan builder rejects it).
 //!
 //! # Materialisation
 //!
@@ -1317,7 +1317,7 @@ impl Tensor {
     ///
     /// Fails with [`Fn3Error::StorageShared`] while any other handle to the
     /// storage is alive (for example a live [`TensorView`] or a weight shared
-    /// with a `PreparedModel`).
+    /// with a prepared model).
     ///
     /// A device-resident tensor yields a resident [`TensorMut`]: the same
     /// exclusivity rule, and the write happens on the device rather than
@@ -1555,7 +1555,7 @@ mod tests {
     fn shared_storage_rejects_mutation() {
         let mut tensor = Tensor::from_f32(Shape::from_dims([2]), &[1.0, 2.0]).unwrap();
         // A second `Storage` handle is what a weight shared with a
-        // `PreparedModel` looks like.
+        // prepared model looks like.
         let shared = tensor.storage().clone();
         assert!(matches!(
             tensor.as_mut_view(),
