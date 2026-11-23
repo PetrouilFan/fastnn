@@ -162,7 +162,7 @@ fn measure(
 /// One op's row in the timing table.
 #[cfg(feature = "segment-timing")]
 struct OpRow {
-    op: OpId,
+    label: String,
     calls: f64,
     total_ms: f64,
     longest_ms: f64,
@@ -198,7 +198,7 @@ fn print_segment_timings(
             .run(&[("images", input)])
             .expect("a timing warm-up forward must succeed");
     }
-    let mut repeats: Vec<Vec<(OpId, u64, f64, f64)>> = Vec::with_capacity(TIMING_REPEATS);
+    let mut repeats: Vec<Vec<(String, u64, f64, f64)>> = Vec::with_capacity(TIMING_REPEATS);
     let mut wall = Vec::with_capacity(TIMING_REPEATS);
     for _ in 0..TIMING_REPEATS {
         session.reset_segment_timings();
@@ -216,7 +216,7 @@ fn print_segment_timings(
                 .iter()
                 .map(|entry| {
                     (
-                        entry.op,
+                        entry.label.clone(),
                         entry.calls,
                         entry.total.as_secs_f64() * 1000.0,
                         entry.longest.as_secs_f64() * 1000.0,
@@ -226,14 +226,14 @@ fn print_segment_timings(
         );
     }
     let mut rows: Vec<OpRow> = Vec::with_capacity(repeats[0].len());
-    for (index, &(op, _, _, _)) in repeats[0].iter().enumerate() {
+    for (index, (label, _, _, _)) in repeats[0].iter().enumerate() {
         let mut totals = Vec::with_capacity(TIMING_REPEATS);
         let mut longest = 0.0f64;
         let mut calls = 0u64;
         for repeat in &repeats {
             let entry = repeat
                 .get(index)
-                .filter(|entry| entry.0 == op)
+                .filter(|entry| &entry.0 == label)
                 .expect("the same plan must record the same ops in the same order");
             totals.push(entry.2 / TIMING_FORWARDS as f64);
             longest = longest.max(entry.3);
@@ -241,7 +241,7 @@ fn print_segment_timings(
         }
         totals.sort_by(|a, b| a.partial_cmp(b).expect("finite durations"));
         rows.push(OpRow {
-            op,
+            label: label.clone(),
             calls: calls as f64 / TIMING_FORWARDS as f64,
             total_ms: percentile(&totals, 0.50),
             longest_ms: longest,
@@ -265,7 +265,7 @@ fn print_segment_timings(
     for row in &rows {
         println!(
             "[fn3perf][timing]   {:<15} {:>5.1}  {:>8.2}  {:>6.1}%  {:>8.3}  {:>8.3}",
-            row.op.name(),
+            row.label,
             row.calls,
             row.total_ms,
             100.0 * row.total_ms / accounted.max(f64::MIN_POSITIVE),

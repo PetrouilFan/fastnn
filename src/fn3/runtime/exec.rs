@@ -775,7 +775,13 @@ impl Session {
                 }
             }
             #[cfg(feature = "segment-timing")]
-            timings.record(segment.op_id(), started.elapsed());
+            {
+                // The label names the whole segment: a fused `Conv+Swish`
+                // must not be reported as plain `Conv`, or the epilogue looks
+                // free.
+                let label = segment.op.to_string();
+                timings.record(segment.op_id(), &label, started.elapsed());
+            }
         }
         Ok(())
     }
