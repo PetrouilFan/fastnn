@@ -45,17 +45,6 @@ case "$PIN_STATUS" in
         ;;
 esac
 
-E2E_TEST=""
-for candidate in tests/fn3_e2e.rs tests/fn3_e2e/main.rs; do
-    if [[ -f "$CI_ROOT/$candidate" ]]; then
-        E2E_TEST="$candidate"
-        break
-    fi
-done
-if [[ -z "$E2E_TEST" ]]; then
-    ci::not_verified "the pin is $PIN_MESSAGE but the end-to-end fixture test does not exist yet (FN3-16 / #62): tests/fn3_e2e.rs or tests/fn3_e2e/main.rs"
-fi
-
 echo
 echo "== Stage the pinned graph =="
 MODEL="$CI_ROOT/tools/parity/.cache/models/tiny-gpt2/onnx/model.onnx"
@@ -100,9 +89,4 @@ if [[ ! -f "$MODEL" ]]; then
 fi
 ci::check "pinned graph staged from the lock's revision"
 
-echo
-echo "== Run the pinned end-to-end test against that file =="
-ci::run "Pinned end-to-end test (staged revision)" \
-    "cd '$CI_ROOT' && FASTNN_FN3_ONNX_MODEL='$MODEL' FN3_E2E_REQUIRE_MODEL=1 CARGO_NET_OFFLINE=true cargo test --test fn3_e2e -- --test-threads=1"
-
-ci::passed "the pinned revision was staged, verified against the lock, and executed end to end"
+ci::not_verified "the pinned revision was staged and verified against the lock, but the v3 tree has no decoder end-to-end runner yet (phase 6 / #108): the staged graph was not executed"

@@ -14,7 +14,7 @@
 //!   only possible through `&mut self`, so the borrow checker statically
 //!   excludes any live `&[T]` alias while a kernel writes.
 //! - [`Storage`] is a cheap `Arc` handle for sharing a buffer between a
-//!   `PreparedModel`, its plans and every [`crate::inference::tensor::Tensor`] view.
+//!   a prepared model's weight payload and every [`crate::inference::tensor::Tensor`] view.
 //!   Shared access is **read-only**: `Storage::as_slice` takes `&self`.
 //! - Mutation through a shared handle requires exclusive ownership:
 //!   [`Storage::try_make_mut`] fails with [`Fn3Error::StorageShared`] while any

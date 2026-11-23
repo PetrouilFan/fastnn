@@ -180,16 +180,22 @@ immutable, and every `session()` owns its own arena and thread pool.
    imports, prepares and runs with ORT parity. The remaining shape work is
    arbitrary constant subgraphs that are neither shape arithmetic nor a single
    unary (a general `Constant` folder), which no pinned model needs yet.
-2. **#117 remove the pre-v3 CPU runtime**: the 40 decoder ops still dispatch
-   one op at a time through `backend::cpu::dispatch_kernels`, and
-   `model/{plan,session,specialize,kv}.rs` overlap `runtime/`. This is the last
-   place where the old shape survives.
+2. ~~#117 remove the pre-v3 CPU runtime~~ (largely done): `model/{plan,
+   session,specialize,kv,weight_int8}.rs`, `backend/cpu/quant/` and the
+   quantized Vulkan kernels are deleted, the KV geometry types live in
+   `import/graph.rs`, and the remaining test targets are v3-only. What is left
+   is the portable kernel table in `backend/cpu/kernels/` (6.2k lines that
+   `runtime/kernels` and `backend/vulkan` still call) and the `Backend`
+   trait/`CpuBackend` exports; no session uses the legacy `Session`/`Plan`
+   types because they no longer exist.
 3. ~~#115 peak RSS~~ (done): row staging is a session-wide pool of one slot per
    worker instead of one buffer per block. `staging_bytes` at eight workers:
    14,110,720 B → 2,048,000 B; CLI peak RSS: ~106 MB → ~94 MB at eight, ~97 MB
    → ~85 MB at four, with no wall-time change outside host noise.
-4. **Phase 5 W8A8** (#103): oneDNN int8 with per-channel scales and calibration,
-   gated on accuracy rather than on a dtype name.
+4. **Phase 5 W8A8** (#103): the gate refuses it with a measured reason on this
+   AVX2 host (oneDNN's int8 conv is its reference kernel, 848x slower than
+   f32). Real W8A8 needs VNNI/AMX hardware and a calibration path; the
+   precision plumbing (`Precision::W8A8`, ISA probe, refusal) exists.
 5. **Phase 6 decoder/KV** (#108) and **phase 7 packaging** (#109), hardening
    (#110), docs (#111).
 

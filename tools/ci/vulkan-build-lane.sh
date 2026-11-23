@@ -81,8 +81,6 @@ fi
 
 ci::run "Build with --features vulkan" \
     "cargo build --no-default-features --features vulkan"
-ci::run "Compile the Vulkan smoke test (no device is created)" \
-    "cargo test --no-default-features --features vulkan --test fn3_vulkan_smoke --no-run"
 ci::run "Clippy with the vulkan feature (warnings denied)" \
     "cargo clippy --all-targets --no-default-features --features vulkan -- -D warnings"
 
