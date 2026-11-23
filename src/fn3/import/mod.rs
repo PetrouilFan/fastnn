@@ -152,7 +152,52 @@ pub use typed::ImportedGraph;
 /// summary. The decoder path remains [`import_onnx_model`], which additionally
 /// requires the `past_key_values`/`present` interface.
 pub fn import_onnx_graph(bytes: &[u8]) -> Result<ImportedGraph, ImportError> {
-    typed::build(graph::build_graph_parts(bytes)?)
+    import_onnx_graph_with_shapes(bytes, &[])
+}
+
+/// Import an ONNX model, binding concrete extents for its graph inputs.
+///
+/// A dynamic ONNX export declares `[batch, 3, height, width]` as `dim_param`
+/// names, so the typed IR has nothing to prove a `Reshape` target against. A
+/// binding replaces one graph input's declared extents with the shape the model
+/// will actually run at; every downstream extent then follows from the model's
+/// own rules. A name the model does not declare, a rank that does not match and
+/// the same name twice are all typed import problems.
+pub fn import_onnx_graph_with_shapes(
+    bytes: &[u8],
+    shapes: &[(String, Vec<u64>)],
+) -> Result<ImportedGraph, ImportError> {
+    let mut bindings: std::collections::BTreeMap<String, Vec<u64>> =
+        std::collections::BTreeMap::new();
+    for (name, extents) in shapes {
+        if bindings.insert(name.clone(), extents.clone()).is_some() {
+            return Err(ImportError::single(ImportProblemKind::ShapeBinding {
+                input: name.clone(),
+                detail: "the input was bound more than once".to_string(),
+            }));
+        }
+    }
+    typed::build(graph::build_graph_parts(bytes, &bindings)?)
+}
+
+/// One graph input as the model declares it, before any binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredInput {
+    /// Value name.
+    pub name: String,
+    /// Declared shape, rendered (`[batch, 3, height, width]`).
+    pub shape: String,
+}
+
+/// The graph inputs and their declared shapes.
+///
+/// Read without shape inference, so a model whose symbolic extents block the
+/// typed pass still reports what a caller would have to bind.
+pub fn declared_inputs(bytes: &[u8]) -> Result<Vec<DeclaredInput>, ImportError> {
+    Ok(graph::declared_inputs_of(bytes)?
+        .into_iter()
+        .map(|(name, shape)| DeclaredInput { name, shape })
+        .collect())
 }
 
 /// Import an ONNX model from bytes.

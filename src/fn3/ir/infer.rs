@@ -1348,29 +1348,11 @@ fn resize(node: &Node, inputs: &[TensorType]) -> Result<Vec<TensorType>, Fn3Erro
             "tf_crop_and_resize is an ROI crop, which this runtime does not represent",
         ));
     }
-    if inputs.len() >= 2 {
-        // Positional form: input 1 is `roi`. A non-empty roi is a crop, which
-        // only tf_crop_and_resize would use; the empty placeholder is the
-        // ordinary resampling form.
-        match inputs[1].static_numel()? {
-            Some(0) => {}
-            Some(elements) => {
-                return Err(unsupported_variant(
-                    node,
-                    format!(
-                        "the roi operand holds {elements} elements; an ROI crop is not \
-                         representable"
-                    ),
-                ))
-            }
-            None => {
-                return Err(unsupported_variant(
-                    node,
-                    "the roi operand has symbolic extents; an ROI crop is not representable",
-                ))
-            }
-        }
-    }
+    // Positional form: input 1 is `roi`, which is accepted and ignored. ONNX
+    // defines its values only for `tf_crop_and_resize` — rejected above — so a
+    // four-zero placeholder and an omitted operand describe the same resize.
+    // The kernel reads input 0 and the constant scales/sizes in the params, so
+    // the roi operand neither changes the output nor needs a known shape.
     if !node.params.resize_scales.is_empty() && !node.params.resize_sizes.is_empty() {
         return Err(invalid(
             node,
@@ -3275,7 +3257,7 @@ mod tests {
     }
 
     #[test]
-    fn resize_uses_sizes_or_scales_and_rejects_roi_forms() {
+    fn resize_uses_sizes_or_scales_and_ignores_the_roi_placeholder() {
         let mut scales = Graph::new();
         let input = add_value(&mut scales, DType::F32, consts(&[1, 3, 8, 8]));
         let roi = add_value(&mut scales, DType::F32, consts(&[0]));
@@ -3311,23 +3293,50 @@ mod tests {
         infer_shapes(&mut sizes).unwrap();
         assert_eq!(ty(&sizes, out).dims(), consts(&[1, 3, 5, 7]).as_slice());
 
-        // A non-empty roi is a crop, not a resample.
-        let mut crop = Graph::new();
-        let input = add_value(&mut crop, DType::F32, consts(&[1, 3, 8, 8]));
-        let roi = add_value(&mut crop, DType::F32, consts(&[4]));
-        let out = add_value(&mut crop, DType::F32, Vec::new());
+        // A roi operand is accepted and ignored: its values are defined only
+        // for tf_crop_and_resize, so a four-zero placeholder describes the same
+        // resize as the one-operand form.
+        let mut placeholder = Graph::new();
+        let input = add_value(&mut placeholder, DType::F32, consts(&[1, 3, 8, 8]));
+        let roi = add_value(&mut placeholder, DType::F32, consts(&[8]));
+        let out = add_value(&mut placeholder, DType::F32, Vec::new());
         add_node(
-            &mut crop,
+            &mut placeholder,
             OpId::Resize,
             &[input, roi],
             &[out],
             OpParams::new().with_resize_sizes([1, 3, 4, 4]),
             2,
         );
+        infer_shapes(&mut placeholder).expect("a roi placeholder is ignored");
+        assert_eq!(
+            ty(&placeholder, out).dims(),
+            consts(&[1, 3, 4, 4]).as_slice()
+        );
+
+        // The one mode that would read the roi values is rejected.
+        let mut crop = Graph::new();
+        let input = add_value(&mut crop, DType::F32, consts(&[1, 3, 8, 8]));
+        let roi = add_value(&mut crop, DType::F32, consts(&[8]));
+        let out = add_value(&mut crop, DType::F32, Vec::new());
+        add_node(
+            &mut crop,
+            OpId::Resize,
+            &[input, roi],
+            &[out],
+            OpParams::new()
+                .with_resize(
+                    ResizeMode::Nearest,
+                    CoordinateTransformationMode::TfCropAndResize,
+                    NearestMode::Floor,
+                )
+                .with_resize_sizes([1, 3, 4, 4]),
+            2,
+        );
         let error = infer_error(&mut crop);
         assert!(matches!(error, Fn3Error::UnsupportedOp { .. }), "{error}");
         assert!(error.to_string().contains("node 2"), "{error}");
-        assert!(error.to_string().contains("roi"), "{error}");
+        assert!(error.to_string().contains("tf_crop_and_resize"), "{error}");
 
         // Cubic is parsed but has no rule.
         let mut cubic = Graph::new();

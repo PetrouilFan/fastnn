@@ -6,18 +6,32 @@
 
 use std::io::Write;
 
-use crate::inference::doctor;
+use crate::inference::doctor_with_shapes;
 
 use super::args::DoctorArgs;
 use super::{thousands, CliError};
 
 /// Run `doctor`.
 pub fn execute(args: &DoctorArgs, out: &mut dyn Write) -> Result<(), CliError> {
-    let report = doctor(&args.onnx)
+    let report = doctor_with_shapes(&args.onnx, &args.shapes)
         .map_err(|error| CliError::model(format!("cannot diagnose the model: {error}")))?;
 
     let _ = writeln!(out, "fastnn-infer doctor");
     let _ = writeln!(out, "  source: {}", args.onnx.display());
+    if !args.shapes.is_empty() {
+        let bound: Vec<String> = args
+            .shapes
+            .iter()
+            .map(|(name, extents)| {
+                let rendered: Vec<String> = extents.iter().map(u64::to_string).collect();
+                format!("{name}={}", rendered.join(","))
+            })
+            .collect();
+        let _ = writeln!(out, "  bound:  {}", bound.join(" "));
+    }
+    if !report.inputs.is_empty() {
+        let _ = writeln!(out, "  inputs: {}", report.inputs.join(", "));
+    }
     let _ = writeln!(
         out,
         "  result: {}",
@@ -76,14 +90,19 @@ pub fn execute(args: &DoctorArgs, out: &mut dyn Write) -> Result<(), CliError> {
         }
     }
     if !report.ok {
+        let hint = if args.shapes.is_empty() {
+            "a dynamic input needs `--shape <name>=<d0,d1,...>`; the `inputs:` line lists what \
+             the model declares"
+        } else {
+            "the bindings above are applied; fix the named nodes or bind a shape the model can \
+             serve"
+        };
         return Err(CliError::model(format!(
             "`{}` is not ready to prepare ({} problem(s)); see the list above",
             args.onnx.display(),
             report.problems.len()
         ))
-        .with_next(
-            "fix the named nodes or export the model with the operator set this build implements",
-        ));
+        .with_next(hint));
     }
     Ok(())
 }

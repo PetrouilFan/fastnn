@@ -105,33 +105,40 @@ truncates at every boundary and rejects v1 and future versions by number.
 
 | issue | state | commit |
 |---|---|---|
-| #112 stock YOLO11n import | opset 12..=22, `Resize(X, "", sizes)`, and batched attention `MatMul` now work; one blocker remains (below) | `84dec2e` |
+| #112 stock YOLO11n import | opset 12..=22, `Resize(X, "", sizes)` / `Resize(X, roi, scales)`, batched attention `MatMul`, and input-shape binding now work; one blocker remains (below) | `84dec2e` |
 | #113 Conv+Add fusion could read a residual produced later | rejected when the producer is at or after the anchor, with a regression test | `e004a46` |
 | #116 softmax on a contiguous mid-axis tensor | second contiguous path, bit-identical to the reference loop | `e004a46` |
 | #120 segment timing hid a fused activation under `Conv` | segments are reported by their whole chain (`Conv+Swish`) | `8ac736a` |
 
-`fastnn-infer doctor` on the stock `yolo11n.onnx` (11 MB, upstream asset)
-now gets past the operator set, the `Resize` hole and the rank-4 `MatMul`, and
-stops at exactly one problem:
+`fastnn-infer doctor` on the stock `yolo11n.onnx` (11 MB, upstream asset,
+SHA-256 `634279b4…053b`, 421 ONNX nodes, opset 22) now gets past the operator
+set, both `Resize` forms, the rank-4 `MatMul` and the symbolic input, and stops
+at exactly one problem:
 
 ```
-1. [shape] node 135 `/model.10/m/m.0/attn/Reshape` (Reshape):
-   shape contradiction: reshape target element 3 is ? and not a statically known extent
+fastnn-infer doctor yolo11n.onnx --shape images=1,3,640,640
+1. [shape] value `/model.23/Range_output_0` produced by node 240
+   (onnx "Range"): an extent this import could not prove
+   (Range length from non-constant operands)
 ```
 
-The export declares `[0,3,0,0]`; the attention reshape multiplies symbolic
-extents, so nothing can be proved static. This is the shape-bucket gap of #98
-and #104, not an operator gap: a concrete input shape must be bound before
-planning. Tracked as the first task of the next slice.
+Inputs are declared `[batch, 3, height, width]`; `--shape` replaces those
+extents before shape inference (see `docs/v3/scope.md` §6), which is what makes
+the attention reshape and the detector head's `Reshape` targets static. The one
+remaining blocker is the DFL decode's index machinery: `Range` length comes from
+`Cast(Gather(Shape(conv)))`, and the importer does not yet fold a shape chain
+into values, so the length is unprovable. That is a constant-folding pass
+(#97's explicit pass), not an operator gap — `Range`, `Expand` and
+`ConstantOfShape` are already in the op table.
 
 ## What the CLI and API look like now
 
 ```
-fastnn-infer prepare model.onnx -o model.fnn3 [--target cpu] [--threads N]
+fastnn-infer prepare model.onnx --out model.fnn3 [--target cpu] [--shape images=1,3,640,640]
 fastnn-infer load model.fnn3
-fastnn-infer run model.fnn3 --input images=1,3,320,320
+fastnn-infer run model.fnn3 --input images=1,3,320,320 --warmup 5 --repeat 50
 fastnn-infer inspect model.fnn3
-fastnn-infer doctor model.onnx
+fastnn-infer doctor model.onnx [--shape images=1,3,640,640]
 ```
 
 The Rust surface is `fastnn::inference::{prepare, load, inspect, doctor}` with
@@ -141,10 +148,12 @@ immutable, and every `session()` owns its own arena and thread pool.
 
 ## Open work, in the order it should be taken
 
-1. **Shape binding** (#98, #104): `prepare --shape images=1,3,640,640` and a
-   `doctor` that reports which symbols a plan would need, so a stock export can
-   be prepared without external graph surgery. Unblocks #112's last mile and
-   the matched YOLO11n comparison.
+1. **Constant folding through `Shape`** (#97, #104): the stock YOLO11n's last
+   blocker is the DFL decode, which builds index tensors with
+   `Range(Gather(Shape(conv)))`. The importer resolves shape payloads through
+   `OpParams` today but does not evaluate a shape chain into values, so the
+   `Range` length is unprovable. Folding those constant subgraphs is the
+   remaining step for #112.
 2. **#117 remove the pre-v3 CPU runtime**: the 40 decoder ops still dispatch
    one op at a time through `backend::cpu::dispatch_kernels`, and
    `model/{plan,session,specialize,kv}.rs` overlap `runtime/`. This is the last

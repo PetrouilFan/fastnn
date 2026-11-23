@@ -9,7 +9,7 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::inference::digest::sha256_hex;
-use crate::inference::import::import_onnx_graph;
+use crate::inference::import::import_onnx_graph_with_shapes;
 use crate::inference::model::format::{
     resolve_targets, Artifact, Precision, PreparedArtifact, HEADER_BYTES,
 };
@@ -58,7 +58,8 @@ pub fn execute(args: &PrepareArgs, out: &mut dyn Write) -> Result<(), CliError> 
         source_digest[index] = u8::from_str_radix(text, 16).unwrap_or(0);
     }
 
-    let imported = import_onnx_graph(&source_bytes).map_err(import_error)?;
+    let imported =
+        import_onnx_graph_with_shapes(&source_bytes, &args.shapes).map_err(import_error)?;
     let precision = Precision::parse(&args.precision)
         .ok_or_else(|| CliError::usage(format!("`{}` is not a precision", args.precision)))?;
     let targets = resolve_targets(&args.target).map_err(format_error)?;
@@ -105,6 +106,17 @@ pub fn execute(args: &PrepareArgs, out: &mut dyn Write) -> Result<(), CliError> 
         loaded.weights().len(),
         thousands(loaded.weight_bytes())
     );
+    if !args.shapes.is_empty() {
+        let bound: Vec<String> = args
+            .shapes
+            .iter()
+            .map(|(name, extents)| {
+                let rendered: Vec<String> = extents.iter().map(u64::to_string).collect();
+                format!("{name}={}", rendered.join(","))
+            })
+            .collect();
+        let _ = writeln!(out, "  bound:    {}", bound.join(" "));
+    }
     let _ = writeln!(
         out,
         "  target:   {} ({} profiles, precision {})",

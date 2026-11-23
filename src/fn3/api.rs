@@ -23,7 +23,7 @@ use crate::inference::backend::cpu::CpuBackend;
 use crate::inference::backend::{Backend, ScalarOnly, Support};
 use crate::inference::digest::sha256_hex;
 use crate::inference::error::Fn3Error;
-use crate::inference::import::{import_onnx_graph, ImportedGraph};
+use crate::inference::import::{declared_inputs, import_onnx_graph_with_shapes, ImportedGraph};
 use crate::inference::ir::DimExpr;
 use crate::inference::model::format::{
     inspect_file, resolve_targets, Artifact, ArtifactInspection, PlanSummary, Precision,
@@ -163,6 +163,9 @@ pub struct DoctorReport {
     pub expected_memory_bytes: u64,
     /// Findings, in file order.
     pub problems: Vec<DoctorIssue>,
+    /// Graph inputs with their declared shapes (`images: [batch, 3, height, width]`),
+    /// read before any binding is applied.
+    pub inputs: Vec<String>,
     /// Dynamic symbols the graph uses.
     pub dynamic_symbols: Vec<DynamicSymbolUse>,
     /// Value dtype census.
@@ -185,6 +188,22 @@ pub fn prepare(
     target: &str,
     precision: &str,
 ) -> Result<PrepareReport, Fn3Error> {
+    prepare_with_shapes(onnx_path, artifact_path, target, precision, &[])
+}
+
+/// [`prepare`] with concrete extents for the model's graph inputs.
+///
+/// A dynamic ONNX export declares its input as `[batch, 3, height, width]` and
+/// leaves a `Reshape` target symbolic. Binding the extents the model will be run
+/// at is what makes the plan static, so this is part of preparing rather than a
+/// runtime concern: the artifact has one shape per input.
+pub fn prepare_with_shapes(
+    onnx_path: impl AsRef<Path>,
+    artifact_path: impl AsRef<Path>,
+    target: &str,
+    precision: &str,
+    shapes: &[(String, Vec<u64>)],
+) -> Result<PrepareReport, Fn3Error> {
     let onnx_path = onnx_path.as_ref();
     let artifact_path = artifact_path.as_ref();
     if onnx_path == artifact_path
@@ -203,7 +222,7 @@ pub fn prepare(
         detail: format!("cannot read `{}`: {error}", onnx_path.display()),
     })?;
     let source_digest = digest(&source_bytes);
-    let imported = import_onnx_graph(&source_bytes)?;
+    let imported = import_onnx_graph_with_shapes(&source_bytes, shapes)?;
     let precision = Precision::parse(precision).ok_or_else(|| Fn3Error::InvalidFormat {
         format: "precision",
         detail: format!("`{precision}` is not implemented; this build writes `f32` only"),
@@ -263,6 +282,17 @@ pub fn inspect(artifact_path: impl AsRef<Path>) -> Result<ArtifactInspection, Fn
 /// every unsupported node, dynamic limit and dtype problem it can find, with the
 /// node that owns each one. Only "cannot read the file" is returned as an error.
 pub fn doctor(onnx_path: impl AsRef<Path>) -> Result<DoctorReport, Fn3Error> {
+    doctor_with_shapes(onnx_path, &[])
+}
+
+/// [`doctor`] with the input-shape bindings that would be used to prepare.
+///
+/// Pass the same `shapes` you would pass to [`prepare_with_shapes`] to see the
+/// verdict the model will actually get; pass none to see it as declared.
+pub fn doctor_with_shapes(
+    onnx_path: impl AsRef<Path>,
+    shapes: &[(String, Vec<u64>)],
+) -> Result<DoctorReport, Fn3Error> {
     let onnx_path = onnx_path.as_ref();
     let bytes = std::fs::read(onnx_path).map_err(|error| Fn3Error::InvalidFormat {
         format: "onnx model",
@@ -272,7 +302,16 @@ pub fn doctor(onnx_path: impl AsRef<Path>) -> Result<DoctorReport, Fn3Error> {
         onnx_path: onnx_path.to_path_buf(),
         ..DoctorReport::default()
     };
-    let imported = match import_onnx_graph(&bytes) {
+    // The declared inputs are readable even when the typed pass refuses the
+    // model, which is exactly the case where a caller needs to know what to
+    // bind.
+    if let Ok(inputs) = declared_inputs(&bytes) {
+        report.inputs = inputs
+            .into_iter()
+            .map(|input| format!("{}: {}", input.name, input.shape))
+            .collect();
+    }
+    let imported = match import_onnx_graph_with_shapes(&bytes, shapes) {
         Ok(imported) => imported,
         Err(error) => {
             for problem in error.problems() {

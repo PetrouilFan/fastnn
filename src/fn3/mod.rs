@@ -71,8 +71,8 @@ pub mod storage;
 pub mod tensor;
 
 pub use api::{
-    doctor, inspect, load, prepare, DoctorIssue, DoctorReport, DtypeUse, DynamicSymbolUse,
-    PrepareReport, TargetPlanReport,
+    doctor, doctor_with_shapes, inspect, load, prepare, prepare_with_shapes, DoctorIssue,
+    DoctorReport, DtypeUse, DynamicSymbolUse, PrepareReport, TargetPlanReport,
 };
 pub use backend::cpu::CpuBackend;
 pub use backend::{Backend, Capabilities, CapabilityFeatures, OpParams, Support};

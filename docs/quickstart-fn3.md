@@ -48,6 +48,25 @@ The write is atomic and is read back through the strict reader before success is
 reported. The source ONNX is not modified. `cpu` is the default plan; `cpu-reference`
 is the scalar, unfused oracle.
 
+### A dynamic export
+
+A stock Ultralytics export declares its input as `[batch, 3, height, width]` and
+builds `Reshape` targets from those symbols, so the plan has nothing concrete to
+compile. Bind the shape the model will run at:
+
+```bash
+./target/release/fastnn-infer doctor yolo11n.onnx
+#   inputs: images: [batch, 3, ?(dim_param `height` has no fn3 symbol), ...]
+./target/release/fastnn-infer prepare \
+  --onnx yolo11n.onnx --out yolo11n.fnn3 \
+  --shape images=1,3,640,640
+```
+
+`--shape name=d0,d1,...` may be repeated, once per graph input. `doctor` takes
+the same flag and prints both the declared input shapes and the verdict the
+bound model would get; an unknown name, the wrong rank or the same name twice
+is a typed error naming the input.
+
 ## 2. Inspect
 
 ```bash

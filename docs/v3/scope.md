@@ -158,6 +158,24 @@ rules are:
 Today only the envelope exists: one plan per concrete environment, cached by
 `PlanId`. Buckets, CNN spatial symbols and the fallback plan are not implemented.
 
+A CNN export states its input as `[batch, 3, height, width]`, and its
+`Reshape` targets multiply those symbols. Until buckets exist, the caller binds
+the shape the model will run at:
+
+```text
+fastnn-infer prepare --onnx yolo11n.onnx --out yolo11n.fnn3 --shape images=1,3,640,640
+fastnn-infer doctor  yolo11n.onnx --shape images=1,3,640,640
+```
+
+`prepare_with_shapes(.., shapes)` and `import_onnx_graph_with_shapes` are the
+same operation in the API. A binding replaces one graph input's declared
+extents before shape inference, so every downstream extent follows from the
+model's own rules; a name the model does not declare, a rank that differs from
+the declared one and the same name twice are typed import problems, and
+`doctor` prints each input's declared shape so the caller knows what to bind.
+The artifact then holds one concrete shape per input, which is what the plan
+already promises.
+
 ## 7. Quantization and QDQ
 
 Precision is a planner decision, not a tensor tag ([ADR-0001](adr-0001-one-runtime.md),

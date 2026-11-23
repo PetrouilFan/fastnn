@@ -102,6 +102,8 @@ pub struct PrepareArgs {
     pub precision: String,
     /// Replace an existing destination.
     pub force: bool,
+    /// Concrete extents for graph inputs, as `name=d0,d1,...`.
+    pub shapes: Vec<(String, Vec<u64>)>,
 }
 
 /// Arguments of `load`.
@@ -191,6 +193,8 @@ pub struct InspectArgs {
 pub struct DoctorArgs {
     /// ONNX to diagnose.
     pub onnx: PathBuf,
+    /// Input-shape bindings to diagnose with, as `name=d0,d1,...`.
+    pub shapes: Vec<(String, Vec<u64>)>,
 }
 
 /// Parse an argument vector (without the program name).
@@ -243,6 +247,7 @@ fn parse_prepare(args: &[String]) -> Result<Command, CliError> {
     let mut target = None;
     let mut precision = None;
     let mut force = false;
+    let mut shapes = Vec::new();
     let mut cursor = Cursor::new(args);
     while let Some((flag, inline)) = cursor.next_flag() {
         match flag {
@@ -251,6 +256,7 @@ fn parse_prepare(args: &[String]) -> Result<Command, CliError> {
             "--out" => set_path(&mut out, cursor.value(inline, flag)?, flag)?,
             "--target" => set_string(&mut target, cursor.value(inline, flag)?, flag)?,
             "--precision" => set_string(&mut precision, cursor.value(inline, flag)?, flag)?,
+            "--shape" => push_shape(&mut shapes, cursor.value(inline, flag)?, flag)?,
             "--force" => {
                 no_inline(inline, flag)?;
                 force = true;
@@ -277,6 +283,7 @@ fn parse_prepare(args: &[String]) -> Result<Command, CliError> {
         target,
         precision,
         force,
+        shapes,
     }))
 }
 
@@ -370,18 +377,21 @@ fn parse_inspect(args: &[String]) -> Result<Command, CliError> {
 
 fn parse_doctor(args: &[String]) -> Result<Command, CliError> {
     let mut onnx = None;
+    let mut shapes = Vec::new();
     let mut positional = None;
     let mut cursor = Cursor::new(args);
     while let Some((flag, inline)) = cursor.next_flag() {
         match flag {
             "--help" | "-h" => return Ok(Command::Help(HelpTopic::Doctor)),
             "--onnx" | "--model" => set_path(&mut onnx, cursor.value(inline, flag)?, flag)?,
+            "--shape" => push_shape(&mut shapes, cursor.value(inline, flag)?, flag)?,
             other if other.starts_with('-') => return Err(unknown_flag("doctor", other)),
             other => set_positional(&mut positional, other, "doctor")?,
         }
     }
     Ok(Command::Doctor(DoctorArgs {
         onnx: finish_model(onnx, positional, "doctor")?,
+        shapes,
     }))
 }
 
@@ -492,6 +502,63 @@ fn set_count(
     Ok(())
 }
 
+/// Parse one `--shape name=d0,d1,...` binding.
+///
+/// A dynamic ONNX export has no numeric extents to plan against, so the caller
+/// supplies the shape the model will be run at. Extents must be positive whole
+/// numbers: a zero would describe an empty tensor, and nothing downstream can
+/// plan one.
+fn push_shape(
+    shapes: &mut Vec<(String, Vec<u64>)>,
+    value: &str,
+    flag: &str,
+) -> Result<(), CliError> {
+    let Some((name, extents)) = value.split_once('=') else {
+        return Err(CliError::usage(format!(
+            "`{flag} {value}` has no `=`; write `{flag} images=1,3,640,640`"
+        )));
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(CliError::usage(format!(
+            "`{flag}` needs a graph input name before `=`"
+        )));
+    }
+    if shapes.iter().any(|(existing, _)| existing == name) {
+        return Err(CliError::usage(format!(
+            "`{flag}` was given twice for `{name}`"
+        )));
+    }
+    let mut dims = Vec::new();
+    for part in extents.split(',') {
+        let part = part.trim();
+        let extent: u64 = part.parse().map_err(|_| {
+            CliError::usage(format!(
+                "`{flag} {value}`: `{part}` is not a whole number of elements"
+            ))
+        })?;
+        if extent == 0 {
+            return Err(CliError::usage(format!(
+                "`{flag} {value}`: a bound extent must be at least 1"
+            )));
+        }
+        dims.push(extent);
+    }
+    if dims.is_empty() {
+        return Err(CliError::usage(format!(
+            "`{flag} {value}` has no extents after `=`"
+        )));
+    }
+    if dims.len() > 8 {
+        return Err(CliError::usage(format!(
+            "`{flag} {value}` has {} extents; this build accepts at most 8",
+            dims.len()
+        )));
+    }
+    shapes.push((name.to_string(), dims));
+    Ok(())
+}
+
 fn set_positional(slot: &mut Option<PathBuf>, value: &str, command: &str) -> Result<(), CliError> {
     if slot.is_some() {
         return Err(CliError::usage(format!(
@@ -569,7 +636,12 @@ USAGE:
 OPTIONS:
   --target <name>     cpu (default), cpu-reference or all
   --precision <name>  f32 (default and the only implemented precision)
+  --shape name=d,...  bind a graph input's extents (e.g. images=1,3,640,640)
   --force             replace an existing --out file
+
+A dynamic ONNX export declares its input as `[batch, 3, height, width]`; the
+plan needs one concrete shape per input, so bind it with --shape. `doctor`
+prints the declared inputs and the dynamic symbols they use.
 
 The artifact is written atomically and read back through the strict reader
 before success is reported. The source ONNX is not modified.
@@ -631,6 +703,13 @@ USAGE:
 Imports the model and reports unsupported operators, dynamic-shape limits,
 dtype problems and an expected-memory estimate before any execution. Every
 message names the source node, e.g. `node 7 (onnx \"Conv\", output \"y\")`.
+
+OPTIONS:
+  --shape name=d,...  diagnose with a graph input bound to concrete extents
+
+Without --shape a dynamic export is reported as not ready: the plan requires
+every extent to be static. Pass the same bindings you would pass to prepare to
+see the verdict the model will actually get.
 ";
 
 #[cfg(test)]
@@ -651,6 +730,70 @@ mod tests {
         assert_eq!(args.target, "cpu");
         assert_eq!(args.precision, "f32");
         assert!(!args.force);
+        assert!(args.shapes.is_empty());
+    }
+
+    #[test]
+    fn a_shape_binding_reaches_the_prepare_arguments() {
+        let command = parse(&argv(&[
+            "prepare",
+            "--onnx",
+            "m.onnx",
+            "--out",
+            "m.fnn3",
+            "--shape",
+            "images=1,3,640,640",
+        ]))
+        .expect("prepare parses a binding");
+        let Command::Prepare(args) = command else {
+            panic!("wrong command");
+        };
+        assert_eq!(
+            args.shapes,
+            vec![("images".to_string(), vec![1, 3, 640, 640])]
+        );
+
+        let command =
+            parse(&argv(&["doctor", "m.onnx", "--shape=x=2,4"])).expect("doctor parses a binding");
+        let Command::Doctor(args) = command else {
+            panic!("wrong command");
+        };
+        assert_eq!(args.shapes, vec![("x".to_string(), vec![2, 4])]);
+    }
+
+    #[test]
+    fn a_malformed_shape_binding_is_a_usage_error() {
+        for (value, expected) in [
+            ("images", "has no `=`"),
+            ("=1,2,3", "graph input name"),
+            ("images=1,x,3", "not a whole number"),
+            ("images=1,0,3", "at least 1"),
+            ("images=1,2,3,4,5,6,7,8,9", "at most 8"),
+        ] {
+            let error = parse(&argv(&[
+                "prepare", "--onnx", "m.onnx", "--out", "m.fnn3", "--shape", value,
+            ]))
+            .expect_err(value);
+            assert!(
+                error.message().contains(expected),
+                "{value}: expected `{expected}` in {}",
+                error.message()
+            );
+        }
+
+        let error = parse(&argv(&[
+            "prepare",
+            "--onnx",
+            "m.onnx",
+            "--out",
+            "m.fnn3",
+            "--shape",
+            "images=1,3",
+            "--shape",
+            "images=2,3",
+        ]))
+        .expect_err("duplicate");
+        assert!(error.message().contains("twice"), "{}", error.message());
     }
 
     #[test]

@@ -95,6 +95,7 @@ def prepare(
     target: str = "cpu",
     precision: str = "f32",
     overwrite: bool = False,
+    shapes=None,
 ) -> PrepareReport:
     """Import ``onnx`` and write one versioned artifact at ``artifact``.
 
@@ -102,6 +103,11 @@ def prepare(
     ``"all"``); ``precision`` is ``"f32"``. A destination that already holds the
     same bytes is left alone and reported as ``status="already_valid"``. A
     different destination needs ``overwrite=True``.
+
+    ``shapes`` binds a dynamic graph input to the extents the model will run at,
+    as ``{"images": (1, 3, 640, 640)}``. A stock export declares
+    ``[batch, 3, height, width]`` and leaves a ``Reshape`` target symbolic, so a
+    plan cannot be built without one concrete shape per input.
     """
     return _prepare(
         _path(onnx),
@@ -109,6 +115,7 @@ def prepare(
         target=target,
         precision=precision,
         overwrite=overwrite,
+        shapes=shapes,
     )
 
 
@@ -133,13 +140,16 @@ def load(artifact, *, target: str | None = None, device=None) -> Model:
     return _load(_path(artifact), target=target, device=device)
 
 
-def doctor(onnx) -> DoctorReport:
+def doctor(onnx, *, shapes=None) -> DoctorReport:
     """Diagnose an ONNX model before preparing it.
 
     Reports unsupported operators, dynamic-shape symbols, dtype problems and
-    the expected resident memory, with the source node on every finding.
+    the expected resident memory, with the source node on every finding. The
+    report's ``inputs`` lists each graph input's declared shape; pass ``shapes``
+    (the same mapping :func:`prepare` takes) to see the verdict the model will
+    actually get.
     """
-    return _doctor(_path(onnx))
+    return _doctor(_path(onnx), shapes=shapes)
 
 
 __all__ = [

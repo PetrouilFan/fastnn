@@ -107,7 +107,7 @@ em-dash means the id exists in the IR but no ONNX node maps to it.
 | `AveragePool` | 43 | `AveragePool` | runs | — | As `MaxPool`, plus `count_include_pad` (mapped to oneDNN's include/exclude-padding algorithms) |
 | `GlobalAveragePool` | 44 | `GlobalAveragePool` | runs | — | Spatial axes collapse to extent 1; the oneDNN engine expresses it as average pooling over the full input plane |
 | `BatchNorm` | 45 | `BatchNormalization` | runs (scalar) | — | Inference form only: one output, 1-D `scale`/`B`/`mean`/`var`, `epsilon`; `training_mode = 1` is rejected |
-| `Resize` | 46 | `Resize` | runs (scalar) | — | 4-D nearest/linear, constant `scales` or `sizes`; the `roi` operand must be empty and `tf_crop_and_resize`/cubic are rejected |
+| `Resize` | 46 | `Resize` | runs (scalar) | — | 4-D nearest/linear, constant `scales` or `sizes`; the `roi` operand is accepted and ignored (its values are defined only for `tf_crop_and_resize`, which is rejected), and cubic is rejected |
 | `Pad` | 47 | `Pad` | runs (scalar) | — | Constant/reflect/edge, attribute or constant input pads, negative pads crop; `wrap` is rejected |
 | `Clip` | 48 | `Clip` | runs (scalar) | — | Attribute or constant min/max; a runtime bound is rejected |
 | `Sigmoid` | 49 | `Sigmoid` | runs (scalar) | — | Folded into the producing convolution when it is the `sigmoid(x)` of `mul(x, sigmoid(x))`; a standalone sigmoid runs scalar |

@@ -47,7 +47,7 @@
 //! Nothing iterates a hash map. The same bytes therefore produce the same value
 //! table, the same node order and the same weight layout.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::inference::backend::{
     AutoPad, CoordinateTransformationMode, NearestMode, OpParams, PadMode, ResizeMode,
@@ -3996,27 +3996,31 @@ fn plan_resize(
                 .to_string(),
         });
     }
-    if ins.len() >= 2 {
-        let (_, roi_shape) = input_tensor(ins, 1, "Resize roi")?;
-        if roi_shape.numel() != Some(0) {
-            return Err(shape_problem(format!(
-                "Resize roi is {}; only the empty placeholder is supported, because an ROI crop \
-                 is not representable",
-                roi_shape.render()
-            )));
-        }
+    // `roi` is read and then ignored, which is what the operator says it is:
+    // ONNX defines its values only for `tf_crop_and_resize`, and that mode is
+    // rejected above. An exporter that writes the placeholder as four zeros
+    // instead of an empty tensor therefore describes the same resize as one
+    // that omits it. The shape is still validated so a mis-typed operand is
+    // reported here rather than silently dropped. A two-operand node has no
+    // roi: ONNX requires exactly one of scales/sizes, so a lone roi is not a
+    // node this importer has to read.
+    if ins.len() >= 3 {
+        let _ = input_tensor(ins, 1, "Resize roi")?;
     }
-    // `X, roi?, scales?, sizes?` with at most one of scales/sizes. When the
-    // scales hole was dropped the tail positions shift, so the third operand's
+    // `X, roi?, scales?, sizes?` with at most one of scales/sizes. Empty
+    // optional inputs are dropped while the operand list is built, so the
+    // length says how many are present, not their positions: two operands mean
+    // `X` and one target, three mean `X`, a roi and one target. The target's
     // dtype decides whether it is f32 scales or i64 sizes.
     let (scales_index, sizes_index) = match ins.len() {
         4 => (Some(2), Some(3)),
-        3 => {
-            let (third_dtype, _, _) = input_series(ins, 2, "Resize third operand")?;
-            if third_dtype == DType::I64 {
-                (None, Some(2))
+        present @ (2 | 3) => {
+            let index = present - 1;
+            let (target_dtype, _, _) = input_series(ins, index, "Resize target operand")?;
+            if target_dtype == DType::I64 {
+                (None, Some(index))
             } else {
-                (Some(2), None)
+                (Some(index), None)
             }
         }
         _ => (None, None),
@@ -4668,8 +4672,13 @@ pub(crate) fn build_model(bytes: &[u8]) -> Result<ModelImport, super::error::Imp
 }
 
 /// Decode and import a model's graph, without decoder architecture detection.
-pub(crate) fn build_graph_parts(bytes: &[u8]) -> Result<GraphParts, super::error::ImportError> {
-    let (parts, diagnostics) = Builder::new(decode_bytes(bytes)?).decode();
+pub(crate) fn build_graph_parts(
+    bytes: &[u8],
+    bindings: &BTreeMap<String, Vec<u64>>,
+) -> Result<GraphParts, super::error::ImportError> {
+    let (parts, diagnostics) = Builder::new(decode_bytes(bytes)?)
+        .with_bindings(bindings)
+        .decode();
     if let Some(error) = diagnostics.finish() {
         return Err(error);
     }
@@ -4693,6 +4702,28 @@ fn decode_bytes(bytes: &[u8]) -> Result<proto::Model<'_>, super::error::ImportEr
         .map_err(|error| super::error::ImportError::single(ImportProblemKind::Proto(error)))
 }
 
+/// The graph inputs and their declared shapes, read without shape inference.
+///
+/// `doctor` needs this exactly when the typed pass refuses the model, so the
+/// builder's diagnostics are ignored rather than returned: a value table with a
+/// contradiction still has an interface.
+pub(crate) fn declared_inputs_of(
+    bytes: &[u8],
+) -> Result<Vec<(String, String)>, super::error::ImportError> {
+    let model = decode_bytes(bytes)?;
+    let (parts, _diagnostics) = Builder::new(model).decode();
+    let Some(parts) = parts else {
+        return Ok(Vec::new());
+    };
+    Ok(parts
+        .graph
+        .inputs()
+        .iter()
+        .map(|&id| parts.graph.value(id))
+        .map(|value| (value.name.clone(), value.shape.to_string()))
+        .collect())
+}
+
 /// A declared dtype and shape from `ValueInfoProto`.
 #[derive(Debug, Clone)]
 struct DeclaredValue {
@@ -4714,6 +4745,10 @@ struct Builder<'a> {
     weights: Vec<WeightTensor>,
     weight_ids: BTreeMap<String, WeightId>,
     declared: BTreeMap<String, DeclaredValue>,
+    /// Concrete extents for graph inputs, as supplied by the caller.
+    bindings: BTreeMap<String, Vec<u64>>,
+    /// Bindings that matched a declared graph input.
+    used_bindings: BTreeSet<String>,
     inputs: Vec<ValueId>,
     outputs: Vec<ValueId>,
     /// Set when a parser budget was reached, so `run` can stop before geometry
@@ -4738,11 +4773,19 @@ impl<'a> Builder<'a> {
             weights: Vec::new(),
             weight_ids: BTreeMap::new(),
             declared: BTreeMap::new(),
+            bindings: BTreeMap::new(),
+            used_bindings: BTreeSet::new(),
             inputs: Vec::new(),
             outputs: Vec::new(),
             over_budget: false,
             folded_constants: 0,
         }
+    }
+
+    /// Attach the caller's input-shape bindings.
+    fn with_bindings(mut self, bindings: &BTreeMap<String, Vec<u64>>) -> Builder<'a> {
+        self.bindings = bindings.clone();
+        self
     }
 
     fn run(self) -> Result<ModelImport, super::error::ImportError> {
@@ -4818,6 +4861,7 @@ impl<'a> Builder<'a> {
         let source_nodes = graph.nodes.len();
         self.register_declared(&graph);
         self.register_inputs(&graph);
+        self.report_unused_bindings();
         self.register_initializers(&graph);
         self.register_nodes(&graph);
         if self.over_budget {
@@ -4972,10 +5016,41 @@ impl<'a> Builder<'a> {
                     continue;
                 }
             };
-            let shape = match &ty.dims {
+            let mut shape = match &ty.dims {
                 Some(dims) => ValueShape::Dims(dims.iter().map(declared_dim).collect()),
                 None => ValueShape::Unknown,
             };
+            // A caller-supplied binding replaces a graph input's declared
+            // extents. A dynamic ONNX export spells those as `dim_param` names
+            // with no numeric meaning, and every extent downstream — a
+            // `Reshape` target, a `Concat` axis, a convolution's geometry —
+            // depends on them being concrete.
+            let is_input = graph
+                .inputs
+                .iter()
+                .any(|input| input.name == value_info.name);
+            if is_input {
+                if let Some(extents) = self.bindings.get(value_info.name) {
+                    match &shape {
+                        ValueShape::Dims(dims) if dims.len() != extents.len() => {
+                            self.diagnostics
+                                .push_global(ImportProblemKind::ShapeBinding {
+                                    input: value_info.name.to_string(),
+                                    detail: format!(
+                                        "the binding has {} extents, the model declares rank {}",
+                                        extents.len(),
+                                        dims.len()
+                                    ),
+                                });
+                        }
+                        _ => {
+                            shape =
+                                ValueShape::Dims(extents.iter().copied().map(Dim::Known).collect());
+                            self.used_bindings.insert(value_info.name.to_string());
+                        }
+                    }
+                }
+            }
             self.declared
                 .insert(value_info.name.to_string(), DeclaredValue { dtype, shape });
         }
@@ -5391,6 +5466,24 @@ impl<'a> Builder<'a> {
                 Some(planned) => self.register_planned(&ctx, node, &input_ids, planned),
                 None => self.poison_outputs(&ctx, node),
             }
+        }
+    }
+
+    /// A binding that matched nothing is a caller mistake, not a model
+    /// property: name it rather than ignore it.
+    fn report_unused_bindings(&mut self) {
+        let unused: Vec<String> = self
+            .bindings
+            .keys()
+            .filter(|name| !self.used_bindings.contains(*name))
+            .cloned()
+            .collect();
+        for name in unused {
+            self.diagnostics
+                .push_global(ImportProblemKind::ShapeBinding {
+                    input: name,
+                    detail: "the model declares no graph input with this name".to_string(),
+                });
         }
     }
 

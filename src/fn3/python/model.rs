@@ -21,11 +21,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use pyo3::prelude::*;
-use pyo3::types::PyModule;
+use pyo3::types::{PyDict, PyModule};
 
 use crate::inference::device::DeviceId;
 use crate::inference::digest::{sha256_hex, Sha256};
-use crate::inference::import::import_onnx_graph;
+use crate::inference::import::import_onnx_graph_with_shapes;
 use crate::inference::model::format::{
     inspect_file, resolve_targets, Artifact, ArtifactMetadata, Precision, PreparedArtifact, TARGETS,
 };
@@ -598,6 +598,7 @@ pub struct PyDoctorReport {
     peak_bytes: u64,
     expected_memory_bytes: u64,
     problems: Vec<PyDoctorIssue>,
+    inputs: Vec<String>,
     dynamic_symbols: Vec<(String, usize)>,
     dtypes: Vec<(String, usize)>,
     elapsed_ms: f64,
@@ -660,6 +661,12 @@ impl PyDoctorReport {
                 message: issue.message.clone(),
             })
             .collect()
+    }
+
+    /// The graph inputs with their declared shapes.
+    #[getter]
+    fn inputs(&self) -> Vec<String> {
+        self.inputs.clone()
     }
 
     #[getter]
@@ -907,7 +914,7 @@ fn sha256_file(path: &Path) -> Result<String, std::io::Error> {
 
 /// Import an ONNX model and write (or confirm) a versioned artifact.
 #[pyfunction]
-#[pyo3(signature = (onnx, artifact, *, target = "cpu", precision = "f32", overwrite = false))]
+#[pyo3(signature = (onnx, artifact, *, target = "cpu", precision = "f32", overwrite = false, shapes = None))]
 pub fn prepare(
     py: Python<'_>,
     onnx: &str,
@@ -915,6 +922,7 @@ pub fn prepare(
     target: &str,
     precision: &str,
     overwrite: bool,
+    shapes: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyPrepareReport>> {
     let started = Instant::now();
     let source_bytes = std::fs::read(onnx).map_err(|error| {
@@ -924,8 +932,9 @@ pub fn prepare(
             onnx.to_string(),
         )
     })?;
+    let bindings = shape_bindings(shapes)?;
     let imported = py
-        .detach(|| import_onnx_graph(&source_bytes))
+        .detach(|| import_onnx_graph_with_shapes(&source_bytes, &bindings))
         .map_err(|error| errors::from_import(py, error))?;
     let precision = Precision::parse(precision).ok_or_else(|| {
         errors::model_error(
@@ -1148,12 +1157,52 @@ pub fn load(
     Py::new(py, model)
 }
 
+/// Convert `{name: [d0, d1, ...]}` into input-shape bindings.
+///
+/// A dynamic export has no numeric extents for the plan to use, so the caller
+/// supplies the shape the model will be run at. The conversion happens while
+/// the GIL is held; the import itself runs detached.
+fn shape_bindings(shapes: Option<&Bound<'_, PyDict>>) -> PyResult<Vec<(String, Vec<u64>)>> {
+    let Some(shapes) = shapes else {
+        return Ok(Vec::new());
+    };
+    let mut bindings: Vec<(String, Vec<u64>)> = Vec::with_capacity(shapes.len());
+    for (key, value) in shapes.iter() {
+        let name: String = key.extract().map_err(|_| {
+            pyo3::exceptions::PyTypeError::new_err("shapes keys must be str graph-input names")
+        })?;
+        if bindings.iter().any(|(existing, _)| existing == &name) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "shapes names the input {name:?} twice"
+            )));
+        }
+        let extents: Vec<u64> = value.extract().map_err(|_| {
+            pyo3::exceptions::PyTypeError::new_err(format!(
+                "shapes[{name:?}] must be a sequence of positive ints"
+            ))
+        })?;
+        if extents.is_empty() || extents.iter().any(|&extent| extent == 0) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "shapes[{name:?}] needs at least one extent and none may be 0"
+            )));
+        }
+        bindings.push((name, extents));
+    }
+    Ok(bindings)
+}
+
 /// Diagnose an ONNX model before preparing it.
 #[pyfunction]
-pub fn doctor(py: Python<'_>, onnx: &str) -> PyResult<Py<PyDoctorReport>> {
+#[pyo3(signature = (onnx, *, shapes = None))]
+pub fn doctor(
+    py: Python<'_>,
+    onnx: &str,
+    shapes: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyDoctorReport>> {
     let started = Instant::now();
+    let bindings = shape_bindings(shapes)?;
     let report = py
-        .detach(|| crate::inference::doctor(onnx))
+        .detach(|| crate::inference::doctor_with_shapes(onnx, &bindings))
         .map_err(|error| errors::from_core(py, error))?;
     let doctor = PyDoctorReport {
         path: onnx.to_string(),
@@ -1174,6 +1223,7 @@ pub fn doctor(py: Python<'_>, onnx: &str) -> PyResult<Py<PyDoctorReport>> {
                 message: issue.message.clone(),
             })
             .collect(),
+        inputs: report.inputs.clone(),
         dynamic_symbols: report
             .dynamic_symbols
             .iter()
