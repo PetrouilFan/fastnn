@@ -316,7 +316,7 @@ fn recognise_sum(
 }
 
 /// The segments reading `value`, for the single-consumer check above.
-fn consumers_of_add<'a>(segments: &'a [Segment], add: usize, value: SlotId) -> Vec<usize> {
+fn consumers_of_add(segments: &[Segment], add: usize, value: SlotId) -> Vec<usize> {
     let mut readers = Vec::new();
     for (index, segment) in segments.iter().enumerate() {
         if index != add && segment.inputs.contains(&value) {

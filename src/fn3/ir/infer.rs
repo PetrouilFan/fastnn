@@ -1004,7 +1004,7 @@ fn split(node: &Node, inputs: &[TensorType]) -> Result<Vec<TensorType>, Fn3Error
             ));
         }
         let extent = extent.as_const().expect("the symbolic case returned above");
-        if extent % outputs as u64 != 0 {
+        if !extent.is_multiple_of(outputs as u64) {
             return Err(shape_mismatch(
                 node,
                 format!("an equal split of extent {extent} into {outputs} parts"),
@@ -1148,7 +1148,7 @@ fn conv(node: &Node, inputs: &[TensorType]) -> Result<Vec<TensorType>, Fn3Error>
     }
     for (axis, &extent) in kernel.iter().enumerate() {
         let declared = weight.dims()[axis + 2];
-        if declared != DimExpr::Const(extent as u64) {
+        if declared != DimExpr::Const(extent) {
             return Err(shape_mismatch(
                 node,
                 format!("the kernel extent {extent} on spatial axis {axis}"),

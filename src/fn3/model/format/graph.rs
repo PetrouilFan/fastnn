@@ -301,14 +301,15 @@ pub(super) fn check_interface(
                     ))
                 }
                 [value] => {
-                    if kind == "input" && value.producer.is_some() {
-                        return Err(FormatError::inconsistent(
-                            "graph interface",
-                            format!(
-                                "input `{name}` is written by {}, so it is not an input",
-                                value.producer.expect("checked above")
-                            ),
-                        ));
+                    if kind == "input" {
+                        if let Some(producer) = value.producer {
+                            return Err(FormatError::inconsistent(
+                                "graph interface",
+                                format!(
+                                    "input `{name}` is written by {producer}, so it is not an input"
+                                ),
+                            ));
+                        }
                     }
                 }
                 _ => {

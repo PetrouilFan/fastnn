@@ -223,7 +223,7 @@ impl PySession {
         Py::new(py, state)
     }
 
-    fn read<'a>(&self) -> Result<std::sync::MutexGuard<'_, RuntimeSession>, PyErr> {
+    fn read(&self) -> Result<std::sync::MutexGuard<'_, RuntimeSession>, PyErr> {
         self.session
             .lock()
             .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("session poisoned"))

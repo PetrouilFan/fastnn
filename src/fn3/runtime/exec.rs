@@ -1297,12 +1297,7 @@ mod tests {
         .unwrap();
         let weights = WeightSet::new(vec![weight]).unwrap();
         let mut graph = Graph::new();
-        let ty = || {
-            TensorType::new(
-                DType::F32,
-                [DimExpr::constant(1), DimExpr::constant(4)].into_iter(),
-            )
-        };
+        let ty = || TensorType::new(DType::F32, [DimExpr::constant(1), DimExpr::constant(4)]);
         let x = graph.add_value(Some("x"), ty()).unwrap();
         let x2 = graph.add_value(Some("x2"), ty()).unwrap();
         let w = graph.add_value(Some("w"), ty()).unwrap();

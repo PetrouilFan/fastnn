@@ -487,7 +487,7 @@ fn section_name(tag: u32) -> &'static str {
 fn a_bad_section_length_or_offset_is_malformed_at_its_byte() {
     let (path, _directory) = synthetic(16, "length");
     let bytes = std::fs::read(&path).expect("read");
-    let header = Artifact::open(&path).expect("open").header().clone();
+    let header = *Artifact::open(&path).expect("open").header();
     let directory = &bytes[HEADER_BYTES..HEADER_BYTES + DIRECTORY_BYTES];
 
     // The first section header starts at directory byte 8: tag, reserved,
@@ -611,7 +611,7 @@ fn a_200_mb_model_loads_without_copying_its_weights() {
 fn digest(bytes: &[u8]) -> [u8; 32] {
     let text = sha256_hex(bytes);
     let mut digest = [0u8; 32];
-    for (index, chunk) in text.as_bytes().chunks_exact(2).enumerate() {
+    for (index, chunk) in text.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         if let Ok(chunk) = std::str::from_utf8(chunk) {
             digest[index] = u8::from_str_radix(chunk, 16).unwrap_or(0);
         }

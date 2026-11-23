@@ -638,7 +638,7 @@ pub(super) fn check_section_padding(
 ) -> Result<(), FormatError> {
     for range in ranges {
         let end = range.offset as usize + range.length as usize;
-        let padded = align64((range.offset + range.length) as u64)? as usize;
+        let padded = align64(range.offset + range.length)? as usize;
         let limit = padded.min(bytes.len());
         if let Some(position) = bytes[end..limit].iter().position(|&byte| byte != 0) {
             return Err(FormatError::malformed_at(

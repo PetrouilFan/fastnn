@@ -377,7 +377,7 @@ mod tests {
         });
         let mut names: Vec<String> = receiver
             .try_iter()
-            .filter_map(|name| name)
+            .flatten()
             .filter(|name| name.starts_with("fn3-worker"))
             .collect();
         names.sort();

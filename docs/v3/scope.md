@@ -283,11 +283,11 @@ both are manual and opt-in. Everything else in this table is policy owned by
 | GPT-2-style decoder, quantized | top-1/top-5 and perplexity | Same top-1 and top-5 agreement as F32; perplexity within 1% of F32 |
 
 The F32 decoder gate is implemented by
-[`tests/fn3_trained_parity.rs`](../../tests/fn3_trained_parity.rs); the
-weight-only INT8 gate is [`tests/fn3_trained_int8.rs`](../../tests/fn3_trained_int8.rs).
-Both need an external trained model (the F32 gate the ONNX graph, the INT8 gate
-the prepared artifact) and neither is part of the default test run, so even these
-budgets are currently manual gates. No performance number appears in this
+[`tests/fn3_trained_parity.rs`](../../tests/fn3_trained_parity.rs) and needs an
+external trained model plus its committed ORT rows, so it is not part of the
+default test run: even these budgets are currently manual gates. The 3.0
+weight-only INT8 artifact gate (`fn3_trained_int8`) was removed with the surface
+it tested — the v3 artifact has no W8A16 payload — and W8A8 is #103. No performance number appears in this
 document: performance evidence belongs to #106 and must name the machine, thread
 count, median, p95 and memory.
 

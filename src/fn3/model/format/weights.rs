@@ -102,7 +102,7 @@ pub(super) fn encode_weights(weights: &WeightSet) -> Result<Vec<u8>, FormatError
     let mut payload = Writer::with_capacity(weights.total_bytes() as usize);
     for weight in weights.iter() {
         payload.pad_to_64();
-        if payload.len() as u64 % 64 != 0 {
+        if !(payload.len() as u64).is_multiple_of(64) {
             return Err(FormatError::inconsistent(
                 "weight payload",
                 "an entry did not start on a 64-byte boundary",
@@ -399,7 +399,7 @@ mod tests {
         assert_eq!(decoded.entries.len(), 2);
         assert_eq!(decoded.entries[0].len(), 24);
         assert_eq!(decoded.payload_offset, 128);
-        assert_eq!(decoded.entries[0].file_range().start, 4096 + 128 + 0);
+        assert_eq!(decoded.entries[0].file_range().start, 4096 + 128);
         assert_eq!(decoded.entries[1].file_range().start, 4096 + 128 + 64);
         assert_eq!(decoded.payload_bytes, 128);
         assert_eq!(section.len(), 128 + 128);

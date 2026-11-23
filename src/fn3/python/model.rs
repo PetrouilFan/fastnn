@@ -1181,7 +1181,7 @@ fn shape_bindings(shapes: Option<&Bound<'_, PyDict>>) -> PyResult<Vec<(String, V
                 "shapes[{name:?}] must be a sequence of positive ints"
             ))
         })?;
-        if extents.is_empty() || extents.iter().any(|&extent| extent == 0) {
+        if extents.is_empty() || extents.contains(&0) {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "shapes[{name:?}] needs at least one extent and none may be 0"
             )));

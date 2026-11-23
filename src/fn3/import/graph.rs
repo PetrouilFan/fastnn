@@ -3615,7 +3615,7 @@ fn plan_conv(
     let group_u64 = group as u64;
     let weight_in = weight_shape.dims().get(1).and_then(Dim::as_known);
     if let Some(weight_in) = weight_in {
-        if weight_in.checked_mul(group_u64).unwrap_or(u64::MAX) != in_channels {
+        if weight_in.saturating_mul(group_u64) != in_channels {
             return Err(shape_problem(format!(
                 "Conv weight has {weight_in} input channels for group = {group}, but the data \
                  has {in_channels}; expected {}",
@@ -6166,7 +6166,7 @@ fn summarize(
         *dtypes.entry(value.dtype.code()).or_insert(0) += 1;
     }
     let initializers = weights.initializers().count();
-    let onnx_nodes = source_nodes.unwrap_or_else(|| onnx_node_ops.len());
+    let onnx_nodes = source_nodes.unwrap_or(onnx_node_ops.len());
     ImportSummary {
         onnx_nodes,
         fn3_nodes: graph.nodes().len(),
