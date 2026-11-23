@@ -10,6 +10,8 @@ tag `archive/3.0`; see [the archive note](archive/README.md).
 
 - [One runtime: the v3 decision](v3/adr-0001-one-runtime.md) — what is being
   rebuilt and why
+- [v3 status](v3/status.md) — which phases are done, the measured numbers, and
+  what is still open
 - [v3 scope and model contract](v3/scope.md) — what v3 runs, rejects and
   promises; the live matrix is [SUPPORTED.md](../SUPPORTED.md)
 - [CLI quickstart](quickstart-fn3.md) — `fastnn-infer` on CPU and Vulkan
