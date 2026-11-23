@@ -555,6 +555,31 @@ impl Conv {
         }
     }
 
+    /// The row split alone, for a caller that needs dense row chunks (a
+    /// channels-last destination is dense per row range, a channel range is
+    /// not).
+    pub(crate) fn row_split(&self, workers: usize) -> ConvSplit {
+        ConvSplit {
+            axis: ConvSplitAxis::Rows,
+            blocks: self.row_blocks(workers),
+        }
+    }
+
+    /// The channel split alone, for a caller that cannot use rows.
+    ///
+    /// A fused `sum` needs the destination pre-filled with the residual, and a
+    /// row block's destination is a dense staging buffer rather than a range of
+    /// the output slot; the channel split is the one whose destination
+    /// submemory sees the pre-filled bytes. It is also the conservative split
+    /// for a chain of blocked layouts, where a row submemory of a blocked
+    /// parent takes oneDNN off its JIT path exactly as it did for NCHW.
+    pub(crate) fn channel_split(&self, workers: usize) -> ConvSplit {
+        ConvSplit {
+            axis: ConvSplitAxis::Channels,
+            blocks: self.channel_blocks(workers),
+        }
+    }
+
     fn channel_blocks(&self, workers: usize) -> Vec<ConvBlock> {
         let whole_output =
             |out_start, out_channels, group_start, groups, in_start, in_channels| ConvBlock {

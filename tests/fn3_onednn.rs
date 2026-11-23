@@ -34,7 +34,9 @@ use std::sync::Arc;
 use fastnn::inference::backend::SegmentEngine;
 use fastnn::inference::import::{import_onnx_graph, ImportedGraph};
 use fastnn::inference::ops::OpId;
-use fastnn::inference::runtime::{ConvBlockAxis, EngineChoice, Session, Threading};
+use fastnn::inference::runtime::{
+    ConvBlockAxis, EngineChoice, LayoutStrategy, PlanOptions, Session, Threading,
+};
 
 const YOLOV8N: &str = "/home/petrouil/.hermes/yolov8n.onnx";
 
@@ -248,6 +250,37 @@ fn the_plan_says_which_segments_onednn_took() {
         report.conv_segments,
         "every prepared convolution records exactly one split dimension"
     );
+    // The fusion report: every chain names the ops it replaced, and the plan
+    // plus the removed segments is the unfused plan.
+    let fusions = plan.fusions();
+    assert!(!fusions.is_empty(), "the pinned graph has fusable chains");
+    let mut removed = 0usize;
+    for fusion in fusions {
+        assert!(
+            fusion.removed() >= 1,
+            "a fusion must remove at least one segment: {fusion}"
+        );
+        assert_eq!(
+            fusion.chain().len(),
+            fusion.removed() + 1,
+            "the chain and the removed count must agree: {fusion}"
+        );
+        let segment = &plan.segments[fusion.segment];
+        assert!(
+            segment.fused().is_some_and(|fused| fused == &fusion.fused),
+            "fusion {} does not name its segment",
+            fusion.segment
+        );
+        removed += fusion.removed();
+    }
+    assert_eq!(plan.unfused_segment_count(), plan.segments.len() + removed);
+    println!(
+        "[fn3onednn][measure] fusions: {} chains, {removed} segments removed, \
+         {} -> {} segments",
+        fusions.len(),
+        plan.unfused_segment_count(),
+        plan.segments.len(),
+    );
     let splits = session.one_dnn_splits();
     assert_eq!(splits.len(), report.conv_segments);
     for split in &splits {
@@ -359,6 +392,94 @@ fn the_plan_says_which_segments_onednn_took() {
             fallback.segment
         );
     }
+}
+
+#[test]
+fn the_fused_plan_matches_the_unfused_plan() {
+    let Some(reference) = load_reference() else {
+        return;
+    };
+    let Some(imported) = import_model() else {
+        return;
+    };
+    let workers = *worker_counts().last().unwrap();
+    let mut fused = Session::new_with_options(
+        Arc::clone(&imported),
+        Threading::Fixed(workers),
+        EngineChoice::Auto,
+        PlanOptions::new(),
+    )
+    .expect("open the fused session");
+    let mut unfused = Session::new_with_options(
+        Arc::clone(&imported),
+        Threading::Fixed(workers),
+        EngineChoice::Auto,
+        PlanOptions::unfused(),
+    )
+    .expect("open the unfused session");
+    let fusions = fused.fusions().len();
+    let fused_segments = fused.plan().segments.len();
+    let unfused_segments = unfused.plan().segments.len();
+    println!(
+        "[fn3onednn][measure] fusion: {fusions} chains folded, {unfused_segments} -> \
+         {fused_segments} segments, arena {} -> {} bytes",
+        unfused.plan().arena_bytes,
+        fused.plan().arena_bytes,
+    );
+    assert!(fusions > 0, "the pinned graph has fusable chains");
+    assert_eq!(fused.plan().unfused_segment_count(), unfused_segments);
+    let expected = run(&mut unfused, &reference.input);
+    let got = run(&mut fused, &reference.input);
+    let (max_abs, max_rel) = compare(
+        &got,
+        &expected,
+        ENGINE_ABS,
+        ENGINE_REL,
+        "fused oneDNN vs unfused oneDNN",
+    );
+    println!("[fn3onednn][measure] fused vs unfused: max_abs {max_abs:e}, max_rel {max_rel:e}");
+}
+
+/// The channels-last layout policy is an option, not the default; when it is
+/// asked for, it must produce the same numbers.
+#[test]
+fn the_channels_last_layout_policy_matches_the_plain_one() {
+    let Some(reference) = load_reference() else {
+        return;
+    };
+    let Some(imported) = import_model() else {
+        return;
+    };
+    let workers = *worker_counts().last().unwrap();
+    let mut plain = Session::new_with_options(
+        Arc::clone(&imported),
+        Threading::Fixed(workers),
+        EngineChoice::Auto,
+        PlanOptions::new().with_layout(LayoutStrategy::Plain),
+    )
+    .expect("open the plain-layout session");
+    let mut chained = Session::new_with_options(
+        Arc::clone(&imported),
+        Threading::Fixed(workers),
+        EngineChoice::Auto,
+        PlanOptions::new().with_layout(LayoutStrategy::Chained),
+    )
+    .expect("open the channels-last session");
+    let report = chained.one_dnn_report().expect("oneDNN session");
+    println!(
+        "[fn3onednn][measure] channels-last: {} blocked segments, {} layout bytes, {} reorders \
+         moving {} bytes",
+        report.blocked_segments, report.layout_bytes, report.reorders, report.reorder_bytes,
+    );
+    let expected = run(&mut plain, &reference.input);
+    let got = run(&mut chained, &reference.input);
+    compare(
+        &got,
+        &expected,
+        ENGINE_ABS,
+        ENGINE_REL,
+        "channels-last vs plain",
+    );
 }
 
 #[test]

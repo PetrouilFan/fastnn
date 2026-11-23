@@ -44,11 +44,13 @@
 //!
 //! # Parallelism
 //!
-//! A kernel splits its output into rows and hands them to the session's own
-//! pool only when the output is at least `MIN_PARALLEL_BYTES` — below that,
-//! waking a worker costs more than the arithmetic. Rows are independent and each
-//! row's arithmetic is fixed, so the split cannot change a result. The split is
-//! always over the *outer* axes (`N*C` rows), so a row's inner loop is untouched.
+//! A kernel splits its output into whole rows and hands them to the session's
+//! own pool only when the output has at least `MIN_PARALLEL_ELEMENTS` (8 Ki)
+//! elements and at least `MIN_PARALLEL_ELEMENTS_PER_WORKER` elements for every
+//! worker — below that, waking a worker costs more than the arithmetic. Rows are
+//! independent and each row's arithmetic is fixed, so the split cannot change a
+//! result. The split is always over the *outer* axes (`N*C` rows), so a row's
+//! inner loop is untouched.
 //!
 //! # Shapes
 //!
@@ -68,6 +70,7 @@ use crate::inference::tensor::{TensorMut, TensorView};
 pub(crate) mod act;
 pub(crate) mod conv;
 pub(crate) mod data;
+pub(crate) mod fused;
 pub(crate) mod int;
 pub(crate) mod norm;
 pub(crate) mod pad;
@@ -75,15 +78,23 @@ pub(crate) mod pool;
 pub(crate) mod resize;
 pub(crate) mod topk;
 
-/// Output size, in bytes, below which a kernel stays on the calling thread.
+/// Smallest output, in elements, worth handing to the session pool.
 ///
-/// 64 KiB is four cache lines per worker on a sixteen-core host and roughly the
-/// point where a Rayon task hand-off (tens of microseconds including the wake-up)
-/// stops dominating a scalar row loop. A build without the `parallel` feature has
-/// no pool to hand work to, so the constant is only read by that build's
-/// alternative.
+/// The phase-3b floor was a flat 64 KiB (16 Ki `f32` elements), chosen as four
+/// cache lines per worker on a sixteen-core host. At eight workers that is 2 Ki
+/// elements per hand-off — below the point a Rayon wake-up is amortised — while
+/// the pointwise glue segments the row split targets are 8–50 Ki elements, so
+/// they stayed serial. The floor is now counted in elements and scaled by the
+/// session's worker count: a hand-off needs at least
+/// [`MIN_PARALLEL_ELEMENTS_PER_WORKER`] elements per worker and never fewer
+/// than [`MIN_PARALLEL_ELEMENTS`] in total (below ~8 Ki elements the pool
+/// costs more than the arithmetic).
 #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
-pub(crate) const MIN_PARALLEL_BYTES: usize = 64 * 1024;
+pub(crate) const MIN_PARALLEL_ELEMENTS: usize = 8 * 1024;
+
+/// Elements per worker a parallel row loop must have before it uses the pool.
+#[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+pub(crate) const MIN_PARALLEL_ELEMENTS_PER_WORKER: usize = 1024;
 
 /// `true` for the twelve op ids these kernels own.
 pub(crate) fn is_cnn_op(op: OpId) -> bool {
@@ -299,7 +310,13 @@ where
     #[cfg(feature = "parallel")]
     {
         if let Some(threads) = threads {
-            if threads.worker_count() > 1 && std::mem::size_of_val(out) >= MIN_PARALLEL_BYTES {
+            let workers = threads.worker_count();
+            let floor =
+                MIN_PARALLEL_ELEMENTS.max(workers.saturating_mul(MIN_PARALLEL_ELEMENTS_PER_WORKER));
+            // One task is one whole row: `par_chunks_mut(row_len)` never splits
+            // a row, and the kernel's inner loop and arithmetic order are the
+            // serial ones.
+            if workers > 1 && out.len() >= floor && out.len() / row_len >= 2 {
                 use rayon::prelude::*;
                 return threads.install(|| {
                     out.par_chunks_mut(row_len)
@@ -341,6 +358,60 @@ pub(crate) fn require_extent(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sigmoid(values: &mut [f32]) {
+        for value in values.iter_mut() {
+            *value = 1.0 / (1.0 + (-*value).exp());
+        }
+    }
+
+    #[test]
+    fn the_row_loop_is_bit_identical_around_the_parallel_floor() {
+        // 160 rows of 80 values is 12 800 elements (50 KiB): below the old
+        // flat 64 KiB floor, above the new 8 Ki-element one. The pooled path
+        // must produce the same bits as the serial one.
+        let row_len = 80usize;
+        let values: Vec<f32> = (0..12_800)
+            .map(|index| ((index as f32) * 0.001).sin() * 3.0 - 1.5)
+            .collect();
+        let mut serial = values.clone();
+        for_each_row(None, &mut serial, row_len, |_, row| {
+            sigmoid(row);
+            Ok(())
+        })
+        .unwrap();
+        #[cfg(feature = "parallel")]
+        {
+            let threads =
+                SessionThreads::new(crate::inference::runtime::Threading::Fixed(4)).unwrap();
+            let mut pooled = values.clone();
+            for_each_row(Some(&threads), &mut pooled, row_len, |_, row| {
+                sigmoid(row);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(
+                pooled
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                serial
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "the pooled row loop changed a bit"
+            );
+        }
+        // And the same loop below every floor still runs (serially) correctly.
+        let mut small = vec![0.5f32; 4096];
+        for_each_row(None, &mut small, 4, |_, row| {
+            sigmoid(row);
+            Ok(())
+        })
+        .unwrap();
+        let expected = 1.0 / (1.0 + (-0.5f32).exp());
+        assert!(small.iter().all(|value| *value == expected));
+    }
 
     #[test]
     fn product_and_extents_are_checked() {

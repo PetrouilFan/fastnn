@@ -28,11 +28,18 @@
 //! | [`exec`] | [`Session`]: validate inputs, walk segments, dispatch per engine, read outputs |
 //! | `kernels` | scalar NCHW kernels for the twelve CNN op ids |
 //!
+//! # Fusion is plan structure
+//!
+//! The planner's fusion pass rewrites the plan before memory is reserved: `conv -> relu`,
+//! `conv -> mul(x, sigmoid(x))` and `add(conv, other)` become one
+//! [`SegmentOp::Fused`] segment, and the intermediate values take no arena
+//! bytes. The scalar engine implements every fused form with the unfused
+//! arithmetic order (the scalar fused kernel), so a fused plan is bit-identical to
+//! an unfused one; a provider may claim the fused segment and the planner
+//! records what it declined. [`Plan::fusions`] is the report.
+//!
 //! # What is deliberately not here
 //!
-//! - **No fusion.** [`SegmentOp`] has one variant, `Op(OpId)`. A `Fused(..)`
-//!   variant without a provider that claims it would be a contract nothing can
-//!   satisfy; phase 3 adds it together with the provider.
 //! - **No library in the plan.** Nothing in [`Plan`], [`Arena`] or the scalar
 //!   kernels names a compute library. A provider (`cpu-onednn`) is selected by
 //!   the session through [`crate::inference::backend::SegmentProvider`], the
@@ -41,6 +48,7 @@
 //!   [`Plan::fallbacks`].
 //!
 //! [`SegmentEngine`]: crate::inference::backend::SegmentEngine
+//! [`SegmentOp::Fused`]: crate::inference::runtime::SegmentOp::Fused
 //! - **No global state.** No `static` thread pool, no `lazy_static`, no import-time
 //!   pinning. A pool exists only while a session exists.
 //! - **No `HashMap`.** Every table is a `Vec` and every walk is in index order, so
@@ -89,6 +97,7 @@
 
 pub mod arena;
 pub mod exec;
+pub(crate) mod fuse;
 pub mod kernels;
 pub mod plan;
 pub mod threads;
@@ -99,8 +108,8 @@ pub mod timing;
 pub use arena::Arena;
 pub use exec::{ConvBlockAxis, ConvSplitReport, EngineChoice, HostTensor, OneDnnReport, Session};
 pub use plan::{
-    EngineCounts, EngineFallback, Plan, Segment, SegmentOp, Slot, SlotId, SlotSource,
-    SLOT_ALIGNMENT,
+    EngineCounts, EngineFallback, Fusion, LayoutStrategy, Plan, PlanOptions, Reorder,
+    ReorderDirection, Segment, SegmentOp, Slot, SlotId, SlotSource, SLOT_ALIGNMENT,
 };
 pub use threads::{physical_core_count, SessionThreads, Threading};
 #[cfg(feature = "segment-timing")]

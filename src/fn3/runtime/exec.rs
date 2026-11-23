@@ -64,7 +64,9 @@ use crate::inference::import::ImportedGraph;
 use crate::inference::ops::OpId;
 use crate::inference::runtime::arena::Arena;
 use crate::inference::runtime::kernels;
-use crate::inference::runtime::plan::{EngineCounts, Plan, SlotId, SlotSource};
+use crate::inference::runtime::plan::{
+    EngineCounts, Fusion, LayoutStrategy, Plan, PlanOptions, SlotId, SlotSource,
+};
 use crate::inference::runtime::threads::{SessionThreads, Threading};
 use crate::inference::storage::{AlignedBuffer, DTypeAlignment};
 use crate::inference::tensor::{TensorMeta, TensorMut, TensorView};
@@ -176,6 +178,16 @@ pub struct OneDnnReport {
     pub pool_segments: usize,
     /// Matmul segments prepared.
     pub matmul_segments: usize,
+    /// Segment prepared with a fused epilogue (a `sum` and/or an activation).
+    pub fused_segments: usize,
+    /// Segments whose result stays in the engine's channels-last layout.
+    pub blocked_segments: usize,
+    /// Bytes of engine-owned channels-last buffers.
+    pub layout_bytes: usize,
+    /// Layout conversions run inside segments, per forward.
+    pub reorders: usize,
+    /// Bytes those conversions move per forward.
+    pub reorder_bytes: usize,
     /// Engine-owned prepacked weight and bias bytes.
     pub prepacked_bytes: usize,
     /// Weight blocks oneDNN wanted in a layout other than the ONNX payload's,
@@ -299,8 +311,22 @@ impl Session {
         threading: Threading,
         choice: EngineChoice,
     ) -> Result<Session, Fn3Error> {
+        Session::new_with_options(imported, threading, choice, PlanOptions::new())
+    }
+
+    /// Open a session with an explicit engine choice and plan options.
+    ///
+    /// [`PlanOptions::unfused`] builds one segment per graph node, which is the
+    /// oracle the fusion test compares a fused session against: same graph,
+    /// same provider, same tolerance.
+    pub fn new_with_options(
+        imported: impl Into<Arc<ImportedGraph>>,
+        threading: Threading,
+        choice: EngineChoice,
+        options: PlanOptions,
+    ) -> Result<Session, Fn3Error> {
         let source = imported.into();
-        let plan = Plan::from_imported_with(&source, provider_for(choice))?;
+        let plan = Plan::from_imported_with_options(&source, provider_for(choice), options)?;
         Session::from_plan(plan, source, threading)
     }
 
@@ -316,6 +342,10 @@ impl Session {
         imported: impl Into<Arc<ImportedGraph>>,
         threading: Threading,
     ) -> Result<Session, Fn3Error> {
+        // Mutable only when the optional engine records its layout decisions on
+        // the plan; a build without it stores the plan unchanged.
+        #[allow(unused_mut)]
+        let mut plan = plan;
         let source = imported.into();
         let threads = SessionThreads::new(threading)?;
         let mut slot_meta = Vec::with_capacity(plan.slots.len());
@@ -371,6 +401,28 @@ impl Session {
         }
         #[cfg(feature = "cpu-onednn")]
         let onednn = prepare_onednn(&plan, &source, &aligned_weights, threads.worker_count())?;
+        // The engine's layout pass is a plan decision taken here, at session
+        // open, because it needs oneDNN's descriptor choice. Record it on the
+        // plan so a caller can see what the layout policy cost before running
+        // a single forward.
+        #[cfg(feature = "cpu-onednn")]
+        if let Some(engine) = onednn.as_ref() {
+            plan.reorders = engine
+                .reorders()
+                .iter()
+                .map(|reorder| crate::inference::runtime::plan::Reorder {
+                    segment: reorder.segment,
+                    slot: SlotId::new(reorder.slot as u32),
+                    direction: if reorder.to_blocked {
+                        crate::inference::runtime::plan::ReorderDirection::NchwToBlocked
+                    } else {
+                        crate::inference::runtime::plan::ReorderDirection::BlockedToNchw
+                    },
+                    bytes: reorder.bytes,
+                })
+                .collect();
+            plan.reorder_bytes = engine.reorder_bytes();
+        }
         let arena = Arena::new(&plan)?;
         Ok(Session {
             plan,
@@ -515,24 +567,37 @@ impl Session {
                             slot_meta[id.index()].clone(),
                         )?);
                     }
-                    let op = segment.op_id();
-                    if kernels::is_cnn_op(op) {
-                        kernels::dispatch(
-                            op,
-                            &views,
-                            &mut results,
-                            &segment.params,
-                            Some(threads),
-                        )?;
-                    } else {
-                        // The legacy kernels take a thread budget and would otherwise ask
-                        // Rayon's *global* pool. Running them inside this session's pool
-                        // with a budget of one keeps them on one `fn3-worker` thread and
-                        // makes the backend's nested-region guard (`in_worker`) report
-                        // true, so no library call can reach the global pool.
-                        threads.install(|| {
-                            dispatch_kernels(op, &views, &mut results, &segment.params, 1)
-                        })?;
+                    match &segment.op {
+                        crate::inference::runtime::plan::SegmentOp::Fused(fused) => {
+                            kernels::fused::run(
+                                fused,
+                                &views,
+                                &mut results,
+                                &segment.params,
+                                Some(threads),
+                            )?;
+                        }
+                        crate::inference::runtime::plan::SegmentOp::Op(op) => {
+                            let op = *op;
+                            if kernels::is_cnn_op(op) {
+                                kernels::dispatch(
+                                    op,
+                                    &views,
+                                    &mut results,
+                                    &segment.params,
+                                    Some(threads),
+                                )?;
+                            } else {
+                                // The legacy kernels take a thread budget and would otherwise ask
+                                // Rayon's *global* pool. Running them inside this session's pool
+                                // with a budget of one keeps them on one `fn3-worker` thread and
+                                // makes the backend's nested-region guard (`in_worker`) report
+                                // true, so no library call can reach the global pool.
+                                threads.install(|| {
+                                    dispatch_kernels(op, &views, &mut results, &segment.params, 1)
+                                })?;
+                            }
+                        }
                     }
                 }
                 SegmentEngine::OneDnn => {
@@ -553,6 +618,38 @@ impl Session {
                         // and the block never reads it from the window list.
                         let (input_windows, mut output_windows) =
                             arena.frame(plan, &segment.inputs, &segment.outputs)?;
+                        // A fused `sum` is oneDNN's sum post-op, which adds the
+                        // destination's previous contents: the residual operand
+                        // is copied into the result slot first. Both slots are
+                        // contiguous NCHW with the same byte length, so this is
+                        // one memcpy and it happens before any block writes.
+                        if let Some(position) = segment.fused().and_then(|fused| fused.sum) {
+                            let residual =
+                                input_windows.get(position).copied().flatten().ok_or_else(
+                                    || {
+                                        engine_unavailable(
+                                            segment_index,
+                                            "the fused residual operand has no arena window",
+                                        )
+                                    },
+                                )?;
+                            let destination: &mut [u8] = match output_windows.first_mut() {
+                                Some(window) => window,
+                                None => {
+                                    return Err(engine_unavailable(
+                                        segment_index,
+                                        "the fused result has no arena window",
+                                    ))
+                                }
+                            };
+                            if residual.len() != destination.len() {
+                                return Err(engine_unavailable(
+                                    segment_index,
+                                    "the fused residual and result differ in byte length",
+                                ));
+                            }
+                            destination.copy_from_slice(residual);
+                        }
                         let mut addresses = Vec::with_capacity(input_windows.len());
                         for window in &input_windows {
                             addresses.push(match window {
@@ -564,6 +661,7 @@ impl Session {
                         for window in &mut output_windows {
                             results.push(window.as_mut_ptr() as usize);
                         }
+                        prepared.run_prelude(&addresses)?;
                         if engine.blocks_run_in_parallel() {
                             threads.run_blocks(prepared.block_count(), |block| {
                                 prepared.run_block(block, &addresses, &results)
@@ -595,6 +693,20 @@ impl Session {
     /// How many segments each engine runs in this session's plan.
     pub fn engine_counts(&self) -> EngineCounts {
         self.plan.engine_counts()
+    }
+
+    /// Every chain the planner folded, in segment order.
+    ///
+    /// The same report is reachable as [`Plan::fusions`]; this accessor exists
+    /// so a caller holding only a session does not have to go through
+    /// [`Session::plan`].
+    pub fn fusions(&self) -> &[Fusion] {
+        self.plan.fusions()
+    }
+
+    /// The layout policy this session's plan asked for.
+    pub fn layout_strategy(&self) -> LayoutStrategy {
+        self.plan.layout
     }
 
     /// The per-op wall times recorded since the last reset.
@@ -641,6 +753,11 @@ impl Session {
                 conv_row_segments: splits.len() - conv_channel_segments,
                 pool_segments: pool,
                 matmul_segments: matmul,
+                fused_segments: engine.fused_segments(),
+                blocked_segments: engine.blocked_segments(),
+                layout_bytes: engine.layout_bytes(),
+                reorders: engine.reorders().len(),
+                reorder_bytes: engine.reorder_bytes(),
                 prepacked_bytes: engine.prepacked_bytes(),
                 reordered_blocks: engine.reordered_blocks(),
                 staging_bytes: engine.staging_bytes(),
@@ -845,7 +962,8 @@ fn prepare_onednn(
         if segment.engine != SegmentEngine::OneDnn {
             continue;
         }
-        let spec = segment_spec(plan, source, aligned, segment, workers)?;
+        let blocked = blocked_destination(plan, index);
+        let spec = segment_spec(plan, source, aligned, segment, workers, blocked)?;
         engine
             .prepare_segment(index, &spec)
             .map_err(|error| match error {
@@ -866,6 +984,59 @@ fn prepare_onednn(
     Ok(Some(engine))
 }
 
+/// Whether the engine may keep this segment's result in its channels-last
+/// layout.
+///
+/// The rule is structural and decided here, where the whole plan is visible:
+///
+/// - the plan asked for [`LayoutStrategy::Chained`];
+/// - the segment is a oneDNN convolution with a single output;
+/// - the output is not a graph output, so the session's contract stays NCHW;
+/// - **every** consumer is a oneDNN convolution that reads this value as its
+///   source (a pool, whose channel blocks take strided source submemories, or a
+///   scalar kernel would need the NCHW bytes);
+/// - the segment has no fused residual: the `sum` post-op reads the destination
+///   buffer back, which a channels-last destination would not hold in NCHW;
+/// - the consumer is not grouped: a group's channel slice is strided in a
+///   channels-last tensor.
+///
+/// The engine still decides whether the block split can produce it (a row split
+/// with at least two blocks); when it cannot, it prepares the plain layout and
+/// records no reorder.
+#[cfg(feature = "cpu-onednn")]
+fn blocked_destination(plan: &Plan, index: usize) -> bool {
+    if plan.layout != LayoutStrategy::Chained {
+        return false;
+    }
+    let segment = &plan.segments[index];
+    if segment.engine != SegmentEngine::OneDnn
+        || segment.op_id() != OpId::Conv
+        || segment.outputs.len() != 1
+        || segment.fused().is_some_and(|fused| fused.has_sum())
+    {
+        return false;
+    }
+    let produced = segment.outputs[0];
+    if plan.outputs.contains(&produced) {
+        return false;
+    }
+    let mut consumed = false;
+    for consumer in plan.segments.iter() {
+        if !consumer.inputs.contains(&produced) {
+            continue;
+        }
+        consumed = true;
+        if consumer.engine != SegmentEngine::OneDnn
+            || consumer.op_id() != OpId::Conv
+            || consumer.params.group > 1
+            || consumer.inputs.first() != Some(&produced)
+        {
+            return false;
+        }
+    }
+    consumed
+}
+
 /// Describe one segment to the engine in the terms it can use.
 #[cfg(feature = "cpu-onednn")]
 fn segment_spec<'a>(
@@ -874,6 +1045,7 @@ fn segment_spec<'a>(
     aligned: &'a [Option<AlignedBuffer>],
     segment: &'a crate::inference::runtime::plan::Segment,
     workers: usize,
+    blocked_destination: bool,
 ) -> Result<SegmentSpec<'a>, Fn3Error> {
     let mut inputs = Vec::with_capacity(segment.inputs.len());
     let mut input_dtypes = Vec::with_capacity(segment.inputs.len());
@@ -926,6 +1098,10 @@ fn segment_spec<'a>(
         weights,
         bias,
         workers,
+        fused: segment.fused(),
+        input_slots: segment.inputs.iter().map(|id| id.index()).collect(),
+        output_slots: segment.outputs.iter().map(|id| id.index()).collect(),
+        dst_blocked: blocked_destination,
     })
 }
 

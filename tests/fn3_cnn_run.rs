@@ -50,7 +50,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use fastnn::inference::import::{import_onnx_graph, ImportedGraph};
-use fastnn::inference::runtime::{EngineChoice, Session, Threading};
+use fastnn::inference::runtime::{EngineChoice, PlanOptions, Session, Threading};
 
 const YOLOV8N: &str = "/home/petrouil/.hermes/yolov8n.onnx";
 
@@ -286,6 +286,76 @@ fn yolov8n_matches_the_onnxruntime_reference() {
     println!(
         "[fn3cnn][measure] fn3 vs onnxruntime {}: max_abs {max_abs:e}, max_rel {max_rel:e}",
         onnxruntime_version()
+    );
+}
+
+#[test]
+fn fusion_does_not_change_the_scalar_result() {
+    let Some(reference) = load_reference() else {
+        return;
+    };
+    let Some(imported) = import_model() else {
+        return;
+    };
+    // The same graph, the same engine, the same thread count: one plan folds
+    // recognised chains, the other has one segment per node. The scalar fused
+    // kernel evaluates exactly the unfused expressions in exactly the unfused
+    // order, so the bytes must agree. This is the oracle the oneDNN fused path
+    // is compared against in `tests/fn3_onednn.rs`.
+    let mut fused = Session::new_with_options(
+        Arc::clone(&imported),
+        Threading::Fixed(1),
+        EngineChoice::Scalar,
+        PlanOptions::new(),
+    )
+    .expect("open the fused session");
+    let mut unfused = Session::new_with_options(
+        Arc::clone(&imported),
+        Threading::Fixed(1),
+        EngineChoice::Scalar,
+        PlanOptions::unfused(),
+    )
+    .expect("open the unfused session");
+    let fused_plan = fused.plan();
+    let unfused_plan = unfused.plan();
+    assert_eq!(
+        unfused_plan.segments.len(),
+        unfused_plan.unfused_segment_count(),
+        "an unfused plan records no fusion"
+    );
+    assert_eq!(
+        fused_plan.unfused_segment_count(),
+        unfused_plan.segments.len(),
+        "the fused plan must account for every node it removed"
+    );
+    assert!(
+        fused_plan.segments.len() < unfused_plan.segments.len(),
+        "the pinned graph has {} fusions; the plan must be shorter than {} segments",
+        fused_plan.fusions().len(),
+        unfused_plan.segments.len()
+    );
+    println!(
+        "[fn3cnn][measure] fusion: {} segments fused into {}, {} removed, arena {} -> {} bytes \
+         ({} bytes saved)",
+        unfused_plan.segments.len(),
+        fused_plan.segments.len(),
+        unfused_plan.segments.len() - fused_plan.segments.len(),
+        unfused_plan.arena_bytes,
+        fused_plan.arena_bytes,
+        unfused_plan
+            .arena_bytes
+            .saturating_sub(fused_plan.arena_bytes),
+    );
+    let got = run(&mut fused, &reference.input);
+    let expected = run(&mut unfused, &reference.input);
+    assert_eq!(got.len(), expected.len());
+    let mismatched = got
+        .iter()
+        .zip(expected.iter())
+        .position(|(a, b)| a.to_bits() != b.to_bits());
+    assert_eq!(
+        mismatched, None,
+        "fusion changed a result bit at element {mismatched:?}"
     );
 }
 

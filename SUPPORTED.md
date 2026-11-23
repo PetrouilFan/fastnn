@@ -12,10 +12,12 @@ prepared-model artifact round trip exists.** The frontend maps and shapes
 `Sigmoid`, `Max`, `Min` and `TopK` into the typed IR, and the v3 segment runtime
 executes all twelve on scalar NCHW kernels. An optional oneDNN CPU engine
 (`--features cpu-onednn`) additionally executes 4-D convolution, the pool family
-and 2-D matmul; see [docs/v3/backends.md](docs/v3/backends.md). There is no W8A8
-execution path. In the vocabulary of this file the twelve CNN ops are `runs` on
-the CPU, while a model *family* still needs a pinned zoo entry and an artifact
-round trip before it may be called `imports` (see §2 of
+and 2-D matmul, folds an activation or a residual sum into the producing
+convolution, and keeps internal conv-to-conv edges in a channels-last layout;
+see [docs/v3/backends.md](docs/v3/backends.md). There is no W8A8 execution path.
+In the vocabulary of this file the twelve CNN ops are `runs` on the CPU, while a
+model *family* still needs a pinned zoo entry and an artifact round trip before
+it may be called `imports` (see §2 of
 [scope.md](docs/v3/scope.md#2-what-supported-means)).
 
 Legend:
@@ -60,9 +62,9 @@ em-dash means the id exists in the IR but no ONNX node maps to it.
 |---|---:|---|:--:|:--:|---|
 | `Gather` | 1 | `Gather` | full | full | Embedding lookup and shape indexing; `batch_dims = 0` only |
 | `MatMul` | 2 | `MatMul`, `Gemm`\* | full | full | Rank ≥ 2, batched with broadcast batch dims; the optional oneDNN engine also runs the 2-D `f32` form |
-| `Add` | 3 | `Add`, `Gemm`\* | full | full | Broadcasting |
+| `Add` | 3 | `Add`, `Gemm`\* | full | full | Broadcasting. The planner folds `add(conv, other)` (same shape and dtype) into the convolution as a sum, with an optional activation after it |
 | `Sub` | 4 | `Sub` | full | full | Broadcasting |
-| `Mul` | 5 | `Mul` | full | full | Broadcasting |
+| `Mul` | 5 | `Mul` | full | full | Broadcasting. `mul(x, sigmoid(x))` is folded into the producing convolution as a swish epilogue |
 | `Div` | 6 | `Div` | full | full | Broadcasting |
 | `Neg` | 7 | `Neg` | full | full | |
 | `Pow` | 8 | `Pow` | full | full | Broadcasting |
@@ -71,7 +73,7 @@ em-dash means the id exists in the IR but no ONNX node maps to it.
 | `Tanh` | 11 | `Tanh` | full | full | |
 | `Gelu` | 12 | — | full | full | Exact (`erf`) form; no ONNX mapping |
 | `Relu` | 13 | `Relu` | full | full | |
-| `Softmax` | 14 | `Softmax` | full | partial | Vulkan: f32, trailing axis, contiguous |
+| `Softmax` | 14 | `Softmax` | full | partial | CPU: a contiguous trailing-axis tensor uses a row-wise three-pass kernel over slices (no per-element index, no allocation, bit-identical to the general path). Vulkan: f32, trailing axis, contiguous |
 | `LayerNorm` | 15 | — | full | full | Trailing axis only; no ONNX mapping |
 | `ReduceMean` | 16 | `ReduceMean` | full | full | Attribute `axes`; `keepdims` 0 or 1 |
 | `ReduceSum` | 17 | `ReduceSum` | full | full | Attribute `axes` only; the opset-13 axes input is rejected |
@@ -98,7 +100,7 @@ em-dash means the id exists in the IR but no ONNX node maps to it.
 | `Cos` | 38 | `Cos` | full | full | RoPE building block |
 | `ScatterND` | 39 | `ScatterND` | full | — | Indexed scatter into a copy |
 | `MaskedAttention` | 40 | — | — | full | Reserved fused id; CPU composes attention from primitives, Vulkan has the fused kernel. ONNX `Attention`, `MultiHeadAttention` and `GroupQueryAttention` are rejected, not mapped |
-| `Conv` | 41 | `Conv` | runs | — | N-dimensional NCHW/NCDHW scalar kernels; the optional oneDNN engine (`cpu-onednn`) additionally runs 4-D `f32` with `group`, `dilations`, `strides`, explicit pads and bias |
+| `Conv` | 41 | `Conv` | runs | — | N-dimensional NCHW/NCDHW scalar kernels; the optional oneDNN engine (`cpu-onednn`) additionally runs 4-D `f32` with `group`, `dilations`, `strides`, explicit pads and bias, and claims the fused forms `conv+activation`, `conv+sum` and `conv+sum+activation` |
 | `MaxPool` | 42 | `MaxPool` | runs | — | Scalar kernels; the oneDNN engine runs 4-D `f32` with `kernel_shape`, `strides` and explicit pads (`ceil_mode = 1` and dilation fall back). The optional indices output is rejected |
 | `AveragePool` | 43 | `AveragePool` | runs | — | As `MaxPool`, plus `count_include_pad` (mapped to oneDNN's include/exclude-padding algorithms) |
 | `GlobalAveragePool` | 44 | `GlobalAveragePool` | runs | — | Spatial axes collapse to extent 1; the oneDNN engine expresses it as average pooling over the full input plane |
@@ -106,7 +108,7 @@ em-dash means the id exists in the IR but no ONNX node maps to it.
 | `Resize` | 46 | `Resize` | runs (scalar) | — | 4-D nearest/linear, constant `scales` or `sizes`; the `roi` operand must be empty and `tf_crop_and_resize`/cubic are rejected |
 | `Pad` | 47 | `Pad` | runs (scalar) | — | Constant/reflect/edge, attribute or constant input pads, negative pads crop; `wrap` is rejected |
 | `Clip` | 48 | `Clip` | runs (scalar) | — | Attribute or constant min/max; a runtime bound is rejected |
-| `Sigmoid` | 49 | `Sigmoid` | runs (scalar) | — | |
+| `Sigmoid` | 49 | `Sigmoid` | runs (scalar) | — | Folded into the producing convolution when it is the `sigmoid(x)` of `mul(x, sigmoid(x))`; a standalone sigmoid runs scalar |
 | `Maximum` | 50 | `Max` | runs (scalar) | — | Two operands with broadcasting; the variadic ONNX form is rejected |
 | `Minimum` | 51 | `Min` | runs (scalar) | — | As `Maximum` |
 | `TopK` | 52 | `TopK` | runs (scalar) | — | Axis, `largest`/`sorted`, attribute or constant k; two outputs (values and i64 indices) |
@@ -194,12 +196,17 @@ Capability gaps:
   outside the envelope is `DimOutOfEnvelope`.
 - No W8A8 or W4A8 path, no calibration, no quantized dtypes in the IR, and QDQ
   import is not implemented.
-- No fused-segment planner, no layout assignment and no precision assignment:
-  the plan is a specialized instruction list executed per op (#98).
+- The fused-segment planner covers convolutions only (an activation, the ONNX
+  SiLU and a residual sum); pool, matmul and pointwise chains are not fused, and
+  there is no precision assignment. A residual add *after* an activation is not
+  fused, because oneDNN's post-op order is sum-then-eltwise (#98).
+- Layout assignment is a oneDNN policy (plain or channels-last on internal
+  conv-to-conv edges) plus counted conversions; the scalar engine and the plan's
+  slots stay NCHW.
 - The optional oneDNN CPU engine (`cpu-onednn`) is the first provider: 4-D
   `f32` convolution, the pool family and 2-D matmul, with explicit-pad
-  resolution and output-channel or output-row block threading. MLAS/XNNPACK
-  are not implemented; no provider fuses activations yet (#101, #106).
+  resolution, output-channel or output-row block threading, a fused epilogue and
+  a channels-last layout policy. MLAS/XNNPACK are not implemented (#101, #106).
 
 Runtime and packaging gaps:
 

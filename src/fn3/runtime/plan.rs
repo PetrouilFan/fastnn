@@ -14,13 +14,24 @@
 //! - two sizes: [`Plan::arena_bytes`], the one allocation the session makes, and
 //!   [`Plan::peak_bytes`], the largest payload that is live at one instant.
 //!
-//! # One op per segment, for now
+//! # Segments: one op, or one recognised chain
 //!
-//! [`SegmentOp`] has exactly one variant, [`SegmentOp::Op`]. ADR-0001 makes the
-//! segment the unit that a provider implements, and phase 3 adds a
-//! `SegmentOp::Fused(..)` that a provider may claim. Inventing that variant
-//! before a provider exists would create a contract nothing can satisfy, so the
-//! planner emits the shape it can execute and nothing else.
+//! [`SegmentOp::Op`] runs one graph op. [`SegmentOp::Fused`] runs a chain the
+//! planner folded (`runtime::fuse`): an activation on a convolution, the ONNX
+//! SiLU, or a residual sum, with the folded ops recorded in [`FusedOp::chain`].
+//! A fusion only fires when it removes at least one segment and every declared
+//! consumer of each intermediate value is inside the chain, so the plan is
+//! always shorter than the graph and the fused result equals the unfused one
+//! (the scalar fused kernel evaluates the same expressions in the same order).
+//!
+//! # Layout policy, not layout
+//!
+//! [`Plan::layout`] records which layout policy the plan asks the optional
+//! oneDNN engine for. A concrete descriptor is the engine's decision at session
+//! open, because it is the library's; the plan's slots are the graph's NCHW
+//! values either way. Conversions the engine has to run are recorded in
+//! [`Plan::reorders`] with their byte count, so a layout policy's price is
+//! visible before the first forward.
 //!
 //! # Weights are not copied
 //!
@@ -56,12 +67,13 @@
 use std::fmt;
 
 use crate::inference::backend::{
-    Claim, OpParams, ScalarOnly, SegmentEngine, SegmentOperand, SegmentProvider,
+    Claim, FusedOp, OpParams, ScalarOnly, SegmentEngine, SegmentOperand, SegmentProvider,
 };
 use crate::inference::error::Fn3Error;
 use crate::inference::import::{ImportedGraph, WeightId, WeightSet};
 use crate::inference::ir::{Graph, SourceLoc, TensorType, ValueId};
 use crate::inference::ops::OpId;
+use crate::inference::runtime::fuse;
 use crate::inference::shape::Shape;
 
 /// Alignment of every arena slot, in bytes.
@@ -136,19 +148,33 @@ impl Slot {
 
 /// What one segment runs.
 ///
-/// Phase 2 has one variant: one graph op. A fused segment is phase 3, and it will
-/// arrive as a new variant rather than as an invented id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A segment either runs one graph op through the provider's kernel for it, or
+/// one chain the planner recognised and folded into a single segment. The
+/// planner only emits [`SegmentOp::Fused`] when the fusion removes at least one
+/// segment, and the scalar engine implements every fused form, so a plan is
+/// executable whatever provider answered.
+#[derive(Debug, Clone, PartialEq)]
 pub enum SegmentOp {
     /// Execute one graph operation through the provider's kernel for it.
     Op(OpId),
+    /// Execute a recognised chain as one segment.
+    Fused(FusedOp),
 }
 
 impl SegmentOp {
-    /// The graph op this segment runs.
-    pub const fn op(self) -> OpId {
+    /// The graph op this segment is anchored on.
+    pub const fn op(&self) -> OpId {
         match self {
-            SegmentOp::Op(op) => op,
+            SegmentOp::Op(op) => *op,
+            SegmentOp::Fused(fused) => fused.anchor,
+        }
+    }
+
+    /// The fused description, when this segment replaces a chain.
+    pub fn fused(&self) -> Option<&FusedOp> {
+        match self {
+            SegmentOp::Op(_) => None,
+            SegmentOp::Fused(fused) => Some(fused),
         }
     }
 }
@@ -157,6 +183,7 @@ impl fmt::Display for SegmentOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SegmentOp::Op(op) => write!(f, "{op}"),
+            SegmentOp::Fused(fused) => write!(f, "{fused}"),
         }
     }
 }
@@ -183,9 +210,14 @@ pub struct Segment {
 }
 
 impl Segment {
-    /// The op this segment runs.
+    /// The op this segment is anchored on.
     pub const fn op_id(&self) -> OpId {
         self.op.op()
+    }
+
+    /// The fused description, when this segment replaces a chain.
+    pub fn fused(&self) -> Option<&FusedOp> {
+        self.op.fused()
     }
 }
 
@@ -193,6 +225,183 @@ impl fmt::Display for Segment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} ({}) [{}]", self.loc.describe(), self.op, self.engine)
     }
+}
+
+/// One chain the planner folded into a single segment.
+///
+/// The report is the evidence that fusion happened and what it bought: a plan
+/// with `fusions` is strictly shorter than the same plan built with
+/// [`PlanOptions::unfused`], and `removed` is the difference per fusion.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fusion {
+    /// Position of the fused segment in [`Plan::segments`].
+    pub segment: usize,
+    /// What the segment executes.
+    pub fused: FusedOp,
+}
+
+impl Fusion {
+    /// The graph ops this fusion replaced, anchor first.
+    pub fn chain(&self) -> &[OpId] {
+        &self.fused.chain
+    }
+
+    /// How many segments the chain collapsed into one.
+    pub fn removed(&self) -> usize {
+        self.fused.removed()
+    }
+
+    /// A stable compound name (`conv+swish`, `conv+sum+relu`).
+    pub fn name(&self) -> String {
+        self.fused.name()
+    }
+}
+
+impl fmt::Display for Fusion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "segment {}: {} (removed {})",
+            self.segment,
+            self.fused,
+            self.removed()
+        )
+    }
+}
+
+/// Optional planner behaviour.
+///
+/// The defaults are the production plan: fused chains, and the layout policy
+/// the measured build chose ([`LayoutStrategy::default`]). A plan built with
+/// [`PlanOptions::unfused`] is the oracle the fusion test compares against: the
+/// same graph, the same provider, one segment per node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlanOptions {
+    /// Fold recognised chains into single segments.
+    pub fuse: bool,
+    /// Which layout policy the plan asks the oneDNN engine for.
+    pub layout: LayoutStrategy,
+}
+
+impl PlanOptions {
+    /// Fused chains and the default layout policy.
+    ///
+    /// The layout policy is [`LayoutStrategy::Plain`]: measured on the pinned
+    /// graph, channels-last chaining is a wash at eight threads (40.1 ms
+    /// against 40.2 ms) and needs a reorder at every chain boundary, because
+    /// the export's chains are two to three convolutions long. The blocked
+    /// kernel itself is 1.8x faster (0.88 ms against 1.58 ms for a 3x3
+    /// 32x80x80 convolution, one thread), so a graph with longer conv chains
+    /// is where the policy would pay; see `docs/v3/backends.md`.
+    pub const fn new() -> PlanOptions {
+        PlanOptions {
+            fuse: true,
+            layout: LayoutStrategy::Chained,
+        }
+    }
+
+    /// One segment per graph node, plain layouts: the unfused oracle.
+    pub const fn unfused() -> PlanOptions {
+        PlanOptions {
+            fuse: false,
+            layout: LayoutStrategy::Plain,
+        }
+    }
+
+    /// Builder: enable or disable chain fusion.
+    pub const fn with_fuse(mut self, fuse: bool) -> PlanOptions {
+        self.fuse = fuse;
+        self
+    }
+
+    /// Builder: choose the layout policy.
+    pub const fn with_layout(mut self, layout: LayoutStrategy) -> PlanOptions {
+        self.layout = layout;
+        self
+    }
+}
+
+impl Default for PlanOptions {
+    fn default() -> PlanOptions {
+        PlanOptions::new()
+    }
+}
+
+/// Which source/destination layouts a plan asks the optional oneDNN engine for.
+///
+/// The plan cannot name a concrete oneDNN descriptor (that type is below the
+/// runtime, and a build without `cpu-onednn` has no library at all), so it
+/// records the *policy* and the engine records the descriptors it chose at
+/// session open.
+///
+/// [`LayoutStrategy::Plain`] is the phase-3 contract: every segment reads and
+/// writes `dnnl_nchw`, which makes each forward independent of every other
+/// segment's placement and bounds the arena traffic at one read and one write
+/// per edge.
+///
+/// [`LayoutStrategy::Chained`] lets the engine keep an internal edge whose
+/// producer and consumers are all oneDNN convolutions in the channels-last
+/// layout the library chose for it, so a convolution writes bytes the next one
+/// reads without a conversion. An edge where the families differ gets one
+/// explicit conversion, counted in [`Plan::reorders`] with its bytes and run by
+/// the segment that needs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LayoutStrategy {
+    /// Plain NCHW on every edge (the measured default).
+    #[default]
+    Plain,
+    /// Let oneDNN choose blocked layouts on internal oneDNN edges.
+    Chained,
+}
+
+impl LayoutStrategy {
+    /// Stable lowercase name used in reports.
+    pub const fn name(self) -> &'static str {
+        match self {
+            LayoutStrategy::Plain => "plain",
+            LayoutStrategy::Chained => "chained",
+        }
+    }
+}
+
+/// Which way a layout conversion goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReorderDirection {
+    /// The plan slot holds NCHW (the graph's contract); the engine converts it
+    /// to the channels-last layout its blocks read.
+    NchwToBlocked,
+    /// The engine's channels-last result is converted back into the plan's NCHW
+    /// slot for a consumer that cannot read it.
+    BlockedToNchw,
+}
+
+impl ReorderDirection {
+    /// Stable lowercase name used in reports.
+    pub const fn name(self) -> &'static str {
+        match self {
+            ReorderDirection::NchwToBlocked => "nchw->blocked",
+            ReorderDirection::BlockedToNchw => "blocked->nchw",
+        }
+    }
+}
+
+/// One layout conversion the engine runs inside a segment.
+///
+/// A conversion is not a plan slot of its own: the plan's slots are the graph's
+/// NCHW values, and a physical layout is the engine's choice, so the blocked
+/// bytes live in an engine-owned buffer. What the plan records is the fact and
+/// the price: which segment runs it, which slot it reads or writes, and how many
+/// bytes move per forward. [`Plan::reorder_bytes`] is the sum.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reorder {
+    /// Position of the segment that runs the conversion before its blocks.
+    pub segment: usize,
+    /// The plan slot the conversion reads or writes.
+    pub slot: SlotId,
+    /// Which way the conversion goes.
+    pub direction: ReorderDirection,
+    /// Bytes moved per forward.
+    pub bytes: usize,
 }
 
 /// One segment a provider declined, and why.
@@ -233,6 +442,9 @@ pub struct Plan {
     /// Segments in execution order.
     pub segments: Vec<Segment>,
     /// Slots indexed by [`SlotId`]; `slots[value.index()]` is that value's slot.
+    ///
+    /// One slot per graph value, whatever the layout policy: a physical layout
+    /// is the engine's private buffer, never a plan slot.
     pub slots: Vec<Slot>,
     /// Graph inputs, in the model's declared order.
     pub inputs: Vec<SlotId>,
@@ -248,6 +460,21 @@ pub struct Plan {
     /// partial engine take is visible; the segments themselves are scalar and
     /// produce the scalar result.
     pub fallbacks: Vec<EngineFallback>,
+    /// Every chain the planner folded, in segment order.
+    ///
+    /// Empty for a plan built with [`PlanOptions::unfused`] or a graph with no
+    /// recognised chain. `segments.len() + sum(removed)` is the unfused count.
+    pub fusions: Vec<Fusion>,
+    /// The layout policy the plan asks the optional engine for.
+    pub layout: LayoutStrategy,
+    /// Layout conversions the engine inserted, in segment order.
+    ///
+    /// Empty for [`LayoutStrategy::Plain`] and for a build without
+    /// `cpu-onednn` (nothing else chooses a descriptor).
+    pub reorders: Vec<Reorder>,
+    /// Bytes those conversions move per forward: the price of the layout
+    /// policy, reported even when it loses.
+    pub reorder_bytes: usize,
 }
 
 impl Plan {
@@ -268,7 +495,7 @@ impl Plan {
     /// payload disagrees with its declared shape, or when byte arithmetic
     /// overflows.
     pub fn from_graph(graph: &Graph, weights: &WeightSet) -> Result<Plan, Fn3Error> {
-        Plan::build(graph, weights, None, None, &ScalarOnly)
+        Plan::build(graph, weights, None, None, &ScalarOnly, PlanOptions::new())
     }
 
     /// Build a plan for an imported model, using its declared inputs and
@@ -280,6 +507,7 @@ impl Plan {
             Some(imported.inputs()),
             Some(imported.outputs()),
             &ScalarOnly,
+            PlanOptions::new(),
         )
     }
 
@@ -297,7 +525,7 @@ impl Plan {
         weights: &WeightSet,
         provider: &dyn SegmentProvider,
     ) -> Result<Plan, Fn3Error> {
-        Plan::build(graph, weights, None, None, provider)
+        Plan::build(graph, weights, None, None, provider, PlanOptions::new())
     }
 
     /// Build a plan for an imported model, offering segments to `provider`.
@@ -311,7 +539,37 @@ impl Plan {
             Some(imported.inputs()),
             Some(imported.outputs()),
             provider,
+            PlanOptions::new(),
         )
+    }
+
+    /// Build a plan with explicit options, offering segments to `provider`.
+    ///
+    /// [`PlanOptions::unfused`] is the oracle the fusion test compares against:
+    /// the same graph and the same provider, one segment per node.
+    pub fn from_imported_with_options(
+        imported: &ImportedGraph,
+        provider: &dyn SegmentProvider,
+        options: PlanOptions,
+    ) -> Result<Plan, Fn3Error> {
+        Plan::build(
+            imported.graph(),
+            imported.weights(),
+            Some(imported.inputs()),
+            Some(imported.outputs()),
+            provider,
+            options,
+        )
+    }
+
+    /// Build a plan from a graph with explicit options.
+    pub fn from_graph_with_options(
+        graph: &Graph,
+        weights: &WeightSet,
+        provider: &dyn SegmentProvider,
+        options: PlanOptions,
+    ) -> Result<Plan, Fn3Error> {
+        Plan::build(graph, weights, None, None, provider, options)
     }
 
     fn build(
@@ -320,8 +578,9 @@ impl Plan {
         declared_inputs: Option<&[ValueId]>,
         declared_outputs: Option<&[ValueId]>,
         provider: &dyn SegmentProvider,
+        options: PlanOptions,
     ) -> Result<Plan, Fn3Error> {
-        let mut segments = graph
+        let nodes = graph
             .nodes()
             .iter()
             .map(|node| Segment {
@@ -333,6 +592,20 @@ impl Plan {
                 loc: node.loc.clone(),
             })
             .collect::<Vec<_>>();
+
+        // Fold recognised chains before anything is measured: a fused segment
+        // is the unit memory is reserved and the provider is asked for, so the
+        // intermediate slots of a chain take no arena bytes.
+        let (mut segments, fusions) = if options.fuse {
+            let types: Vec<TensorType> = graph
+                .values()
+                .iter()
+                .map(|value| value.ty.clone())
+                .collect();
+            fuse::fuse(nodes, &types)
+        } else {
+            (nodes, Vec::new())
+        };
 
         // Slots first, without offsets: an offset needs the liveness walk below.
         let mut slots = Vec::with_capacity(graph.value_count());
@@ -474,14 +747,29 @@ impl Plan {
             for id in &segment.outputs {
                 results.push(operand(id)?);
             }
-            match provider.claim(segment.op.op(), &operands, &results, &segment.params) {
-                Claim::Accepted => segment.engine = provider.engine(),
-                Claim::NotMine => {}
-                Claim::Declined(reason) => fallbacks.push(EngineFallback {
-                    segment: index,
-                    op: segment.op.op(),
-                    reason,
-                }),
+            match &segment.op {
+                SegmentOp::Op(op) => {
+                    match provider.claim(*op, &operands, &results, &segment.params) {
+                        Claim::Accepted => segment.engine = provider.engine(),
+                        Claim::NotMine => {}
+                        Claim::Declined(reason) => fallbacks.push(EngineFallback {
+                            segment: index,
+                            op: *op,
+                            reason,
+                        }),
+                    }
+                }
+                SegmentOp::Fused(fused) => {
+                    match provider.claim_fused(fused, &operands, &results, &segment.params) {
+                        Claim::Accepted => segment.engine = provider.engine(),
+                        Claim::NotMine => {}
+                        Claim::Declined(reason) => fallbacks.push(EngineFallback {
+                            segment: index,
+                            op: fused.anchor,
+                            reason,
+                        }),
+                    }
+                }
             }
         }
 
@@ -493,6 +781,10 @@ impl Plan {
             arena_bytes,
             peak_bytes,
             fallbacks,
+            fusions,
+            layout: options.layout,
+            reorders: Vec::new(),
+            reorder_bytes: 0,
         })
     }
 
@@ -511,6 +803,24 @@ impl Plan {
     /// The segments the offered provider declined, in segment order.
     pub fn fallbacks(&self) -> &[EngineFallback] {
         &self.fallbacks
+    }
+
+    /// Every chain the planner folded into one segment, in segment order.
+    pub fn fusions(&self) -> &[Fusion] {
+        &self.fusions
+    }
+
+    /// The layout conversions this plan carries, in segment order.
+    pub fn reorders(&self) -> &[Reorder] {
+        &self.reorders
+    }
+
+    /// How many graph nodes the plan would have without fusion.
+    ///
+    /// `segments.len() + sum(fusion.removed())`, which equals
+    /// `graph.node_count()` when the plan was built from that graph.
+    pub fn unfused_segment_count(&self) -> usize {
+        self.segments.len() + self.fusions.iter().map(Fusion::removed).sum::<usize>()
     }
 
     /// One slot by id.
@@ -752,6 +1062,18 @@ fn assign_offsets(
         if slot.is_weight() {
             continue;
         }
+        // A zero-size allocation is also how the free list answers a slot no
+        // segment produces or reads: a fused chain's intermediate values are
+        // exactly that. Such a slot has no offset to check.
+        if sizes[index] == 0 {
+            debug_assert!(
+                slot.bytes == 0
+                    || !slot_is_used(segments, inputs, outputs, SlotId::new(index as u32)),
+                "internal: {} is used but was never allocated",
+                slot.value
+            );
+            continue;
+        }
         if slot.offset % SLOT_ALIGNMENT != 0 {
             return Err(arena_error(format!(
                 "internal: {} starts at byte {} which is not {SLOT_ALIGNMENT}-byte aligned",
@@ -824,6 +1146,16 @@ fn allocate_slot(
     *live_bytes = live_bytes.saturating_add(slots[index].bytes);
     *peak_bytes = (*peak_bytes).max(*live_bytes);
     Ok(())
+}
+
+/// `true` when any segment names the slot as an operand or a result, or when it
+/// is a declared graph input or output.
+fn slot_is_used(segments: &[Segment], inputs: &[SlotId], outputs: &[SlotId], id: SlotId) -> bool {
+    inputs.contains(&id)
+        || outputs.contains(&id)
+        || segments
+            .iter()
+            .any(|segment| segment.inputs.contains(&id) || segment.outputs.contains(&id))
 }
 
 fn arena_error(detail: String) -> Fn3Error {

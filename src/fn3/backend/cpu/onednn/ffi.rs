@@ -78,6 +78,11 @@ pub(crate) const FORMAT_TAG_AB: i32 = 3;
 pub(crate) const FORMAT_TAG_ABCD: i32 = 5;
 /// `dnnl_abcde` (aliases `dnnl_ncdhw`, `dnnl_goihw`): plain row-major 5-D.
 pub(crate) const FORMAT_TAG_ABCDE: i32 = 6;
+/// `dnnl_acdb` (alias `dnnl_nhwc`): 4-D channels-last. The physical order for
+/// logical `[N, C, H, W]` is `N, H, W, C`, which is always dense, so a
+/// channels-last tensor never needs padding and a row range of it is one
+/// contiguous byte run.
+pub(crate) const FORMAT_TAG_NHWC: i32 = 22;
 
 /// `dnnl_cpu`.
 pub(crate) const ENGINE_KIND_CPU: i32 = 1;
@@ -95,6 +100,18 @@ pub(crate) const PROP_KIND_FORWARD_INFERENCE: i32 = 96;
 pub(crate) const ALG_CONVOLUTION_DIRECT: i32 = 1;
 /// `dnnl_pooling_max`.
 pub(crate) const ALG_POOLING_MAX: i32 = 511;
+/// `dnnl_eltwise_relu`.
+pub(crate) const ALG_ELTWISE_RELU: i32 = 0x20;
+/// `dnnl_eltwise_tanh`.
+pub(crate) const ALG_ELTWISE_TANH: i32 = 0x21;
+/// `dnnl_eltwise_logistic`.
+pub(crate) const ALG_ELTWISE_LOGISTIC: i32 = 0x29;
+/// `dnnl_eltwise_swish` (`x / (1 + exp(-alpha * x))`).
+pub(crate) const ALG_ELTWISE_SWISH: i32 = 0x2c;
+/// `dnnl_eltwise_clip` (`min(max(x, alpha), beta)`).
+pub(crate) const ALG_ELTWISE_CLIP: i32 = 0x2e;
+/// `dnnl_eltwise_gelu_erf` (the exact `erf` GELU).
+pub(crate) const ALG_ELTWISE_GELU_ERF: i32 = 0x31;
 /// `dnnl_pooling_avg_include_padding`.
 pub(crate) const ALG_POOLING_AVG_INCLUDE_PADDING: i32 = 767;
 /// `dnnl_pooling_avg_exclude_padding`.
@@ -1041,10 +1058,9 @@ impl PrimitiveAttrHandle {
 
     /// Replace the post-op sequence.
     ///
-    /// Kept for the phase-3b fusions (an activation folded into the producing
-    /// convolution); the segment planner does not fuse yet, so nothing calls
-    /// it today.
-    #[allow(dead_code)]
+    /// Used for the fused convolution epilogue: a `sum` followed by at most one
+    /// eltwise, which is the order oneDNN's direct convolution accepts (`sum`
+    /// must be the first post-op).
     pub(crate) fn set_post_ops(&self, post_ops: &PostOpsHandle) -> Result<(), Fn3Error> {
         // SAFETY: both handles are live; oneDNN copies the sequence.
         check(
@@ -1071,12 +1087,11 @@ impl Drop for PrimitiveAttrHandle {
 
 /// An owned `dnnl_post_ops` sequence.
 ///
-/// The convolution and matmul paths pass no post-ops today; this exists so a
-/// fused activation is a builder change rather than a new FFI layer.
+/// Empty for an unfused segment; a fused convolution appends a `sum` (which
+/// reads the destination buffer back) and at most one eltwise.
 #[derive(Debug)]
 pub(crate) struct PostOpsHandle(PostOps);
 
-#[allow(dead_code)]
 impl PostOpsHandle {
     /// An empty sequence.
     pub(crate) fn new() -> Result<PostOpsHandle, Fn3Error> {
@@ -1089,7 +1104,9 @@ impl PostOpsHandle {
         Ok(PostOpsHandle(raw))
     }
 
-    /// Append `dst = scale * x + dst` (accumulation).
+    /// Append `dst = scale * dst + accumulator`, i.e. add the destination's
+    /// previous contents (oneDNN reads the destination back; the engine
+    /// pre-fills it with the residual operand).
     pub(crate) fn append_sum(
         &mut self,
         scale: f32,

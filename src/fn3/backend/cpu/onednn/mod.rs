@@ -107,7 +107,9 @@
 pub(crate) mod ffi;
 pub(crate) mod geometry;
 
-use crate::inference::backend::{Claim, OpParams, SegmentEngine, SegmentOperand, SegmentProvider};
+use crate::inference::backend::{
+    Activation, Claim, FusedOp, OpParams, SegmentEngine, SegmentOperand, SegmentProvider,
+};
 use crate::inference::dtype::DType;
 use crate::inference::error::Fn3Error;
 use crate::inference::ops::OpId;
@@ -116,9 +118,11 @@ use crate::inference::storage::AlignedBuffer;
 use std::sync::Arc;
 
 use self::ffi::{
-    context, Desc, EngineHandle, ExecArg, MemoryHandle, PrimitiveAttrHandle, PrimitiveDescHandle,
-    PrimitiveHandle, StreamHandle, Version, ARG_BIAS, ARG_DST, ARG_SCRATCHPAD, ARG_SRC,
-    ARG_WEIGHTS, FORMAT_TAG_A, FORMAT_TAG_ABCD, FORMAT_TAG_ABCDE, FORMAT_TAG_ANY, QUERY_WEIGHTS_MD,
+    context, Desc, EngineHandle, ExecArg, MemoryHandle, PostOpsHandle, PrimitiveAttrHandle,
+    PrimitiveDescHandle, PrimitiveHandle, StreamHandle, Version, ALG_ELTWISE_CLIP,
+    ALG_ELTWISE_GELU_ERF, ALG_ELTWISE_LOGISTIC, ALG_ELTWISE_RELU, ALG_ELTWISE_SWISH,
+    ALG_ELTWISE_TANH, ARG_BIAS, ARG_DST, ARG_SCRATCHPAD, ARG_SRC, ARG_WEIGHTS, FORMAT_TAG_A,
+    FORMAT_TAG_ABCD, FORMAT_TAG_ABCDE, FORMAT_TAG_ANY, FORMAT_TAG_NHWC, QUERY_WEIGHTS_MD,
 };
 use self::geometry::{Conv, ConvSplitAxis, MatMul, Pool};
 
@@ -153,6 +157,84 @@ impl SegmentProvider for OneDnnCapability {
             Err(error) => Claim::Declined(error.to_string()),
         }
     }
+
+    fn claim_fused(
+        &self,
+        fused: &FusedOp,
+        inputs: &[SegmentOperand],
+        outputs: &[SegmentOperand],
+        params: &OpParams,
+    ) -> Claim {
+        // The fused vocabulary is a convolution with a sum and/or one
+        // activation: exactly the oneDNN post-op pair. Any other anchor is
+        // outside it, not a fallback.
+        if fused.anchor != OpId::Conv {
+            return Claim::NotMine;
+        }
+        match claimed_fused_conv(fused, inputs, outputs, params) {
+            Ok(()) => Claim::Accepted,
+            Err(error) => Claim::Declined(error.to_string()),
+        }
+    }
+}
+
+/// The claim for a fused convolution: the plain convolution's geometry plus the
+/// epilogue's own rules.
+fn claimed_fused_conv(
+    fused: &FusedOp,
+    inputs: &[SegmentOperand],
+    outputs: &[SegmentOperand],
+    params: &OpParams,
+) -> Result<(), Fn3Error> {
+    let op = OpId::Conv;
+    // The residual operand is the last input; the convolution's own operands
+    // are the ones the unfused segment would have had.
+    let anchor_inputs = match fused.sum {
+        Some(position) => {
+            if position + 1 != inputs.len() {
+                return Err(unsupported(
+                    op,
+                    format!(
+                        "the fused residual is operand {position}, but the segment has {} inputs",
+                        inputs.len()
+                    ),
+                ));
+            }
+            &inputs[..position]
+        }
+        None => inputs,
+    };
+    claimed_geometry(op, anchor_inputs, outputs, params)?;
+    if let Some(position) = fused.sum {
+        let sum = &inputs[position];
+        if sum.constant {
+            return Err(unsupported(
+                op,
+                "the residual operand is constant; the engine pre-fills the destination from a \
+                 live arena window",
+            ));
+        }
+        require_f32(op, &[sum])?;
+        if sum.shape != outputs[0].shape {
+            return Err(unsupported(
+                op,
+                format!(
+                    "the residual operand is {} but the result is {}; a oneDNN sum post-op has no \
+                     broadcast",
+                    sum.shape, outputs[0].shape
+                ),
+            ));
+        }
+    }
+    if fused.activation.is_some_and(|activation| {
+        matches!(activation, Activation::Clip { low, high } if !low.is_finite() || !high.is_finite())
+    }) {
+        return Err(unsupported(
+            op,
+            "a clip bound is not finite; oneDNN eltwise_clip needs both bounds",
+        ));
+    }
+    Ok(())
 }
 
 fn unsupported(op: OpId, reason: impl Into<String>) -> Fn3Error {
@@ -323,6 +405,18 @@ pub(crate) struct SegmentSpec<'a> {
     pub bias: Option<&'a [u8]>,
     /// The session's worker count, which fixes the block split.
     pub workers: usize,
+    /// The recognised chain this segment folds, when it is a fused segment.
+    pub fused: Option<&'a FusedOp>,
+    /// Plan slot indices of the inputs, in operand order.
+    pub input_slots: Vec<usize>,
+    /// Plan slot indices of the outputs, in operand order.
+    pub output_slots: Vec<usize>,
+    /// The executor's layout decision: every consumer of the output slot is a
+    /// oneDNN convolution, so the result may stay in the channels-last layout
+    /// the engine chose. The engine still requires a row split (the only block
+    /// shape whose channels-last destination range is one contiguous run) and
+    /// falls back to the plain layout when rows cannot fill the pool.
+    pub dst_blocked: bool,
 }
 
 impl SegmentSpec<'_> {
@@ -380,6 +474,14 @@ struct Block {
     scratchpad: Option<AlignedBuffer>,
     /// Dense source/destination staging for a row block. `None` otherwise.
     staging: Option<RowStaging>,
+    /// The fused activation, applied by the engine after the primitive.
+    epilogue: Option<ScalarEpilogue>,
+    /// The channels-last buffer this block reads, when its source is blocked.
+    blocked_source: Option<Arc<AlignedBuffer>>,
+    /// The channels-last buffer this block writes, when its destination is
+    /// blocked. Shared with the other row blocks of the segment and with the
+    /// engine's layout table.
+    blocked_destination: Option<Arc<AlignedBuffer>>,
 }
 
 /// Dense staging for one row block.
@@ -398,8 +500,10 @@ struct Block {
 /// input traffic, not the O(blocks) the channel split pays.
 #[derive(Debug)]
 struct RowStaging {
-    source: AlignedBuffer,
-    destination: AlignedBuffer,
+    /// Dense NCHW input rows, allocated only when the block reads from staging.
+    source: Option<AlignedBuffer>,
+    /// Dense NCHW output rows, allocated only when the block writes staging.
+    destination: Option<AlignedBuffer>,
     /// Byte length of the parent input slot (what the executor hands us).
     source_len: usize,
     /// Byte length of the parent output slot.
@@ -419,6 +523,9 @@ struct RowStaging {
 
 impl RowStaging {
     fn copy_in(&self, address: usize) -> Result<(), Fn3Error> {
+        let Some(destination_buffer) = self.source.as_ref() else {
+            return Ok(());
+        };
         if address == 0 {
             return Err(segment_error(
                 "a staged source has a null address".to_string(),
@@ -431,7 +538,10 @@ impl RowStaging {
         // block is executed by one worker at a time.
         let source = unsafe { std::slice::from_raw_parts(address as *const u8, self.source_len) };
         let destination = unsafe {
-            std::slice::from_raw_parts_mut(self.source.as_ptr() as *mut u8, self.source.len())
+            std::slice::from_raw_parts_mut(
+                destination_buffer.as_ptr() as *mut u8,
+                destination_buffer.len(),
+            )
         };
         let run = self.in_rows * self.in_row_bytes;
         for batch in 0..self.batch {
@@ -446,6 +556,9 @@ impl RowStaging {
     }
 
     fn copy_out(&self, address: usize) -> Result<(), Fn3Error> {
+        let Some(source_buffer) = self.destination.as_ref() else {
+            return Ok(());
+        };
         if address == 0 {
             return Err(segment_error(
                 "a staged destination has a null address".to_string(),
@@ -457,9 +570,8 @@ impl RowStaging {
         // by this block; one worker runs the block at a time.
         let destination =
             unsafe { std::slice::from_raw_parts_mut(address as *mut u8, self.destination_len) };
-        let source = unsafe {
-            std::slice::from_raw_parts(self.destination.as_ptr(), self.destination.len())
-        };
+        let source =
+            unsafe { std::slice::from_raw_parts(source_buffer.as_ptr(), source_buffer.len()) };
         let run = self.out_rows * self.out_row_bytes;
         for batch in 0..self.batch {
             for channel in 0..self.out_channels {
@@ -467,6 +579,81 @@ impl RowStaging {
                 let to = ((batch * self.out_channels + channel) * self.out_h + self.out_row_start)
                     * self.out_row_bytes;
                 destination[to..to + run].copy_from_slice(&source[from..from + run]);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Where a scalar epilogue writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EpilogueTarget {
+    /// The block's output window (a channel range or the whole tensor).
+    Output,
+    /// The block's dense NCHW destination staging.
+    StagingDestination,
+    /// The block's dense channels-last destination range.
+    BlockedDestination,
+}
+
+/// The fused activation, evaluated by the engine over the block's destination.
+///
+/// # Why not a oneDNN eltwise post-op
+///
+/// Measured on this host (oneDNN 3.14.1, AVX2, one `[1,32,80,80]` 3x3
+/// convolution with 204 800 outputs): a `relu` post-op costs 1.3 ns/element, a
+/// `clip` 6 ns, a `logistic` 9 ns and a `swish` 9.8 ns, against 0.4–2.7 ns for
+/// this engine's scalar loop over the same buffer — oneDNN evaluates post-ops
+/// on a reference path here, and `swish` as a post-op made a forward 3.4x
+/// slower than the two scalar segments it replaced. The engine therefore
+/// applies the activation itself, with exactly the expression the scalar
+/// kernel uses ([`Activation::apply`]), so the fused result is bit-identical to
+/// the unfused chain.
+#[derive(Debug, Clone, Copy)]
+struct ScalarEpilogue {
+    activation: Activation,
+    /// Contiguous runs of `f32` the activation applies to.
+    runs: usize,
+    /// Elements per run.
+    run_len: usize,
+    /// Elements between consecutive runs.
+    stride: usize,
+    /// Byte offset of the block's first run from the target base (a channel
+    /// block of a plain destination starts at its first output channel).
+    offset_bytes: usize,
+    target: EpilogueTarget,
+}
+
+impl ScalarEpilogue {
+    /// Apply over `address`, the base of the block's destination.
+    ///
+    /// # Safety
+    ///
+    /// `address` must be the base of a live, writable region of at least
+    /// `(runs - 1) * stride + run_len` `f32` elements, and no other worker may
+    /// write the same range at the same time. A block's destination is either
+    /// its own output submemory (a channel range of the slot, or the whole
+    /// slot), its own staging buffer, or its own row range of the shared
+    /// channels-last buffer; the plan proved the slot windows disjoint and the
+    /// engine gives every block a distinct row range, so the three hold.
+    unsafe fn apply(&self, address: usize) -> Result<(), Fn3Error> {
+        if address == 0 || self.runs == 0 || self.run_len == 0 {
+            return Err(segment_error(
+                "a fused epilogue has no destination".to_string(),
+            ));
+        }
+        let length = (self.runs - 1) * self.stride + self.run_len;
+        let base = address
+            .checked_add(self.offset_bytes)
+            .ok_or_else(|| segment_error("a fused epilogue offset overflowed".to_string()))?;
+        // SAFETY: the caller's promise above; `length` is the descriptor's own
+        // logical extent, which the engine sized the buffer to.
+        let values = unsafe { std::slice::from_raw_parts_mut(base as *mut f32, length) };
+        let activation = self.activation;
+        for run in 0..self.runs {
+            let start = run * self.stride;
+            for value in &mut values[start..start + self.run_len] {
+                *value = activation.apply(*value);
             }
         }
         Ok(())
@@ -484,6 +671,12 @@ enum ArgSource {
     StagingSource,
     /// This block's dense destination staging (a row block).
     StagingDestination,
+    /// The block's source, in the engine's channels-last layout, at a byte
+    /// offset inside `Block::blocked_source`.
+    BlockedSource(usize),
+    /// The block's destination, in the engine's channels-last layout, at a byte
+    /// offset inside `Block::blocked_destination`.
+    BlockedDestination(usize),
     /// The block's prepacked weights.
     Weights,
     /// The block's bias slice.
@@ -495,10 +688,12 @@ enum ArgSource {
 impl Block {
     fn run(&self, inputs: &[usize], outputs: &[usize]) -> Result<(), Fn3Error> {
         if let Some(staging) = &self.staging {
-            let source = *inputs
-                .first()
-                .ok_or_else(|| segment_error("missing input window 0".to_string()))?;
-            staging.copy_in(source)?;
+            if staging.source.is_some() {
+                let source = *inputs
+                    .first()
+                    .ok_or_else(|| segment_error("missing input window 0".to_string()))?;
+                staging.copy_in(source)?;
+            }
         }
         for (memory, source) in self.memories.iter().zip(self.sources.iter()) {
             let address = match *source {
@@ -511,18 +706,30 @@ impl Block {
                 ArgSource::StagingSource => self
                     .staging
                     .as_ref()
-                    .ok_or_else(|| segment_error("a block has no source staging".to_string()))?
-                    .source
-                    .as_ptr() as usize,
+                    .and_then(|staging| staging.source.as_ref())
+                    .map(|buffer| buffer.as_ptr() as usize)
+                    .ok_or_else(|| segment_error("a block has no source staging".to_string()))?,
                 ArgSource::StagingDestination => self
                     .staging
                     .as_ref()
-                    .ok_or_else(|| segment_error("a block has no destination staging".to_string()))?
-                    .destination
-                    .as_ptr() as usize,
+                    .and_then(|staging| staging.destination.as_ref())
+                    .map(|buffer| buffer.as_ptr() as usize)
+                    .ok_or_else(|| {
+                        segment_error("a block has no destination staging".to_string())
+                    })?,
                 ArgSource::Weights => buffer_address(self.weights.as_deref())?,
                 ArgSource::Bias => buffer_address(self.bias.as_ref())?,
                 ArgSource::Scratchpad => buffer_address(self.scratchpad.as_ref())?,
+                ArgSource::BlockedSource(offset) => buffer_address(self.blocked_source.as_deref())?
+                    .checked_add(offset)
+                    .ok_or_else(|| segment_error("a blocked source offset overflowed".into()))?,
+                ArgSource::BlockedDestination(offset) => {
+                    buffer_address(self.blocked_destination.as_deref())?
+                        .checked_add(offset)
+                        .ok_or_else(|| {
+                            segment_error("a blocked destination offset overflowed".into())
+                        })?
+                }
             };
             if address == 0 {
                 return Err(segment_error(
@@ -550,11 +757,34 @@ impl Block {
         // no-op today and the fence that keeps a future threaded runtime
         // correct.
         self.stream.wait()?;
+        if let Some(epilogue) = &self.epilogue {
+            let address = match epilogue.target {
+                EpilogueTarget::Output => *outputs
+                    .first()
+                    .ok_or_else(|| segment_error("missing output window 0".to_string()))?,
+                EpilogueTarget::StagingDestination => self
+                    .staging
+                    .as_ref()
+                    .and_then(|staging| staging.destination.as_ref())
+                    .map(|buffer| buffer.as_ptr() as usize)
+                    .ok_or_else(|| {
+                        segment_error("a fused epilogue has no destination staging".to_string())
+                    })?,
+                EpilogueTarget::BlockedDestination => {
+                    buffer_address(self.blocked_destination.as_deref())?
+                }
+            };
+            // SAFETY: see `ScalarEpilogue::apply`; each target is a region this
+            // block alone writes.
+            unsafe { epilogue.apply(address) }?;
+        }
         if let Some(staging) = &self.staging {
-            let destination = *outputs
-                .first()
-                .ok_or_else(|| segment_error("missing output window 0".to_string()))?;
-            staging.copy_out(destination)?;
+            if staging.destination.is_some() {
+                let destination = *outputs
+                    .first()
+                    .ok_or_else(|| segment_error("missing output window 0".to_string()))?;
+                staging.copy_out(destination)?;
+            }
         }
         Ok(())
     }
@@ -610,6 +840,70 @@ pub(crate) struct ConvSplitSummary {
     pub out_extent: usize,
 }
 
+/// One layout conversion a segment runs before its blocks.
+///
+/// The source is the plan slot (NCHW, the graph's contract) and the destination
+/// is an engine-owned channels-last buffer the blocks then read. It runs once
+/// per forward on the executor's thread, before any block starts.
+#[derive(Debug)]
+struct SegmentReorder {
+    primitive: PrimitiveHandle,
+    stream: StreamHandle,
+    /// The NCHW side, which always names the plan slot.
+    plain: MemoryHandle,
+    /// The channels-last side, which always names the engine buffer.
+    blocked: MemoryHandle,
+    /// Kept alive for the memories above and shared with every block.
+    buffer: Arc<AlignedBuffer>,
+    /// `true` for NCHW -> channels-last, `false` for the other direction.
+    to_blocked: bool,
+}
+
+impl SegmentReorder {
+    fn run(&self, slot_address: usize) -> Result<(), Fn3Error> {
+        if slot_address == 0 {
+            return Err(segment_error(
+                "a layout reorder has no plan-slot window".to_string(),
+            ));
+        }
+        // SAFETY: `slot_address` is the executor's live window for the plan
+        // slot; the memory object borrows it only for this execute call. The
+        // buffer is this segment's own engine allocation, kept alive by
+        // `buffer` and sized to the blocked descriptor.
+        unsafe { self.plain.set_data_handle(slot_address as *mut u8) }?;
+        // SAFETY: as above for the engine-owned channels-last buffer.
+        unsafe {
+            self.blocked
+                .set_data_handle(self.buffer.as_ptr() as *mut u8)
+        }?;
+        let args = if self.to_blocked {
+            [
+                ExecArg {
+                    arg: ARG_SRC,
+                    memory: self.plain.raw(),
+                },
+                ExecArg {
+                    arg: ARG_DST,
+                    memory: self.blocked.raw(),
+                },
+            ]
+        } else {
+            [
+                ExecArg {
+                    arg: ARG_SRC,
+                    memory: self.blocked.raw(),
+                },
+                ExecArg {
+                    arg: ARG_DST,
+                    memory: self.plain.raw(),
+                },
+            ]
+        };
+        self.primitive.execute(&self.stream, &args)?;
+        self.stream.wait()
+    }
+}
+
 /// A segment's prepared blocks.
 #[derive(Debug)]
 pub(crate) struct PreparedSegment {
@@ -618,12 +912,31 @@ pub(crate) struct PreparedSegment {
     /// The convolution split, when this is a convolution segment.
     split: Option<ConvSplitSummary>,
     blocks: Vec<Block>,
+    /// A channels-last conversion of the segment's source, when the plan slot
+    /// still holds NCHW (the head of a channels-last chain).
+    prelude: Option<Arc<SegmentReorder>>,
+    /// `true` when the result stays in the engine's channels-last layout.
+    blocked: bool,
 }
 
 impl PreparedSegment {
     /// The number of blocks the planner split this segment into.
     pub(crate) fn block_count(&self) -> usize {
         self.blocks.len()
+    }
+
+    /// Run the segment's layout prelude, if it has one.
+    ///
+    /// Called once per forward on the executor's thread, before any block. The
+    /// conversion is counted in the plan's reorder report.
+    pub(crate) fn run_prelude(&self, inputs: &[usize]) -> Result<(), Fn3Error> {
+        let Some(prelude) = self.prelude.as_ref() else {
+            return Ok(());
+        };
+        let source = *inputs
+            .first()
+            .ok_or_else(|| segment_error("a reordered segment has no source window".to_string()))?;
+        prelude.run(source)
     }
 
     /// Execute one block.
@@ -645,6 +958,19 @@ impl PreparedSegment {
         })?;
         block.run(inputs, outputs)
     }
+}
+
+/// One layout conversion, as the plan report records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReorderRecord {
+    /// Plan position of the segment that runs the conversion.
+    pub segment: usize,
+    /// Plan slot the conversion reads or writes.
+    pub slot: usize,
+    /// `true` for NCHW -> channels-last, `false` for the other direction.
+    pub to_blocked: bool,
+    /// Bytes moved per forward.
+    pub bytes: usize,
 }
 
 /// The session-owned oneDNN engine.
@@ -669,6 +995,21 @@ pub(crate) struct OneDnnEngine {
     /// Weight blocks whose layout oneDNN did not choose as plain on the ONNX
     /// payload, i.e. blocks that needed a real reorder (not just a copy).
     reordered_blocks: usize,
+    /// Segments prepared with a fused epilogue (a `sum` and/or an activation).
+    fused_segments: usize,
+    /// Channels-last buffers keyed by plan slot: the value whose bytes they
+    /// stand for, in the engine's layout. A buffer exists only while one
+    /// segment produces and another consumes the blocked form, so a slot the
+    /// session reads or writes stays NCHW.
+    layout: Vec<Option<Arc<AlignedBuffer>>>,
+    /// Layout conversions inside segments, in plan order.
+    reorders: Vec<ReorderRecord>,
+    /// Bytes those conversions move per forward.
+    reorder_bytes: usize,
+    /// Bytes of engine-owned channels-last buffers.
+    layout_bytes: usize,
+    /// Segments whose result stays channels-last.
+    blocked_segments: usize,
 }
 
 // SAFETY: `OneDnnEngine` is `Send` because a session may be moved between
@@ -719,6 +1060,12 @@ impl OneDnnEngine {
             pool_segments: 0,
             matmul_segments: 0,
             reordered_blocks: 0,
+            fused_segments: 0,
+            layout: Vec::new(),
+            reorders: Vec::new(),
+            reorder_bytes: 0,
+            layout_bytes: 0,
+            blocked_segments: 0,
         })
     }
 
@@ -747,6 +1094,39 @@ impl OneDnnEngine {
         self.reordered_blocks
     }
 
+    /// Segments prepared with a fused `sum` and/or activation epilogue.
+    pub(crate) fn fused_segments(&self) -> usize {
+        self.fused_segments
+    }
+
+    /// Segments whose result stays in the engine's channels-last layout.
+    pub(crate) fn blocked_segments(&self) -> usize {
+        self.blocked_segments
+    }
+
+    /// Bytes of engine-owned channels-last buffers.
+    pub(crate) fn layout_bytes(&self) -> usize {
+        self.layout_bytes
+    }
+
+    /// Layout conversions inside segments, in plan order.
+    pub(crate) fn reorders(&self) -> &[ReorderRecord] {
+        &self.reorders
+    }
+
+    /// Bytes those conversions move per forward.
+    pub(crate) fn reorder_bytes(&self) -> usize {
+        self.reorder_bytes
+    }
+
+    /// Install a channels-last buffer for a plan slot, growing the table.
+    fn set_layout_slot(&mut self, slot: usize, buffer: Arc<AlignedBuffer>) {
+        if self.layout.len() <= slot {
+            self.layout.resize(slot + 1, None);
+        }
+        self.layout[slot] = Some(buffer);
+    }
+
     /// `true` when blocks may run concurrently.
     ///
     /// Only a sequential oneDNN makes "the session's pool is the only
@@ -769,7 +1149,11 @@ impl OneDnnEngine {
     ) -> Result<(), Fn3Error> {
         let inputs = spec.operands();
         let outputs = spec.results();
-        match OneDnnCapability.claim(spec.op, &inputs, &outputs, spec.params) {
+        let claim = match spec.fused {
+            Some(fused) => OneDnnCapability.claim_fused(fused, &inputs, &outputs, spec.params),
+            None => OneDnnCapability.claim(spec.op, &inputs, &outputs, spec.params),
+        };
+        match claim {
             Claim::Accepted => {}
             Claim::NotMine => {
                 return Err(unsupported(
@@ -790,7 +1174,7 @@ impl OneDnnEngine {
             }
         }
         let prepared = match spec.op {
-            OpId::Conv => self.prepare_conv(spec)?,
+            OpId::Conv => self.prepare_conv(index, spec)?,
             OpId::MaxPool | OpId::AveragePool | OpId::GlobalAveragePool => {
                 self.prepare_pool(spec)?
             }
@@ -806,6 +1190,12 @@ impl OneDnnEngine {
             "conv" => self.conv_segments += 1,
             "pool" => self.pool_segments += 1,
             _ => self.matmul_segments += 1,
+        }
+        if prepared.blocked {
+            self.blocked_segments += 1;
+        }
+        if spec.fused.is_some() {
+            self.fused_segments += 1;
         }
         let len = self.prepared.len();
         let slot = self.prepared.get_mut(index).ok_or(Fn3Error::OutOfBounds {
@@ -829,7 +1219,11 @@ impl OneDnnEngine {
             .and_then(|segment| segment.split.as_ref())
     }
 
-    fn prepare_conv(&mut self, spec: &SegmentSpec<'_>) -> Result<PreparedSegment, Fn3Error> {
+    fn prepare_conv(
+        &mut self,
+        index: usize,
+        spec: &SegmentSpec<'_>,
+    ) -> Result<PreparedSegment, Fn3Error> {
         let conv = Conv::new(
             &spec.inputs[0],
             &spec.inputs[1],
@@ -922,7 +1316,60 @@ impl OneDnnEngine {
             })
             .transpose()?;
 
-        let split = conv.split(spec.workers);
+        // ------------------------------------------------------------------
+        // Layout decisions for this segment.
+        //
+        // The source is channels-last when the producing segment installed a
+        // layout buffer for this slot. The destination is channels-last only
+        // when the executor proved every consumer is a oneDNN convolution,
+        // which also means the result must be split by rows: a row range of a
+        // channels-last tensor is one contiguous run, a channel range is not,
+        // and oneDNN's channel-submemory form took its JIT path off the table
+        // (measured: 233 ms for a 4-block 32x80x80 3x3 convolution, against
+        // 1.1 ms for the same four blocks as dense channels-last buffers).
+        // ------------------------------------------------------------------
+        let src_slot = spec.input_slots.first().copied();
+        let dst_slot = spec.output_slots.first().copied();
+        let src_layout = src_slot
+            .and_then(|slot| self.layout.get(slot))
+            .and_then(Option::as_ref)
+            .cloned();
+        if src_layout.is_some() && conv.group != 1 {
+            return Err(unsupported(
+                OpId::Conv,
+                "a grouped convolution cannot read a channels-last source: its per-group \
+                 channel slice is a strided range of that layout",
+            ));
+        }
+        let sum = spec.fused.is_some_and(FusedOp::has_sum);
+        let plain_split = || {
+            if sum {
+                conv.channel_split(spec.workers)
+            } else {
+                conv.split(spec.workers)
+            }
+        };
+        let mut split = plain_split();
+        let mut dst_layout: Option<Arc<AlignedBuffer>> = None;
+        if spec.dst_blocked && !sum && conv.batch == 1 {
+            let rows = conv.row_split(spec.workers);
+            let channels = conv.channel_split(spec.workers);
+            if rows.blocks.len() >= 2 && rows.blocks.len() >= channels.blocks.len() {
+                split = rows;
+                let bytes = conv.batch
+                    * conv.out_channels
+                    * conv.out_hw[0]
+                    * conv.out_hw[1]
+                    * std::mem::size_of::<f32>();
+                let buffer = Arc::new(AlignedBuffer::zeroed(bytes)?);
+                self.layout_bytes += bytes;
+                let slot = dst_slot.ok_or_else(|| {
+                    unsupported(OpId::Conv, "a channels-last destination needs a plan slot")
+                })?;
+                self.set_layout_slot(slot, Arc::clone(&buffer));
+                dst_layout = Some(buffer);
+            }
+        }
         let row_split = split.axis == ConvSplitAxis::Rows;
         let summary = ConvSplitSummary {
             axis: split.axis,
@@ -945,6 +1392,90 @@ impl OneDnnEngine {
             },
         };
         let blocks = split.blocks;
+
+        // --------------------------------------------------------------
+        // A segment never mixes layout families: oneDNN's kernels are fast on
+        // `nchw -> nchw` and on `channels-last -> channels-last`, and the mixed
+        // pair (`channels-last -> nchw`, measured on this host) made a 1-block
+        // 64x40x40 3x3 convolution take 50 ms instead of 0.5 ms — the library
+        // falls off its JIT path. So an edge between two families carries one
+        // explicit conversion, run once before the blocks:
+        //
+        // - plain source, channels-last result: NCHW -> channels-last of the
+        //   whole input slot (the head of a chain);
+        // - channels-last source, plain result: channels-last -> NCHW of the
+        //   whole source buffer (the tail of a chain, or a consumer that cannot
+        //   take the blocked form).
+        //
+        // Both are counted in the plan report with their bytes.
+        // --------------------------------------------------------------
+        let bytes = conv.batch
+            * conv.in_channels
+            * conv.in_hw[0]
+            * conv.in_hw[1]
+            * std::mem::size_of::<f32>();
+        let slot = src_slot
+            .ok_or_else(|| unsupported(OpId::Conv, "a layout conversion needs a plan slot"))?;
+        let (preload, blocked_source) = if let Some(buffer) = &src_layout {
+            if dst_layout.is_some() {
+                // Interior edge: the producer's channels-last buffer is read
+                // directly.
+                (None, Some(Arc::clone(buffer)))
+            } else {
+                // Tail edge: convert the producer's buffer back into the plan
+                // slot, which the plain blocks then read.
+                let plain = Desc::with_tag(&src_parent_dims, FORMAT_TAG_ABCD)?;
+                let blocked = Desc::with_tag(&src_parent_dims, FORMAT_TAG_NHWC)?;
+                let attr = PrimitiveAttrHandle::library_default()?;
+                let pd = PrimitiveDescHandle::reorder(&self.engine, &blocked, &plain, &attr)?;
+                let primitive = PrimitiveHandle::new(&pd)?;
+                let single = Arc::new(SegmentReorder {
+                    primitive,
+                    stream: StreamHandle::new(&self.engine)?,
+                    plain: MemoryHandle::new(&plain, &self.engine)?,
+                    blocked: MemoryHandle::new(&blocked, &self.engine)?,
+                    buffer: Arc::clone(buffer),
+                    to_blocked: false,
+                });
+                self.reorder_bytes += bytes;
+                self.reorders.push(ReorderRecord {
+                    segment: index,
+                    slot,
+                    to_blocked: false,
+                    bytes,
+                });
+                (Some(single), None)
+            }
+        } else if dst_layout.is_some() && row_split {
+            // Head edge: convert the plan slot once, then read dense
+            // channels-last rows. Eight per-block NCHW staging copies would
+            // re-read the halo eight times.
+            let buffer = Arc::new(AlignedBuffer::zeroed(bytes)?);
+            let plain = Desc::with_tag(&src_parent_dims, FORMAT_TAG_ABCD)?;
+            let blocked = Desc::with_tag(&src_parent_dims, FORMAT_TAG_NHWC)?;
+            let attr = PrimitiveAttrHandle::library_default()?;
+            let pd = PrimitiveDescHandle::reorder(&self.engine, &plain, &blocked, &attr)?;
+            let primitive = PrimitiveHandle::new(&pd)?;
+            self.layout_bytes += bytes;
+            self.reorder_bytes += bytes;
+            self.reorders.push(ReorderRecord {
+                segment: index,
+                slot,
+                to_blocked: true,
+                bytes,
+            });
+            let single = Arc::new(SegmentReorder {
+                primitive,
+                stream: StreamHandle::new(&self.engine)?,
+                plain: MemoryHandle::new(&plain, &self.engine)?,
+                blocked: MemoryHandle::new(&blocked, &self.engine)?,
+                buffer: Arc::clone(&buffer),
+                to_blocked: true,
+            });
+            (Some(single), Some(buffer))
+        } else {
+            (None, None)
+        };
         let single_block = blocks.len() == 1;
         // Row blocks of one convolution use the same weights; prepack once and
         // share the buffer when oneDNN chose the same layout for every block.
@@ -980,23 +1511,28 @@ impl OneDnnEngine {
             // What oneDNN may choose for the weights.
             let weight_any = Desc::with_tag(&block_dims, FORMAT_TAG_ANY)?;
 
-            let src = if single_block {
-                Desc::with_tag(&src_parent_dims, FORMAT_TAG_ABCD)?
-            } else if row_split {
-                // Dense staging, not a submemory: a row submemory keeps the
-                // parent's strides and takes oneDNN off its JIT path (see
-                // `RowStaging`). The staging copy fills exactly the rows inside
-                // the parent; the block's own padding supplies the rest.
+            let src = if row_split {
                 let dims = vec![
                     conv.batch as i64,
                     conv.in_channels as i64,
                     block.in_rows as i64,
                     conv.in_hw[1] as i64,
                 ];
-                Desc::with_tag(&dims, FORMAT_TAG_ABCD)?
-            } else if conv.group == 1 {
-                // The full input: no spatial split, no halo.
-                Desc::with_tag(&src_parent_dims, FORMAT_TAG_ABCD)?
+                if blocked_source.is_some() {
+                    // Dense channels-last rows: `[N, in_rows, W, C]`.
+                    Desc::with_tag(&dims, FORMAT_TAG_NHWC)?
+                } else {
+                    // Dense NCHW staging rows; a row submemory of the parent
+                    // would keep strides oneDNN cannot JIT (see `RowStaging`).
+                    Desc::with_tag(&dims, FORMAT_TAG_ABCD)?
+                }
+            } else if single_block || conv.group == 1 {
+                if blocked_source.is_some() {
+                    Desc::with_tag(&src_parent_dims, FORMAT_TAG_NHWC)?
+                } else {
+                    // The full input: no spatial split, no halo.
+                    Desc::with_tag(&src_parent_dims, FORMAT_TAG_ABCD)?
+                }
             } else {
                 let dims = vec![
                     conv.batch as i64,
@@ -1007,16 +1543,20 @@ impl OneDnnEngine {
                 let offsets = vec![0, block.in_start as i64, 0, 0];
                 Desc::submemory(&src_parent, &dims, &offsets)?
             };
-            let dst = if single_block {
-                Desc::with_tag(&dst_parent_dims, FORMAT_TAG_ABCD)?
-            } else if row_split {
+            let dst = if row_split {
                 let dims = vec![
                     conv.batch as i64,
                     conv.out_channels as i64,
                     block.out_rows as i64,
                     conv.out_hw[1] as i64,
                 ];
-                Desc::with_tag(&dims, FORMAT_TAG_ABCD)?
+                if dst_layout.is_some() {
+                    Desc::with_tag(&dims, FORMAT_TAG_NHWC)?
+                } else {
+                    Desc::with_tag(&dims, FORMAT_TAG_ABCD)?
+                }
+            } else if single_block {
+                Desc::with_tag(&dst_parent_dims, FORMAT_TAG_ABCD)?
             } else {
                 let dims = vec![
                     conv.batch as i64,
@@ -1042,6 +1582,24 @@ impl OneDnnEngine {
             }
 
             let attr = PrimitiveAttrHandle::user_scratchpad()?;
+            if let Some(fused) = spec.fused {
+                // oneDNN applies post-ops in append order, and its direct
+                // convolution requires `sum` first: `dst = sum(dst_old,
+                // conv(dst))` then the elementwise epilogue.
+                let mut post_ops = PostOpsHandle::new()?;
+                if fused.has_sum() {
+                    // `scale = 1`, `zero_point = 0`, `data_type = undef` (the
+                    // destination's own type).
+                    post_ops.append_sum(1.0, 0, 0)?;
+                }
+                if EPILOGUE_POST_OP {
+                    if let Some(activation) = fused.activation {
+                        let (alg, alpha, beta) = eltwise(activation);
+                        post_ops.append_eltwise(alg, alpha, beta)?;
+                    }
+                }
+                attr.set_post_ops(&post_ops)?;
+            }
             let strides: Vec<i64> = conv.strides.iter().map(|&value| value as i64).collect();
             // oneDNN's `dilates` array is "dilation minus one" (0 means no
             // dilation), unlike ONNX's dilation of 1.
@@ -1057,23 +1615,25 @@ impl OneDnnEngine {
             };
             let padding_l = vec![pad_top, conv.pads[1].0];
             let padding_r = vec![pad_bottom, conv.pads[1].1];
-            let pd = PrimitiveDescHandle::convolution(
-                &self.engine,
-                ffi::ALG_CONVOLUTION_DIRECT,
-                &src,
-                &weight_any,
-                bias_desc.as_ref(),
-                &dst,
-                &strides,
-                &dilates,
-                &padding_l,
-                &padding_r,
-                &attr,
-            )
-            .map_err(|error| {
-                context(error, || {
-                    format!(
-                        "conv segment: {}x{}, {} of {} output channels, groups {}, {}",
+            let pd =
+                PrimitiveDescHandle::convolution(
+                    &self.engine,
+                    ffi::ALG_CONVOLUTION_DIRECT,
+                    &src,
+                    &weight_any,
+                    bias_desc.as_ref(),
+                    &dst,
+                    &strides,
+                    &dilates,
+                    &padding_l,
+                    &padding_r,
+                    &attr,
+                )
+                .map_err(|error| {
+                    context(error, || {
+                        format!(
+                        "conv segment: {}x{}, {} of {} output channels, groups {}, {}, source {}, \
+                         destination {}",
                         conv.in_hw[0],
                         conv.in_hw[1],
                         block.out_channels,
@@ -1090,10 +1650,12 @@ impl OneDnnEngine {
                             )
                         } else {
                             format!("channels from {}", block.out_start)
-                        }
+                        },
+                        if blocked_source.is_some() { "channels-last" } else { "nchw" },
+                        if dst_layout.is_some() { "channels-last" } else { "nchw" },
                     )
-                })
-            })?;
+                    })
+                })?;
             let expected_weights = pd.query_md(QUERY_WEIGHTS_MD, 0)?;
             let weight_plain = Desc::with_tag(&block_dims, weight_tag)?;
             let (prepacked, reformatted) = match shared_weights.as_ref() {
@@ -1120,53 +1682,130 @@ impl OneDnnEngine {
             let scratchpad = prepare_scratchpad(&pd)?;
             let primitive = PrimitiveHandle::new(&pd)?;
 
-            let staging = if row_split {
-                let source_bytes = staging_bytes(
-                    &[conv.batch, conv.in_channels, block.in_rows, conv.in_hw[1]],
-                    std::mem::size_of::<f32>(),
-                )?;
-                let destination_bytes = staging_bytes(
-                    &[
-                        conv.batch,
-                        conv.out_channels,
-                        block.out_rows,
-                        conv.out_hw[1],
-                    ],
-                    std::mem::size_of::<f32>(),
-                )?;
-                self.staging_bytes += source_bytes + destination_bytes;
-                Some(RowStaging {
-                    source: AlignedBuffer::zeroed(source_bytes)?,
-                    destination: AlignedBuffer::zeroed(destination_bytes)?,
-                    source_len: staging_bytes(
-                        &[conv.batch, conv.in_channels, conv.in_hw[0], conv.in_hw[1]],
+            let staging = if !row_split {
+                None
+            } else {
+                let source_bytes = if blocked_source.is_none() {
+                    staging_bytes(
+                        &[conv.batch, conv.in_channels, block.in_rows, conv.in_hw[1]],
                         std::mem::size_of::<f32>(),
-                    )?,
-                    destination_len: staging_bytes(
+                    )?
+                } else {
+                    0
+                };
+                let destination_bytes = if dst_layout.is_none() {
+                    staging_bytes(
                         &[
                             conv.batch,
                             conv.out_channels,
-                            conv.out_hw[0],
+                            block.out_rows,
                             conv.out_hw[1],
                         ],
                         std::mem::size_of::<f32>(),
-                    )?,
-                    batch: conv.batch,
-                    in_channels: conv.in_channels,
-                    out_channels: conv.out_channels,
-                    in_rows: block.in_rows,
-                    out_rows: block.out_rows,
-                    in_row_start: block.in_row_start,
-                    out_row_start: block.out_row_start,
-                    in_h: conv.in_hw[0],
-                    out_h: conv.out_hw[0],
-                    in_row_bytes: conv.in_hw[1] * std::mem::size_of::<f32>(),
-                    out_row_bytes: conv.out_hw[1] * std::mem::size_of::<f32>(),
-                })
-            } else {
-                None
+                    )?
+                } else {
+                    0
+                };
+                if source_bytes + destination_bytes == 0 {
+                    None
+                } else {
+                    self.staging_bytes += source_bytes + destination_bytes;
+                    Some(RowStaging {
+                        source: if source_bytes == 0 {
+                            None
+                        } else {
+                            Some(AlignedBuffer::zeroed(source_bytes)?)
+                        },
+                        destination: if destination_bytes == 0 {
+                            None
+                        } else {
+                            Some(AlignedBuffer::zeroed(destination_bytes)?)
+                        },
+                        source_len: staging_bytes(
+                            &[conv.batch, conv.in_channels, conv.in_hw[0], conv.in_hw[1]],
+                            std::mem::size_of::<f32>(),
+                        )?,
+                        destination_len: staging_bytes(
+                            &[
+                                conv.batch,
+                                conv.out_channels,
+                                conv.out_hw[0],
+                                conv.out_hw[1],
+                            ],
+                            std::mem::size_of::<f32>(),
+                        )?,
+                        batch: conv.batch,
+                        in_channels: conv.in_channels,
+                        out_channels: conv.out_channels,
+                        in_rows: block.in_rows,
+                        out_rows: block.out_rows,
+                        in_row_start: block.in_row_start,
+                        out_row_start: block.out_row_start,
+                        in_h: conv.in_hw[0],
+                        out_h: conv.out_hw[0],
+                        in_row_bytes: conv.in_hw[1] * std::mem::size_of::<f32>(),
+                        out_row_bytes: conv.out_hw[1] * std::mem::size_of::<f32>(),
+                    })
+                }
             };
 
+            // The fused activation runs over this block's destination after the
+            // primitive. The destination is either the dense staging buffer (a
+            // row block with an NCHW result), this block's row range of the
+            // channels-last buffer, or the block's channel range of the plan
+            // slot.
+            let epilogue = spec
+                .fused
+                .and_then(|fused| fused.activation)
+                .map(|activation| {
+                    if dst_layout.is_some() {
+                        let run_len = block.out_rows * conv.out_hw[1] * conv.out_channels;
+                        ScalarEpilogue {
+                            activation,
+                            runs: conv.batch,
+                            run_len,
+                            stride: run_len,
+                            offset_bytes: block.out_row_start
+                                * conv.out_hw[1]
+                                * conv.out_channels
+                                * std::mem::size_of::<f32>(),
+                            target: EpilogueTarget::BlockedDestination,
+                        }
+                    } else if row_split {
+                        let run_len = block.out_rows * conv.out_hw[1] * conv.out_channels;
+                        ScalarEpilogue {
+                            activation,
+                            runs: conv.batch,
+                            run_len,
+                            stride: run_len,
+                            offset_bytes: 0,
+                            target: EpilogueTarget::StagingDestination,
+                        }
+                    } else {
+                        let run_len = block.out_channels * conv.out_hw[0] * conv.out_hw[1];
+                        ScalarEpilogue {
+                            activation,
+                            runs: conv.batch,
+                            run_len,
+                            stride: conv.out_channels * conv.out_hw[0] * conv.out_hw[1],
+                            offset_bytes: block.out_start
+                                * conv.out_hw[0]
+                                * conv.out_hw[1]
+                                * std::mem::size_of::<f32>(),
+                            target: EpilogueTarget::Output,
+                        }
+                    }
+                });
+            let blocked_destination_bytes = block.out_row_start
+                * conv.out_hw[1]
+                * conv.out_channels
+                * std::mem::size_of::<f32>();
+            // A channels-last source is one dense buffer; a row block starts at
+            // its first halo row, a channel block at the tensor's start.
+            let blocked_src_arg = ArgSource::BlockedSource(
+                block.in_row_start * conv.in_hw[1] * conv.in_channels * std::mem::size_of::<f32>(),
+            );
+            let blocked_dst_arg = ArgSource::BlockedDestination(blocked_destination_bytes);
             let mut memories = Vec::with_capacity(5);
             let mut args = Vec::with_capacity(5);
             let mut sources = Vec::with_capacity(5);
@@ -1177,7 +1816,9 @@ impl OneDnnEngine {
                 &src,
                 &self.engine,
                 ARG_SRC,
-                if row_split {
+                if blocked_source.is_some() {
+                    blocked_src_arg
+                } else if row_split {
                     ArgSource::StagingSource
                 } else {
                     ArgSource::Input(0)
@@ -1210,7 +1851,9 @@ impl OneDnnEngine {
                 &dst,
                 &self.engine,
                 ARG_DST,
-                if row_split {
+                if dst_layout.is_some() {
+                    blocked_dst_arg
+                } else if row_split {
                     ArgSource::StagingDestination
                 } else {
                     ArgSource::Output(0)
@@ -1237,12 +1880,17 @@ impl OneDnnEngine {
                 bias: bias_buffer,
                 scratchpad: scratchpad.map(|(_, buffer)| buffer),
                 staging,
+                epilogue,
+                blocked_source: blocked_source.clone(),
+                blocked_destination: dst_layout.clone(),
             });
         }
         Ok(PreparedSegment {
             kind: "conv",
             split: Some(summary),
             blocks: prepared,
+            prelude: preload,
+            blocked: dst_layout.is_some(),
         })
     }
 
@@ -1371,12 +2019,17 @@ impl OneDnnEngine {
                 bias: None,
                 scratchpad: scratchpad.map(|(_, buffer)| buffer),
                 staging: None,
+                epilogue: None,
+                blocked_source: None,
+                blocked_destination: None,
             });
         }
         Ok(PreparedSegment {
             kind: "pool",
             split: None,
             blocks: prepared,
+            prelude: None,
+            blocked: false,
         })
     }
 
@@ -1501,12 +2154,17 @@ impl OneDnnEngine {
                 bias: None,
                 scratchpad: scratchpad.map(|(_, buffer)| buffer),
                 staging: None,
+                epilogue: None,
+                blocked_source: None,
+                blocked_destination: None,
             });
         }
         Ok(PreparedSegment {
             kind: "matmul",
             split: None,
             blocks: prepared,
+            prelude: None,
+            blocked: false,
         })
     }
 
@@ -1557,6 +2215,29 @@ impl OneDnnEngine {
         primitive.execute(&self.prep_stream, &args)?;
         self.prep_stream.wait()?;
         Ok((destination, reformatted))
+    }
+}
+
+/// Evaluate a fused activation as a oneDNN eltwise post-op instead of the
+/// engine's own scalar epilogue.
+///
+/// Measured and rejected on this host: see [`ScalarEpilogue`] for the numbers.
+/// The switch is kept, rather than the code deleted, so the comparison can be
+/// reproduced on another CPU or another oneDNN build where post-ops do reach
+/// the JIT injector.
+pub(crate) const EPILOGUE_POST_OP: bool = false;
+
+/// The oneDNN eltwise triple for a fused activation.
+fn eltwise(activation: Activation) -> (i32, f32, f32) {
+    match activation {
+        // `alpha = 0` is the plain `max(0, x)`.
+        Activation::Relu => (ALG_ELTWISE_RELU, 0.0, 0.0),
+        Activation::Clip { low, high } => (ALG_ELTWISE_CLIP, low, high),
+        Activation::Sigmoid => (ALG_ELTWISE_LOGISTIC, 0.0, 0.0),
+        Activation::Tanh => (ALG_ELTWISE_TANH, 0.0, 0.0),
+        Activation::Gelu => (ALG_ELTWISE_GELU_ERF, 0.0, 0.0),
+        // oneDNN's swish is `x / (1 + exp(-alpha * x))`; alpha = 1 is SiLU.
+        Activation::Swish => (ALG_ELTWISE_SWISH, 1.0, 0.0),
     }
 }
 
@@ -1709,6 +2390,10 @@ mod tests {
             weights: Some(&weights),
             bias: Some(&bias),
             workers: 1,
+            fused: None,
+            input_slots: (0..3).collect(),
+            output_slots: vec![3],
+            dst_blocked: false,
         };
         let got = run_one(&spec, &input, 2);
         // Group 0 sees 1, 3, 7, 9 -> 64; group 1 sees 10, 12, 16, 18 -> 154.
@@ -1732,6 +2417,10 @@ mod tests {
             weights: None,
             bias: None,
             workers: 1,
+            fused: None,
+            input_slots: (0..3).collect(),
+            output_slots: vec![3],
+            dst_blocked: false,
         };
         let got = run_one(&spec, &input, 4);
         close(&got, &[6.0, 8.0, 14.0, 16.0]);
@@ -1756,6 +2445,10 @@ mod tests {
             weights: None,
             bias: None,
             workers: 1,
+            fused: None,
+            input_slots: (0..3).collect(),
+            output_slots: vec![3],
+            dst_blocked: false,
         };
         let got = run_one(&spec, &input, 9);
         close(&got, &[0.25, 0.75, 0.5, 1.0, 2.5, 1.5, 0.75, 1.75, 1.0]);
@@ -1777,9 +2470,143 @@ mod tests {
             weights: Some(&weights),
             bias: None,
             workers: 1,
+            fused: None,
+            input_slots: (0..3).collect(),
+            output_slots: vec![3],
+            dst_blocked: false,
         };
         let got = run_one(&spec, &input, 4);
         close(&got, &[58.0, 64.0, 139.0, 154.0]);
+    }
+
+    #[test]
+    fn a_fused_claim_names_what_it_cannot_take() {
+        let params = OpParams::new()
+            .with_kernel_shape([1, 1])
+            .with_strides([1, 1])
+            .with_dilations([1, 1]);
+        let inputs = [
+            operand(&[1, 8, 16, 16], false),
+            operand(&[8, 8, 1, 1], true),
+            operand(&[1, 8, 16, 16], false),
+        ];
+        let outputs = [operand(&[1, 8, 16, 16], false)];
+        let fused = FusedOp {
+            anchor: OpId::Conv,
+            activation: Some(Activation::Relu),
+            sum: Some(2),
+            chain: vec![OpId::Conv, OpId::Add, OpId::Relu],
+        };
+        assert!(claimed_fused_conv(&fused, &inputs, &outputs, &params).is_ok());
+        // A residual that is not the last operand is a planner bug, reported.
+        let wrong = FusedOp {
+            sum: Some(1),
+            ..fused.clone()
+        };
+        assert!(claimed_fused_conv(&wrong, &inputs, &outputs, &params).is_err());
+        // A broadcast residual is not expressible as a oneDNN sum.
+        let mut broadcast = inputs.clone();
+        broadcast[2] = operand(&[1, 1, 16, 16], false);
+        let error = claimed_fused_conv(&fused, &broadcast, &outputs, &params).unwrap_err();
+        assert!(error.to_string().contains("broadcast"), "{error}");
+        // A non-conv anchor is outside the vocabulary, not a fallback.
+        let relu = FusedOp {
+            anchor: OpId::Relu,
+            activation: Some(Activation::Relu),
+            sum: None,
+            chain: vec![OpId::Relu, OpId::Relu],
+        };
+        assert_eq!(
+            OneDnnCapability.claim_fused(&relu, &inputs[..1], &outputs, &params),
+            Claim::NotMine
+        );
+    }
+
+    /// A fused `conv + sum + relu` is one primitive: the destination is
+    /// pre-filled with the residual (oneDNN's sum post-op reads it back), then
+    /// the convolution adds into it and the engine applies the activation.
+    #[test]
+    fn a_fused_sum_and_activation_matches_the_three_step_chain() {
+        let input: Vec<f32> = (0..(4 * 4 * 4))
+            .map(|index| (index as f32) * 0.125 - 2.0)
+            .collect();
+        let residual: Vec<f32> = (0..(2 * 4 * 4))
+            .map(|index| ((index as f32) * 0.25).cos())
+            .collect();
+        let weights = f32_bytes(&[1.0, -0.5, 0.25, 2.0, 0.75, -1.5, 0.5, 0.25]);
+        let params = OpParams::new()
+            .with_kernel_shape([1, 1])
+            .with_strides([1, 1])
+            .with_dilations([1, 1])
+            .with_group(1);
+        let fused = FusedOp {
+            anchor: OpId::Conv,
+            activation: Some(Activation::Relu),
+            sum: Some(2),
+            chain: vec![OpId::Conv, OpId::Add, OpId::Relu],
+        };
+        let spec = SegmentSpec {
+            op: OpId::Conv,
+            inputs: vec![
+                Shape::from_dims([1, 4, 4, 4]),
+                Shape::from_dims([2, 4, 1, 1]),
+                Shape::from_dims([1, 2, 4, 4]),
+            ],
+            input_dtypes: vec![DType::F32, DType::F32, DType::F32],
+            input_constants: vec![false, true, false],
+            outputs: vec![Shape::from_dims([1, 2, 4, 4])],
+            output_dtypes: vec![DType::F32],
+            params: &params,
+            weights: Some(&weights),
+            bias: None,
+            workers: 1,
+            fused: Some(&fused),
+            input_slots: vec![0, 1, 2],
+            output_slots: vec![3],
+            dst_blocked: false,
+        };
+        let mut engine = OneDnnEngine::new(1).unwrap();
+        engine.prepare_segment(0, &spec).unwrap();
+        let prepared = engine.prepared(0).unwrap();
+        assert_eq!(engine.fused_segments(), 1);
+        let input_buffer = AlignedBuffer::from_bytes(bytemuck::cast_slice(&input)).unwrap();
+        // The executor pre-fills the result slot with the residual; the same
+        // buffer is then the sum post-op's accumulator.
+        let output_buffer = AlignedBuffer::from_bytes(bytemuck::cast_slice(&residual)).unwrap();
+        prepared
+            .run_block(
+                0,
+                &[
+                    input_buffer.as_ptr() as usize,
+                    0,
+                    residual.as_ptr() as usize,
+                ],
+                &[output_buffer.as_ptr() as usize],
+            )
+            .unwrap();
+        // The unfused chain: 1x1 convolution, add the residual, relu.
+        let mut expected = vec![0.0f32; residual.len()];
+        for channel in 0..2 {
+            for row in 0..4 {
+                for column in 0..4 {
+                    let mut sum = 0.0f32;
+                    for inner in 0..4 {
+                        let x = input[(inner * 4 + row) * 4 + column];
+                        sum += x * f32::from_le_bytes([
+                            weights[(channel * 4 + inner) * 4],
+                            weights[(channel * 4 + inner) * 4 + 1],
+                            weights[(channel * 4 + inner) * 4 + 2],
+                            weights[(channel * 4 + inner) * 4 + 3],
+                        ]);
+                    }
+                    let position = (channel * 4 + row) * 4 + column;
+                    let value = sum + residual[position];
+                    expected[position] = if value > 0.0 { value } else { 0.0 };
+                }
+            }
+        }
+        let got = bytemuck::cast_slice::<u8, f32>(output_buffer.as_bytes()).to_vec();
+        close(&got, &expected);
     }
 
     #[test]

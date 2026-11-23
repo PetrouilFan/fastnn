@@ -266,6 +266,59 @@ mod tests {
         assert_eq!(out.as_f32_slice().unwrap(), &[1.0, 4.0, 2.0, 4.0]);
     }
 
+    /// Without Rayon there is no pool to compare against, so repeated serial
+    /// runs pin stability and the documented expression is checked below.
+    #[cfg(not(feature = "parallel"))]
+    #[test]
+    fn sigmoid_is_repeatable_serially() {
+        let values: Vec<f32> = (0..4096)
+            .map(|index| (index as f32 / 100.0) - 20.0)
+            .collect();
+        let input = Tensor::from_f32(Shape::from_dims([64, 64]), &values).unwrap();
+        let mut first = zeros(&[64, 64]);
+        let mut second = zeros(&[64, 64]);
+        {
+            let view = input.as_view().unwrap();
+            let mut out = first.as_mut_view().unwrap();
+            run(
+                OpId::Sigmoid,
+                std::slice::from_ref(&view),
+                std::slice::from_mut(&mut out),
+                &OpParams::new(),
+                None,
+            )
+            .unwrap();
+        }
+        {
+            let view = input.as_view().unwrap();
+            let mut out = second.as_mut_view().unwrap();
+            run(
+                OpId::Sigmoid,
+                std::slice::from_ref(&view),
+                std::slice::from_mut(&mut out),
+                &OpParams::new(),
+                None,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            first
+                .as_f32_slice()
+                .unwrap()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            second
+                .as_f32_slice()
+                .unwrap()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            "two serial runs of the same input must agree bit for bit"
+        );
+    }
+
+    #[cfg(feature = "parallel")]
     #[test]
     fn sigmoid_is_bitwise_identical_serially_and_on_the_pool() {
         // 100 000 elements over the 64 KiB parallel floor, with values that

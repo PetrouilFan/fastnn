@@ -68,10 +68,59 @@ pub(crate) fn softmax(
         detail: "softmax width does not fit in usize".to_string(),
     })?;
 
+    let contiguous_io = input.meta().is_contiguous() && out.meta().is_contiguous();
     let locator = Locator::new(op, input.meta(), input.shape())?;
     let out_locator = Locator::new(op, out.meta(), input.shape())?;
     let source = input.storage_slice::<f32>()?;
     let destination = out.storage_slice_mut::<f32>()?;
+    let rows = usize::try_from(outer * inner).map_err(|_| Fn3Error::ShapeOverflow {
+        context: "cpu softmax rows",
+        axis: Some(axis),
+        detail: "softmax row count does not fit in usize".to_string(),
+    })?;
+
+    // Row-wise fast path: a contiguous tensor with the softmax axis last means
+    // each row is one contiguous run of `width` values, so the three passes are
+    // slices. No locator, no per-element index arithmetic, no scratch buffer:
+    // the exponent pass writes the result buffer and the divide pass scales it
+    // in place. The arithmetic — max ascending, exp ascending, sum ascending,
+    // one division per element — is the same order as the general path below,
+    // so the result is bit-identical.
+    if inner == 1 && contiguous_io {
+        let needed = rows * width_usize;
+        if source.len() < needed || destination.len() < needed {
+            return Err(Fn3Error::ShapeMismatch {
+                op: Some(op),
+                expected: format!("{needed} elements for {rows} rows of {width_usize}"),
+                actual: format!("{} input, {} output", source.len(), destination.len()),
+            });
+        }
+        for row in 0..rows {
+            let start = row * width_usize;
+            let source_row = &source[start..start + width_usize];
+            let destination_row = &mut destination[start..start + width_usize];
+            // Maximum over the row.
+            let mut maximum = f32::NEG_INFINITY;
+            for &value in source_row {
+                if value > maximum {
+                    maximum = value;
+                }
+            }
+            // Exp and ascending sum, in place.
+            let mut total = 0.0f32;
+            for (slot, &value) in destination_row.iter_mut().zip(source_row.iter()) {
+                let exponent = (value - maximum).exp();
+                *slot = exponent;
+                total += exponent;
+            }
+            // Divide. `total` is >= 1 for a non-empty row, as above.
+            for slot in destination_row.iter_mut() {
+                *slot /= total;
+            }
+        }
+        return Ok(());
+    }
+
     let leading_dims = input.shape().dims()[..axis].to_vec();
     let trailing_dims = input.shape().dims()[axis + 1..].to_vec();
     let mut coordinates = vec![0u64; rank];
@@ -155,6 +204,60 @@ mod tests {
         );
         assert_eq!(masked, vec![0.25, 0.25, 0.25, 0.25]);
         assert!(masked.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn the_contiguous_row_path_is_bit_identical_to_the_reference_loop() {
+        // 2 x 3 rows of 512 values with both exponential tails present. The
+        // reference is the documented general algorithm: max ascending,
+        // `exp(x - max)` ascending, sum ascending, one division per element.
+        let shape = [2u64, 4, 512];
+        let elements = (shape[0] * shape[1] * shape[2]) as usize;
+        let values: Vec<f32> = (0..elements)
+            .map(|index| ((index as f32) * 0.017).sin() * 8.0 - 1.0)
+            .collect();
+        let input = Tensor::from_f32(Shape::from_dims(shape), &values).unwrap();
+        let mut out = Tensor::zeros(Shape::from_dims(shape), DType::F32, DeviceId::Cpu).unwrap();
+        {
+            let input_view = input.as_view().unwrap();
+            let mut out_view = out.as_mut_view().unwrap();
+            softmax(
+                OpId::Softmax,
+                &input_view,
+                &mut out_view,
+                &OpParams::default().with_axes([-1]),
+            )
+            .unwrap();
+        }
+        let got = out.as_f32_slice().unwrap().to_vec();
+        let width = shape[2] as usize;
+        let mut expected = vec![0.0f32; elements];
+        for row in 0..elements / width {
+            let source = &values[row * width..(row + 1) * width];
+            let mut maximum = f32::NEG_INFINITY;
+            for &value in source {
+                if value > maximum {
+                    maximum = value;
+                }
+            }
+            let mut total = 0.0f32;
+            for position in 0..width {
+                let exponent = (source[position] - maximum).exp();
+                expected[row * width + position] = exponent;
+                total += exponent;
+            }
+            for position in 0..width {
+                expected[row * width + position] /= total;
+            }
+        }
+        assert_eq!(
+            got.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            "the row-wise softmax changed a bit"
+        );
     }
 
     #[test]

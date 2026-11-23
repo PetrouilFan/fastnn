@@ -47,6 +47,8 @@ use crate::inference::ops::OpId;
 use crate::inference::shape::Shape;
 use crate::inference::tensor::{TensorMut, TensorView};
 
+use self::cpu::kernels::elementwise::gelu_erf_f32;
+
 pub mod cpu;
 
 #[cfg(feature = "vulkan")]
@@ -323,6 +325,172 @@ pub enum Claim {
     Declined(String),
 }
 
+/// An elementwise activation a fused segment folds into its producer.
+///
+/// Every variant is expressible as a oneDNN eltwise post-op, and every variant
+/// has a scalar definition here ([`Activation::apply`]) that is the *same*
+/// expression the unfused scalar kernel evaluates, element for element. A fused
+/// scalar segment is therefore bit-identical to the unfused chain, which is
+/// what makes the scalar engine a usable oracle for fusion.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Activation {
+    /// `max(x, 0)` with the `f32::max` rule the legacy `Relu` kernel documents
+    /// (`Relu(NaN)` is `0`).
+    Relu,
+    /// `min(max(x, low), high)`, the ONNX `Clip`, in that evaluation order.
+    Clip {
+        /// Inclusive lower bound.
+        low: f32,
+        /// Inclusive upper bound.
+        high: f32,
+    },
+    /// `1 / (1 + exp(-x))`.
+    Sigmoid,
+    /// `tanh(x)`.
+    Tanh,
+    /// Exact (`erf`) GELU: `0.5*x*(1+erf(x/sqrt(2)))`, evaluated in `f64` and
+    /// rounded once, exactly as the legacy `Gelu` kernel does.
+    Gelu,
+    /// `x * sigmoid(x)`, the SiLU / swish ONNX exporters write as
+    /// `Mul(x, Sigmoid(x))`.
+    Swish,
+}
+
+impl Activation {
+    /// Stable lowercase name used in diagnostics and the fusion report.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Activation::Relu => "relu",
+            Activation::Clip { .. } => "clip",
+            Activation::Sigmoid => "sigmoid",
+            Activation::Tanh => "tanh",
+            Activation::Gelu => "gelu",
+            Activation::Swish => "swish",
+        }
+    }
+
+    /// The graph op this activation stands for.
+    pub const fn op(self) -> OpId {
+        match self {
+            Activation::Relu => OpId::Relu,
+            Activation::Clip { .. } => OpId::Clip,
+            Activation::Sigmoid => OpId::Sigmoid,
+            Activation::Tanh => OpId::Tanh,
+            Activation::Gelu => OpId::Gelu,
+            Activation::Swish => OpId::Sigmoid,
+        }
+    }
+
+    /// The scalar definition, identical to the unfused scalar kernel.
+    ///
+    /// `Swish` is `x * (1 / (1 + exp(-x)))`: the sigmoid is evaluated first and
+    /// multiplied afterwards, which is the order the unfused `Sigmoid` then
+    /// `Mul` chain uses.
+    #[inline]
+    pub fn apply(self, x: f32) -> f32 {
+        match self {
+            Activation::Relu => {
+                if x > 0.0 {
+                    x
+                } else {
+                    0.0
+                }
+            }
+            Activation::Clip { low, high } => x.max(low).min(high),
+            Activation::Sigmoid => 1.0 / (1.0 + (-x).exp()),
+            Activation::Tanh => x.tanh(),
+            Activation::Gelu => gelu_erf_f32(x),
+            Activation::Swish => x * (1.0 / (1.0 + (-x).exp())),
+        }
+    }
+}
+
+impl fmt::Display for Activation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Activation::Clip { low, high } => write!(f, "clip({low},{high})"),
+            other => f.write_str(other.name()),
+        }
+    }
+}
+
+/// A recognised chain of graph ops that one segment executes.
+///
+/// The planner (`runtime::fuse`) rewrites a chain into a *single* segment only
+/// when every intermediate value's declared consumers are inside the chain, so
+/// the chain's inputs are the anchor's inputs plus at most one residual
+/// operand, and its output is the last op's output. The segment then reports
+/// the anchor's engine; a provider that cannot execute the fused form answers
+/// [`Claim::NotMine`] or [`Claim::Declined`] and the scalar fused kernel runs
+/// the same arithmetic in the same order.
+///
+/// # Evaluation order
+///
+/// ```text
+/// sum:        dst = anchor(inputs) ; dst = dst + inputs[sum]
+/// activation: dst = activation(dst)
+/// ```
+///
+/// The order is fixed and matches the graph forms the recogniser accepts:
+/// an activation directly on the anchor (`conv -> relu`), a residual add
+/// directly on the anchor (`add(conv, other)` or `relu(add(conv, other))`),
+/// and the ONNX SiLU form (`mul(conv, sigmoid(conv))`, no sum). A residual add
+/// *after* an activation would need the opposite order, which oneDNN's direct
+/// convolution post-ops cannot express (its `sum` must be the first post-op),
+/// so the recogniser does not fuse it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FusedOp {
+    /// The op that does the arithmetic.
+    pub anchor: OpId,
+    /// The folded activation, applied after the sum.
+    pub activation: Option<Activation>,
+    /// Position in the segment's input list of the residual operand, when the
+    /// chain contains an `Add` on the anchor. The operand has the same shape
+    /// and element type as the result.
+    pub sum: Option<usize>,
+    /// The graph ops this segment replaces, in graph order, anchor first.
+    ///
+    /// A chain of length `n` replaces `n` segments; the planner records the
+    /// difference as the fusion's `removed` count.
+    pub chain: Vec<OpId>,
+}
+
+impl FusedOp {
+    /// The number of graph segments this one replaces (`>= 2`).
+    pub fn replaced(&self) -> usize {
+        self.chain.len()
+    }
+
+    /// The segments a fusion removes: one per folded op after the anchor.
+    pub fn removed(&self) -> usize {
+        self.chain.len().saturating_sub(1)
+    }
+
+    /// `true` when the segment reads a residual operand.
+    pub fn has_sum(&self) -> bool {
+        self.sum.is_some()
+    }
+
+    /// A stable compound name, e.g. `conv+swish` or `conv+sum+relu`.
+    pub fn name(&self) -> String {
+        let mut name = self.anchor.name().to_string();
+        if self.sum.is_some() {
+            name.push_str("+sum");
+        }
+        if let Some(activation) = self.activation {
+            name.push('+');
+            name.push_str(activation.name());
+        }
+        name
+    }
+}
+
+impl fmt::Display for FusedOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.name())
+    }
+}
+
 /// A provider's answer about one candidate segment.
 ///
 /// Implementations must be pure: the same segment asked twice must get the same
@@ -345,6 +513,26 @@ pub trait SegmentProvider: fmt::Debug {
         outputs: &[SegmentOperand],
         params: &OpParams,
     ) -> Claim;
+
+    /// Whether this provider can execute a *fused* segment.
+    ///
+    /// The default body answers [`Claim::NotMine`], which is exactly right for
+    /// a provider that has no fused kernel: the planner still records the
+    /// fusion (the scalar engine implements every fused form) and assigns the
+    /// segment to [`SegmentEngine::Scalar`]. A provider that claims the fused
+    /// form reads `fused.anchor`, `fused.activation` and `fused.sum`; the
+    /// operand shapes are the anchor's operands followed by the residual
+    /// operand, and `outputs` is the segment's single result.
+    fn claim_fused(
+        &self,
+        fused: &FusedOp,
+        inputs: &[SegmentOperand],
+        outputs: &[SegmentOperand],
+        params: &OpParams,
+    ) -> Claim {
+        let _ = (fused, inputs, outputs, params);
+        Claim::NotMine
+    }
 }
 
 /// The provider that claims nothing and leaves every segment scalar.

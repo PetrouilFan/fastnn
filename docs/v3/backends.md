@@ -1,7 +1,8 @@
 # CPU providers: the scalar reference and the optional oneDNN engine
 
-- **Status:** implemented, opt-in (`cpu-onednn`)
-- **Date:** 2026-11-22
+- **Status:** implemented, opt-in (`cpu-onednn`); phase 4a adds fused segments,
+  a channels-last layout policy and a row-wise softmax
+- **Date:** 2026-11-23
 - **Authority:** [ADR-0001](adr-0001-one-runtime.md). The live operator matrix is
   [SUPPORTED.md](../../SUPPORTED.md).
 
@@ -13,11 +14,21 @@ is allowed to decide. It is the reference for the numbers in
 ## 1. Two engines, one plan
 
 A `Plan` is built before a session exists. Each `Segment` carries the engine the
-plan chose:
+plan chose and either one graph op or one recognised chain:
 
 ```text
-Segment { op, engine: Scalar | OneDnn, inputs, outputs, params, loc }
+Segment { op: Op(OpId) | Fused(FusedOp), engine: Scalar | OneDnn,
+          inputs, outputs, params, loc }
 ```
+
+The planner folds chains before it measures or asks anyone (`runtime::fuse`):
+`conv -> relu`, the ONNX SiLU `mul(conv, sigmoid(conv))` and `add(conv, other)`
+become one segment, so the intermediate values take no arena bytes. A fusion
+fires only when it removes at least one segment and every declared consumer of
+each intermediate value is inside the chain. `Plan::fusions` is the report
+(`tests/fn3_cnn_run.rs` pins that the fused scalar plan is **bit-identical** to
+the unfused one). The scalar engine implements every fused form, so a provider
+that cannot run one does not force the planner to re-expand it.
 
 The choice is made once, at plan-build time, by offering every segment to a
 `SegmentProvider` (`backend::SegmentProvider`). The planner contains no feature
@@ -90,6 +101,13 @@ has no bytes then, so such a segment falls back with a reason instead of being
 prepacked as zeros.
 
 Everything falls back to scalar for a reason that is recorded. The common ones:
+
+The engine also claims a **fused** segment whose anchor is a convolution:
+`conv + activation` (`relu`, `clip`, `sigmoid`, `tanh`, `gelu`, `swish`),
+`conv + sum`, or `conv + sum + activation`. A fused segment with a different
+anchor is `NotMine`; a fused convolution outside the shape rules is `Declined`
+with the same reasons as the plain form, plus two of its own (a broadcast
+residual, a constant residual).
 
 | Segment | Reason recorded |
 |---|---|
@@ -199,9 +217,11 @@ block.
   split — and puts the primitive back on its JIT path (~0.17 ms per block in
   the same measurement).
 
-Source and destination stay in plain NCHW (`dnnl_nchw`); only the weight
-descriptor is offered as `dnnl_format_tag_any`, because oneDNN's blocked weight
-layouts are the point of using it.
+Source and destination are plain NCHW (`dnnl_nchw`) under the default layout
+policy, and only the weight descriptor is offered as `dnnl_format_tag_any`,
+because oneDNN's blocked weight layouts are the point of using it. The
+[layout policy](#45-layout-policy-channels-last-on-internal-conv-edges) can keep
+an internal conv-to-conv edge in oneDNN's channels-last layout instead.
 
 `SessionThreads::run_blocks` executes the blocks with the session's own pool
 (`rayon::ThreadPool`, exact count, `fn3-worker-*`). Blocks write disjoint
@@ -216,6 +236,162 @@ default library scratchpad is shared per primitive and, with
 the primitive; a block executes on whichever pool worker Rayon assigns, so the
 engine supplies the scratchpad instead. Distinct blocks use distinct buffers,
 which is the documented condition for concurrent execution.
+
+## 4.5 Layout policy: channels-last on internal conv edges
+
+The plan records a **policy**, [`Plan::layout`], not a descriptor: a concrete
+oneDNN layout is the library's decision, taken at session open, and a build
+without `cpu-onednn` has no library. `PlanOptions::new` uses
+`LayoutStrategy::Chained`; `LayoutStrategy::Plain` is the phase-3 contract and
+is kept for A/B measurement.
+
+**Plain** is the description above: every conv reads and writes `dnnl_nchw`.
+
+**Chained** lets the engine keep an edge whose producer and every consumer are
+oneDNN convolutions in the channels-last layout oneDNN chooses
+(`dnnl_nhwc`, `dnnl_acdb`). The rule is structural and decided in
+`Session::from_plan`, where the whole plan is visible:
+
+- the producer is a oneDNN convolution whose output is not a graph output;
+- every consumer is a oneDNN convolution that reads it as its source;
+- no fused residual on the producer (a `sum` post-op reads the destination
+  buffer back, which must be the NCHW plan slot);
+- the consumer is not grouped (a group's channel slice is strided in a
+  channels-last tensor).
+
+The engine then decides whether the **block split** can produce it. A row range
+of a channels-last tensor `[N, H, W, C]` is one contiguous byte run, so a
+segment whose result stays channels-last splits rows; a channel range is not
+contiguous, so such a segment splits channels and writes the NCHW plan slot. A
+segment whose source is channels-last and whose result is NCHW splits either
+way: its channel blocks or row blocks read the dense channels-last buffer.
+
+### Where the conversions are
+
+A segment **never mixes layout families**. OneDNN's kernels are fast on
+`nchw -> nchw` and on `channels-last -> channels-last`; measured on this host, a
+one-block 64x40x40 3x3 convolution with a channels-last source and an NCHW
+destination took **50 ms** against 0.5 ms for the same convolution with matching
+families — the library leaves its JIT path. So each family boundary carries one
+explicit conversion, run once before the segment's blocks:
+
+| Edge | Conversion | Counted as |
+|---|---|---|
+| plain source → channels-last result (chain head) | NCHW → channels-last of the whole input slot | `Reorder { direction: NchwToBlocked, bytes }` |
+| channels-last source → plain result (chain tail) | channels-last → NCHW of the whole source buffer into the plan slot | `Reorder { direction: BlockedToNchw, bytes }` |
+| channels-last → channels-last (interior) | none | — |
+
+`Plan::reorders` lists them, `Plan::reorder_bytes` sums them, and
+`OneDnnReport` repeats the count and the bytes. On the pinned graph at eight
+workers the chained policy installs 11 channels-last buffers (10.0 MB) and runs
+16 conversions moving 7.6 MB per forward; at four workers it installs 13
+(11.1 MB) and 16 conversions (7.7 MB).
+
+The conversions are engine-owned buffers, not plan slots: the plan's slots are
+the graph's NCHW values and a layout is a provider decision, so the blocked
+bytes have no `SlotId`. This is the one place where the implementation is not
+literally "a `Reorder` segment": the conversion is an explicit reorder primitive
+and a step of the segment that needs it, and it is counted and reported exactly
+as if it were. Making it a plan segment would mean extending the slot table past
+`graph.value_count()` and renumbering the engine's prepared table after
+preparation; the conversion is per-segment in either shape.
+
+**A channels-last destination requires dense row blocks.** The obvious
+alternative — a channel-submemory destination of a channels-last parent — was
+measured at **233 ms** for four 8-channel blocks of a 32x80x80 3x3 convolution,
+against 1.09 ms for the same tensor as one block: the submemory keeps the
+parent's blocked strides and oneDNN falls off its JIT path, exactly as it did
+for NCHW row submemories in phase 3b. Row ranges are dense in channels-last, so
+the row split is what makes the layout usable. A convolution whose row split
+would give fewer blocks than its channel split stays plain (the engine requires
+`row_blocks >= 2` and `row_blocks >= channel_blocks`); at one worker every
+convolution is one block, so the policy is inert there and the plan reports zero
+conversions.
+
+### What it is worth
+
+| Policy | 4 threads | 8 threads | Peak RSS (8) | channels-last segments | conversions |
+|---|--:|--:|--:|--:|--:|
+| `Plain` | 27.96 | 29.65 | 120.6 MiB | 0 | 0 |
+| `Chained` | **26.47** | **28.22** | **104.7 MiB** | 11 | 16 (7.6 MB) |
+
+Best median of three repetitions each, same host and build. The win is 5% at
+both thread counts and 16 MiB of peak RSS: the row blocks of a chained
+convolution read dense channels-last rows instead of copying NCHW rows into
+staging, which is why `staging_bytes` falls from 22.0 MB to 8.3 MB. The kernel
+itself is much faster than 5% — a 3x3 32x80x80 convolution with one block runs in
+0.88 ms in channels-last against 1.58 ms in NCHW (1.8x) — but the pinned export's
+convolution chains are only two or three long, so a conversion at each end eats
+most of it. On a graph with longer conv chains the policy should pay
+substantially more; that is a prediction, not a measurement.
+
+## 4.6 Fusion: what is folded, in which order, and what it saved
+
+The planner folds three graph shapes into one segment:
+
+| Graph | Segment | Folded ops |
+|---|---|---|
+| `act(conv(x))` | `conv` + activation | one of `Relu`, `Clip`, `Sigmoid`, `Tanh`, `Gelu` |
+| `mul(conv(x), sigmoid(conv(x)))` | `conv` + swish | `Sigmoid`, `Mul` |
+| `add(conv(x), other)` / `act(add(conv(x), other))` | `conv` + sum ( + activation) | `Add` ( + the activation) |
+
+with `other` the same shape and element type as the result. The SiLU row is the
+ONNX form every export writes for YOLOv8's activation; it is one graph shape, so
+the recogniser matches the two-consumer pattern rather than hoping for a
+`Swish` node.
+
+**Order is fixed: sum, then activation.** oneDNN's direct convolution requires
+its `sum` post-op to be the first post-op, and the sum post-op reads the
+destination buffer back rather than taking a separate argument. The planner
+therefore accepts `add(conv, other)` and `act(add(conv, other))`, and does
+**not** accept `add(act(conv), other)` — which is what the pinned YOLOv8n export
+writes for all six residual adds, because the residual is added after the SiLU.
+Those six adds stay scalar segments. That is a graph-shape limitation, not a
+missing implementation: the oneDNN sum post-op is implemented, claimed and
+tested (`a_fused_sum_and_activation_matches_the_three_step_chain` in the engine,
+`a_residual_add_on_the_convolution_fuses_as_a_sum` in the planner), it just does
+not match the pinned file. On this graph the sum pattern therefore fires **zero**
+times and the fusion report says so.
+
+**The activation is evaluated by the engine, not by a oneDNN eltwise post-op.**
+Measured on this host (oneDNN 3.14.1, AVX2, a 32x80x80 3x3 convolution with
+204 800 outputs, one block):
+
+| Epilogue | Cost per element |
+|---|--:|
+| oneDNN `relu` post-op | 1.3 ns |
+| oneDNN `clip` post-op | 6 ns |
+| oneDNN `logistic` post-op | 9 ns |
+| oneDNN `swish` post-op | 9.8 ns |
+| this engine's scalar loop, same buffer | 0.4–2.7 ns |
+
+The post-ops run on a reference path on this build, and `swish` as a post-op
+made a forward **3.4x slower at one thread** than the two scalar segments it
+replaced (68.8 ms against 44.2 ms). The engine therefore applies
+`Activation::apply` over each block's own destination — the same expression the
+scalar kernel uses, so the fused result is bit-identical to the unfused chain —
+and keeps `dnnl_post_ops_append_eltwise` behind
+`onednn::EPILOGUE_POST_OP = false` so the comparison is reproducible elsewhere.
+The `sum` post-op is kept as a post-op.
+
+**What fusion bought on the pinned graph** (8-thread oneDNN, same build,
+`FN3_CNN_FUSE=0` for the unfused column):
+
+| | Unfused | Fused |
+|---|--:|--:|
+| Segments | 240 | 126 |
+| Fusions | 0 | 57 (`conv+swish`), 114 segments removed |
+| Arena | 6 144 000 B | 2 867 200 B |
+| `Conv` | 20.4 ms | 23.5 ms |
+| `Sigmoid` | 7.9 ms | 0.3 ms |
+| `Mul` | 1.7 ms | 0.0 ms |
+| Forward | 35.0 ms | 28.9 ms |
+
+At one thread the same comparison is 44.5 → 41.1 ms: the in-place swish over a
+block's hot destination costs about 0.55x what the two separate segments cost
+(`1/(1+exp(-x))` is the same `expf`, but the intermediate slot and its two extra
+memory passes are gone). The memory win is unambiguous: the arena falls by
+3.3 MB (53%).
 
 ## 5. What is prepacked, and when
 
@@ -237,16 +413,20 @@ indexed by plan position: a deterministic cache with no hash iteration order.
 `Session::one_dnn_report()` reports the prepared segment counts, the split
 dimensions, the total prepacked bytes, the row-staging bytes and how many weight
 blocks needed a real reorder (the rest were already in oneDNN's chosen plain
-layout and were only copied). On the pinned YOLOv8n graph oneDNN chose the plain
-layout for every weight buffer, so the report says `0 reordered` and the 12.6 MB
-of prepacked weights are aligned copies; a graph whose block shape oneDNN wants
-blocked (another ISA, another algorithm) reorders once at open instead, and the
-report counts it. The row blocks of one convolution compare the weight
+layout and were only copied). On the pinned YOLOv8n graph under the plain
+layout policy oneDNN chose the plain layout for every weight buffer, so the
+report says `0 reordered`; under the chained policy the channels-last
+source/destination pair makes it want a blocked weight layout for 13 blocks, so
+the session-open reorder runs 13 times and the report counts it. Either way the
+12.6 MB of prepacked weights are reordered once, at open, and never per
+forward. The row blocks of one convolution compare the weight
 descriptor oneDNN chose and share one prepacked buffer when it matches, which is
 the case for every row-split convolution on this graph; the channel blocks keep
-their own (their weights are disjoint slices). The dense row staging is 22.0 MB
-on this graph and is reported separately (`staging_bytes`): it is the price of
-keeping oneDNN's dense `nchw` descriptors for the row split.
+their own (their weights are disjoint slices). Dense row staging is reported
+separately (`staging_bytes`): it is the price of keeping dense `nchw`
+descriptors for a row split, and it falls from 22.0 MB under the plain layout
+policy to 8.3 MB under the chained one, because the chained row blocks read
+dense channels-last rows instead of staging them.
 
 ## 6. Buffers, lifetimes and errors
 
@@ -284,7 +464,6 @@ pair per segment to `Session`, and is compiled out of a normal build. The table
 is the median of three groups of three forwards per op, so one scheduling
 hiccup cannot move it.
 
-<!-- MEASUREMENTS -->
 ### Machine and method
 
 | | |
@@ -300,149 +479,147 @@ hiccup cannot move it.
 The host is a shared desktop, not a quiet benchmark machine: three repetitions
 of each configuration were taken and the table reports the **lowest median of
 the three** (with that run's p95 and `VmHWM`), because scheduling interference
-only ever makes a forward slower. A repeat during a busier period gave, for
-example, 967 ms/431 ms for the scalar 4/8-thread configurations in phase 3a, so
-compare numbers within one table rather than across sessions.
+only ever makes a forward slower. Compare numbers within one table rather than
+across sessions.
 
 ### Result
 
-Phase 3b, three repetitions per configuration:
+Phase 4a, fused plans, `LayoutStrategy::Chained`, three repetitions per
+configuration:
 
 | Engine | Threads | Median ms | p95 ms | Peak RSS MiB |
 |---|--:|--:|--:|--:|
-| scalar | 1 | 1289.65 | 1337.99 | 44.5 |
-| scalar | 4 | 483.66 | 512.88 | 44.3 |
-| scalar | 8 | 340.11 | 356.99 | 44.7 |
-| oneDNN | 1 | 46.96 | 49.47 | 79.5 |
-| oneDNN | 4 | 45.54 | 48.63 | 116.4 |
-| oneDNN | 8 | 42.90 | 46.15 | 123.7 |
-| ORT | 1 | 23.18 | 25.50 | 136.9 |
-| ORT | 4 | 10.19 | 11.30 | 134.1 |
-| ORT | 8 | 8.74 | 10.01 | 966.4 |
+| scalar | 1 | 1229.96 | 1327.19 | 37.2 |
+| scalar | 4 | 365.44 | 373.29 | 37.3 |
+| scalar | 8 | 237.47 | 245.59 | 37.6 |
+| oneDNN | 1 | 40.79 | 41.62 | 75.9 |
+| oneDNN | 4 | **26.47** | 30.40 | 98.7 |
+| oneDNN | 8 | 28.22 | 29.36 | 104.7 |
+| ORT | 1 | 22.90 | 23.30 | 135.6 |
+| ORT | 4 | 7.10 | 7.24 | 132.5 |
+| ORT | 8 | 6.63 | 7.21 | 793.0 |
 
-Against phase 3a on the same machine (re-measured from `b94922a` before the
-changes: scalar 1356.51 / 509.70 / 363.98 ms, oneDNN 76.91 / 74.23 / 72.28 ms):
+Against phase 3b on the same machine (`b94922a`: scalar 1289.65 / 483.66 /
+340.11 ms, oneDNN 46.96 / 45.54 / 42.90 ms, ORT 23.18 / 10.19 / 8.74 ms):
 
-| Configuration | Phase 3a median ms | Phase 3b median ms | Change |
+| Configuration | Phase 3b | Phase 4a | Change |
 |---|--:|--:|--:|
-| scalar, 1 | 1356.51 | 1289.65 | −4.9% |
-| scalar, 4 | 509.70 | 483.66 | −5.1% |
-| scalar, 8 | 363.98 | 340.11 | −6.6% |
-| oneDNN, 1 | 76.91 | 46.96 | **−38.9%** |
-| oneDNN, 4 | 74.23 | 45.54 | **−38.6%** |
-| oneDNN, 8 | 72.28 | 42.90 | **−40.6%** |
+| scalar, 1 | 1289.65 | 1229.96 | −4.6% |
+| scalar, 4 | 483.66 | 365.44 | −24.4% |
+| scalar, 8 | 340.11 | 237.47 | **−30.2%** |
+| oneDNN, 1 | 46.96 | 40.79 | −13.1% |
+| oneDNN, 4 | 45.54 | 26.47 | **−41.9%** |
+| oneDNN, 8 | 42.90 | 28.22 | **−34.2%** |
 
-The scalar path's arithmetic is untouched, so its change is exactly the two
-data-movement kernels it shares with every engine: `Split` and `Transpose` are
-now memcpy-shaped, and the 8-thread scalar session gains 24 ms from that. The
-`tests/fn3_cnn_run.rs` bitwise gate still passes for `Fixed(1)`, `Fixed(4)` and
-`Fixed(8)`.
+The scalar path gains from the row-wise softmax and from fusion (fewer
+segments, fewer arena bytes); its arithmetic and its bit pattern are unchanged,
+which `tests/fn3_cnn_run.rs` asserts against the ORT dump and across 1/4/8
+workers.
 
-The oneDNN engine is now **27.5× faster than the scalar reference at one
-thread** (1290 → 47 ms) and **7.9× at eight** (340 → 42.9 ms). It still does not
-reach the ≤2×-ORT goal: at 8 threads it is **4.9× ORT** (42.9 vs 8.74 ms), at 4
-threads 4.5×, at 1 thread 2.0×. That is a negative result for the goal and is
-not restated as a win.
+The oneDNN engine is now **30.2x faster than the scalar reference at one
+thread** (1229.96 / 40.79), 13.8x at four and **8.4x at eight**. Against ONNX
+Runtime it is **4.3x at eight threads** (28.22 vs 6.63), 3.7x at four
+(26.47 vs 7.10) and 1.8x at one (40.79 vs 22.90). It still does not reach the
+≤2×-ORT goal at 4/8 threads; that is a negative result for the goal and is not
+restated as a win. Note that eight workers is **slower than four** in every
+configuration on this host (28.22 vs 26.47). The per-op table shows the
+difference is not in any one segment: with 8 blocks per row-split convolution the
+halo traffic and the per-block fixed costs grow, and the desktop's load makes the
+last two workers expensive. Four workers is the better configuration here; eight
+is what the historical tables use, so both are reported.
 
 ### Where the time goes, before and after
 
-Both tables are the 8-thread oneDNN session on the same host. "Before" is
-`b94922a` with the `segment-timing` build; "after" is this tree.
+Both columns are the 8-thread oneDNN session on the same host with the final
+build; "unfused" is `FN3_CNN_FUSE=0`, which keeps the layout policy but has no
+chain to keep channels-last.
 
-| Part | Before ms | After ms | Engine |
+| Part | Unfused ms | Fused ms | Engine |
 |---|--:|--:|---|
-| `Conv` (64 segments) | 24.9 | 22.7 | oneDNN |
-| `Split` (8) | 21.3 | 0.23 | scalar |
-| `Transpose` (2) | 8.7 | 0.25 | scalar |
-| `Sigmoid` (58) | 8.4 | 8.9 | scalar |
-| `Softmax` (1) | 3.7 | 3.8 | scalar |
-| `MaxPool` (3) | 2.5 | 2.7 | oneDNN |
-| `Mul` (60) | 1.8 | 2.0 | scalar |
-| `Concat`, `Resize`, `Slice`, `Add`, … | 1.0 | 1.3 | scalar |
-| total (segment sum) | 72.8 | 42.4 | |
+| `Conv` (64 segments, 57 with the swish epilogue) | 20.4 | 23.5 | oneDNN |
+| `Sigmoid` (58 → 1) | 7.9 | 0.3 | scalar |
+| `Mul` (60 → 3) | 1.7 | 0.0 | scalar |
+| `MaxPool` (3) | 2.4 | 2.4 | oneDNN |
+| `Softmax` (1) | 0.47 | 0.47 | scalar |
+| `Concat` (17) | 0.57 | 0.67 | scalar |
+| `Resize`, `Slice`, `Split`, `Add`, `Transpose`, `Reshape`, … | 1.4 | 1.4 | scalar |
+| total (segment sum) | 34.9 | 28.9 | |
 
-The "after" column is the median of three timing runs (each already a median
-of three groups of three forwards); the per-op numbers move by ±10% with the
-desktop's load, the two data-movement rows by much less.
+The 8-thread per-op table, final build (median of three groups of three
+forwards, per-op totals in ms):
 
-Three changes and one negative result produced that:
+| Op | calls | 1 thread | 8 threads | share (8) |
+|---|--:|--:|--:|--:|
+| `Conv` | 64 | 35.77 | 23.52 | 81.4% |
+| `MaxPool` | 3 | 2.24 | 2.42 | 8.4% |
+| `Concat` | 17 | 0.21 | 0.67 | 2.3% |
+| `Softmax` | 1 | 0.44 | 0.47 | 1.6% |
+| `Resize` | 2 | 1.47 | 0.34 | 1.2% |
+| `Sigmoid` | 1 | 0.42 | 0.32 | 1.1% |
+| `Slice` | 2 | 0.22 | 0.26 | 0.9% |
+| `Split` | 8 | 0.06 | 0.25 | 0.9% |
+| `Reshape` | 8 | 0.04 | 0.21 | 0.7% |
+| `Add` | 9 | 0.04 | 0.19 | 0.7% |
+| `Transpose` | 2 | 0.15 | 0.18 | 0.6% |
+| `Mul` | 3 | 0.00 | 0.03 | 0.1% |
+| `Sub`, `Div`, `Gather`, `Shape` | 6 | 0.01 | 0.06 | 0.2% |
+| total | 126 | 41.06 | 28.90 | |
 
-1. **`Split`** was one `decompose` + `checked_index` + `copy_element` per
-   element, with an integer division per axis in the index walk. It is now one
-   `copy_from_slice` per `(output, outer block)`, with the run length and source
-   stride computed once; for YOLOv8n's eight channel splits that is one memcpy
-   per output. 21.3 → 0.23 ms. The element path remains for a strided view and is
-   covered by a unit test against the old semantics on axes 0/1/last, uneven
-   sizes, a zero-size output and an equal split.
-2. **`Transpose`** was the same per-element pattern. The two transposes in the
-   graph are `[0, 3, 1, 2]` (`[1,4,16,2100] -> [1,2100,4,16]`) and `[0, 3, 2, 1]`
-   (`[1,2100,4,16] -> [1,16,4,2100]`), plus the `[0,2,3,1]`/`[0,2,1,3]` shapes the
-   contract names. They now take a 32×32-tile transpose of contiguous cells
-   (`copy_from_slice` on the innermost run); anything else keeps the element
-   loop. 8.7 → 0.25 ms. This is **not** the list of permutations the phase-3b
-   brief gave: the pinned file's second transpose is `[0,3,2,1]`, not
-   `[0,2,1,3]`, so both were implemented and tested.
-3. **`Conv`** now chooses between output channels and output rows. On this
-   graph 20 of 64 convolutions choose rows at 8 workers (102 row blocks, 44
-   channel-split segments and 76 channel blocks). The row shapes are the first
-   layers and the small-plane detection-head layers: `3→16` at 320×320,
-   `16→32` at 160×160, `32→32` and `1×1` layers at 80×80, `32→32`/`64→64` 3×3
-   at 40×40. Their channel split cannot fill eight workers because the 16-Ki
-   payload floor limits the block count (`Oc / ceil(16384 / (N·Oc·W))`), while
-   the row split gets 5–8 blocks and reads 40–327 input rows instead of
-   `blocks × H_in` (for the first layer: 327 rows versus 2 × 320, and 8 blocks
-   instead of 2). Depthwise and grouped convolutions stay on channels: their
-   channel blocks already read only their own channels, so a halo would add
-   traffic. The dense staging buffers cost 22.0 MB (reported as
-   `staging_bytes`) and raise peak RSS from 96 to 124 MiB; the row blocks of one
-   convolution share one prepacked weight buffer. Measured, the row split moves
-   the convolution total from 24.9 to 22.7 ms — real but far less than the
-   traffic arithmetic suggests, because the remaining 44 segments are already
-   closer to their FLOP bound than to their bandwidth bound, and the split adds
-   one staging copy per block.
-4. **`Sigmoid` was left alone.** A flat-chunk variant was implemented and
-   measured: at 8 workers, 6 400-element chunks ran a `[1,32,80,80]` sigmoid in
-   359–463 µs against 137–169 µs for the existing per-row split, and smaller
-   chunks only approached the row result. The chunking was reverted; the scalar
-   expression and its bit pattern are unchanged, and a new unit test asserts
-   bitwise equality between the serial and pooled sigmoid. 8 ms for ~12 M
-   evaluations is ~1.5 G exp/s and already libm/bandwidth bound, so there is no
-   honest win here without fusion or changing the accuracy contract.
+Four changes and three negative results produced that:
 
-### Remaining gap to ORT, segment by segment
+1. **Fusion (4.6).** 57 `conv+swish` segments replace 171 graph segments; the
+   plan falls from 240 to 126 segments and the arena from 6 144 000 to
+   2 867 200 bytes. `Sigmoid` 7.9 → 0.3 ms and `Mul` 1.7 → 0.0 ms at eight
+   threads; `Conv` grows by the in-place epilogue (20.4 → 23.5 ms). Net 35.0 →
+   28.9 ms. The residual-add pattern fires zero times on this graph because the
+   export adds *after* the SiLU, and oneDNN's post-op order is sum-then-eltwise.
+2. **Channels-last layout policy (4.5).** 11 internal edges stay channels-last
+   and 16 conversions move 7.6 MB per forward. 29.65 → 28.22 ms at eight
+   threads, 27.96 → 26.47 at four, and peak RSS 120.6 → 104.7 MiB because the
+   row staging falls from 22.0 to 8.3 MB. The convolution kernel itself is 1.8x
+   faster (0.88 vs 1.58 ms for a 32x80x80 3x3 one-block convolution); the
+   graph's two-to-three-convolution chains mean the conversions consume most of
+   that.
+3. **Softmax** was the one genuinely pathological kernel: 3.6 ms for 134 400
+   elements in 8 400 rows of 16, because it walked a `Locator::index` (a checked
+   multiply-add per axis) for every element in three passes. The contiguous
+   last-axis path is three slice walks per row, no allocation (the exponent pass
+   writes the destination and the divide pass scales it in place), and the same
+   arithmetic order, so it is bit-identical: a new unit test pins 2x4x512 values
+   against the documented loop. 3.56 → 0.44 ms at one thread, 0.47 at eight.
+4. **Parallel pointwise.** `for_each_row` now splits into whole rows whenever the
+   output has at least 8 Ki elements and at least 1 024 elements per worker,
+   instead of a flat 64 KiB (16 Ki elements). The split unit is one row, so the
+   arithmetic order cannot change. This is **not measurable on the pinned
+   graph**: after fusion the pointwise segments it targeted are gone (the
+   surviving `Sigmoid` is 168 000 elements, above both floors), so the change is
+   documented as a rule rather than claimed as a win.
 
-At 8 threads the forward is 42.9 ms against ORT's 8.74 ms (4.9×):
+### Negative results, recorded
 
-| Segment | Ours ms | What ORT does | Why we are behind |
-|---|--:|---|---|
-| `Conv` | 22.7 | a fused conv+SiLU kernel per layer; total ≤ 8.7 | one segment per layer, one primitive per block; 44 segments still channel-split because a row split would give fewer blocks. Even a free conv would not close the gap alone. |
-| `Sigmoid` | 8.9 | fused into the convolution | 58 separate scalar segments, each with a pool entry; ~12 M `expf` calls. Removing them needs oneDNN post-ops (fusion), not a faster `expf`. |
-| `Softmax` | 3.8 | one vectorised 16-wide row pass | the legacy kernel does a `Locator::index` (a checked multiply-add per axis) for every element in three passes; 33.6 Ki elements at ~107 ns each. A contiguous last-axis fast path is the obvious next fix but is outside phase 3b. |
-| `MaxPool` | 2.7 | fused/near-free | three oneDNN pool segments, channel-split; the win is in fusion, not block shape. |
-| `Mul`/`Add`/`Concat` | 2.9 | fused or a vectorised pointwise pass | 60 `Mul` (the SiLU multiply), 9 `Add`, 17 `Concat` run as legacy segments, one at a time, with a one-thread budget inside the session pool. |
-| `Split`/`Transpose`/`Resize`/`Slice`/`Reshape` | 1.1 | near-free | now memcpy-shaped; this is the part phase 3b fixed. |
-
-The scalar glue outside `Conv` is 19.7 ms, 2.3× ORT's **whole** forward. The
-honest conclusion is that phase 3b closed the data-movement hole (73 → 43 ms)
-but the ≤2×-ORT goal needs activation fusion and parallel pointwise kernels
-(phase 4), not more block-split tuning. ONNX Runtime's 966 MiB peak at 8
-threads is its arena; our 124 MiB is 12.6 MB of prepacked weights plus 22.0 MB
-of row staging plus the 6.1 MB arena.
+| Attempt | Result |
+|---|---|
+| oneDNN eltwise post-op for the fused activation | 3.4x slower at one thread than the two scalar segments (68.8 vs 44.2 ms forward); kept behind `EPILOGUE_POST_OP = false` |
+| activation after the residual as one oneDNN primitive | not expressible: `sum` must be the first post-op, and it reads the destination; the six YOLOv8n residual adds stay scalar |
+| channels-last destination + channel split (dst submemory of a blocked parent) | 233 ms per 32x80x80 3x3 convolution against 1.09 ms; blocked destinations require row splits |
+| mixing families inside one segment (channels-last src, NCHW dst) | 50 ms for a one-block 64x40x40 3x3 convolution against 0.5 ms; every family boundary gets an explicit conversion |
+| channels-last at one worker | inert: one block per segment cannot row-split, so the policy installs zero buffers and the plan reports zero conversions |
 
 ### Correctness of these numbers
 
-Measured by `tests/fn3_onednn.rs` on the same machine after the phase-3b
+Measured by `tests/fn3_onednn.rs` on the same machine after the phase-4a
 changes:
 
 | Comparison | Gate | Measured |
 |---|---|---|
+| fused vs unfused oneDNN plan | `|d| <= 1e-4 + 1e-4|ref|` | max_abs 3.8e-4, max_rel 6.7e-6 |
+| channels-last vs plain layout | same gate | max_abs 3.8e-4, max_rel 6.7e-6 |
 | oneDNN vs scalar, same plan | `|d| <= 1e-4 + 1e-4|ref|` | max_abs 4.4e-4, max_rel 7.6e-6 |
 | oneDNN vs ONNX Runtime | `|d| <= 2e-4 + 1e-3|ref|`, rel `<= 1e-3` | passes (max_abs 4.7e-4, max_rel 1.4e-4) |
-| oneDNN `Fixed(4)` vs `Fixed(1)` | same 1e-4/1e-4 gate | **not bitwise**; max_abs 2.3e-4, max_rel 5.1e-6 |
-| oneDNN `Fixed(8)` vs `Fixed(1)` | same 1e-4/1e-4 gate | **not bitwise**; max_abs 2.3e-4, max_rel 5.1e-6 |
+| oneDNN `Fixed(4/8)` vs `Fixed(1)` | same 1e-4/1e-4 gate | **not bitwise**; max_abs 2.3e-4, max_rel 5.1e-6 |
+| scalar fused vs scalar unfused | bitwise | **bitwise identical**, 176 400 elements |
 | scalar `Fixed(1/4/8)` | bitwise | bitwise identical |
-| scalar vs ONNX Runtime | phase-2 gate | max_abs 2.7e-4, max_rel 1.4e-4 |
-| plan report | | 240 segments: 67 oneDNN (64 conv: 20 row-split, 44 channel-split; 3 pool), 173 scalar, **0 fallbacks** |
+| plan report | | 126 segments: 67 oneDNN (64 conv: 20 row-split, 44 channel-split; 3 pool), 59 scalar, 0 fallbacks, 57 fusions (114 segments removed) |
 
 The oneDNN outputs are **not bitwise identical across thread counts**: the
 worker count changes the block count and the split dimension, a different block
@@ -450,7 +627,8 @@ shape can select a different oneDNN kernel, and its accumulation order is then
 different. The test asserts the numerical bound above and prints `bitwise false`
 rather than claiming a bitwise result it did not observe. The scalar path is
 bitwise identical across thread counts because its kernels do not reorder a
-reduction.
+reduction, and the scalar fused path is bitwise identical to the unfused one
+because it evaluates the same expressions in the same order.
 
 ## 8. Known limits
 
@@ -460,12 +638,18 @@ reduction.
 - Pooling with `ceil_mode` or dilation falls back (the ONNX ceil rule allows
   windows past the padded region, which oneDNN pooling does not express).
 - Weights and biases must be read-only model data (prepacked at open).
-- A row-split convolution stages its input and output rows in dense
-  engine-owned buffers, because a row submemory's strides take oneDNN off its
-  JIT path (measured 20–600× slower). The staging is 22.0 MB on YOLOv8n and is
-  part of the 124 MiB peak at 8 threads.
-- No activation fusion yet: `Sigmoid`, `Clip`, `Add`/`Mul` run as separate
-  scalar segments. The FFI has the post-ops surface; the planner does not fuse
-  in phase 3b.
+- A row-split convolution whose result is plain NCHW stages its input and
+  output rows in dense engine-owned buffers, because a row submemory's strides
+  take oneDNN off its JIT path (measured 20–600× slower). Under the chained
+  layout policy the input side of such a segment usually reads dense
+  channels-last rows instead, which is why the staging falls from 22.0 MB to
+  8.3 MB on YOLOv8n.
+- A channels-last edge must be produced by dense row blocks, so a convolution
+  whose row split would give fewer blocks than its channel split stays plain.
+  At one worker that is every convolution.
+- Fusion covers an activation on a convolution, the ONNX SiLU form and a
+  residual add that precedes (optionally) an activation. A residual add after an
+  activation, a `Clip` with only one bound, and a broadcast residual are left as
+  separate segments.
 - The engine is a per-session object; there is no global primitive cache and no
   process-wide oneDNN setting is touched.

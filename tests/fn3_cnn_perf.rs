@@ -37,7 +37,9 @@ use std::time::Instant;
 use fastnn::inference::import::{import_onnx_graph, ImportedGraph};
 #[cfg(feature = "segment-timing")]
 use fastnn::inference::ops::OpId;
-use fastnn::inference::runtime::{physical_core_count, EngineChoice, Session, Threading};
+use fastnn::inference::runtime::{
+    physical_core_count, EngineChoice, PlanOptions, Session, Threading,
+};
 
 const YOLOV8N: &str = "/home/petrouil/.hermes/yolov8n.onnx";
 
@@ -92,6 +94,21 @@ fn percentile(sorted: &[f64], fraction: f64) -> f64 {
     sorted[index]
 }
 
+/// Whether the plan this process builds folds recognised chains.
+///
+/// `FN3_CNN_FUSE=0` builds the unfused oracle (one segment per graph node) with
+/// the same engine and thread count, which is how the phase-4a report measures
+/// what fusion is worth. Default: fused.
+fn fuse_enabled() -> bool {
+    std::env::var("FN3_CNN_FUSE")
+        .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
+}
+
+fn options() -> PlanOptions {
+    PlanOptions::new().with_fuse(fuse_enabled())
+}
+
 fn measure(
     engine: &str,
     workers: usize,
@@ -125,7 +142,8 @@ fn measure(
     let min = samples[0];
     let max = samples[samples.len() - 1];
     println!(
-        "[fn3perf] engine {engine}, threads {workers}, machine \"{}\"",
+        "[fn3perf] engine {engine}, threads {workers}, fuse {}, machine \"{}\"",
+        fuse_enabled(),
         machine()
     );
     if let Some(report) = report {
@@ -168,8 +186,13 @@ fn print_segment_timings(
     } else {
         EngineChoice::Auto
     };
-    let mut session = Session::new_with(Arc::clone(imported), Threading::Fixed(workers), choice)
-        .expect("open the timing session");
+    let mut session = Session::new_with_options(
+        Arc::clone(imported),
+        Threading::Fixed(workers),
+        choice,
+        options(),
+    )
+    .expect("open the timing session");
     for _ in 0..WARMUP {
         session
             .run(&[("images", input)])
@@ -296,10 +319,11 @@ fn cnn_forward_latency() {
     };
     match engine.as_str() {
         "scalar" => {
-            let session = Session::new_with(
+            let session = Session::new_with_options(
                 Arc::clone(&imported),
                 Threading::Fixed(workers),
                 EngineChoice::Scalar,
+                options(),
             )
             .expect("open the scalar session");
             measure("scalar", workers, workers, session, &input, None);
@@ -309,17 +333,19 @@ fn cnn_forward_latency() {
         "onednn" => {
             #[cfg(feature = "cpu-onednn")]
             {
-                let session = Session::new_with(
+                let session = Session::new_with_options(
                     Arc::clone(&imported),
                     Threading::Fixed(workers),
                     EngineChoice::Auto,
+                    options(),
                 )
                 .expect("open the oneDNN session");
                 let report = session.one_dnn_report().map(|report| {
                     format!(
                         "oneDNN {} ({} runtime), {} segments ({} conv: {} row-split, {} \
-                         channel-split; {} pool, {} matmul), {} prepacked bytes, {} staging \
-                         bytes, {} reordered weight blocks, parallel blocks {}",
+                         channel-split; {} pool, {} matmul), {} fused, {} channels-last ({} \
+                         bytes), {} reorders ({} bytes), {} prepacked bytes, {} staging bytes, \
+                         {} reordered weight blocks, parallel blocks {}",
                         report.version,
                         report.cpu_runtime,
                         report.segments,
@@ -328,6 +354,11 @@ fn cnn_forward_latency() {
                         report.conv_channel_segments,
                         report.pool_segments,
                         report.matmul_segments,
+                        report.fused_segments,
+                        report.blocked_segments,
+                        report.layout_bytes,
+                        report.reorders,
+                        report.reorder_bytes,
                         report.prepacked_bytes,
                         report.staging_bytes,
                         report.reordered_blocks,
