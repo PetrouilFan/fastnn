@@ -36,7 +36,7 @@ authority is `docs/archive/roadmap/fn3-architecture.md`.
 - `model/plan.rs`: bounded `Plan`, slot table, folds, `PlanId` and cache.
 - `runtime/`: the v3 segment executor. `plan.rs` builds one slot per value
   (weights are read-only `SlotSource::Weight` slots backed by the importer's
-  bytes, never copied), a liveness-based offset table, and one `Segment` per
+  bytes or by an artifact mapping, never copied), a liveness-based offset table, and one `Segment` per
   node or per chain: `fuse.rs` folds `conv+activation`, the ONNX SiLU and
   `add(conv, other)` (with an optional activation after the sum) into
   `SegmentOp::Fused`, only when the chain removes at least one segment and every
@@ -57,7 +57,11 @@ authority is `docs/archive/roadmap/fn3-architecture.md`.
   to an unfused one).
 - `model/specialize.rs`: shape resolution, constant folding, typed `OpParams`
   and the `Planner`.
-- `model/format/`: the versioned prepared-model artifact.
+- `model/format/`: the versioned prepared-model artifact, format version 2
+  (`FNN3ART2`). `artifact.rs` owns the fixed header, directory, hashes and the
+  mmap reader; `graph.rs` owns the typed-IR codec and the full `OpParams`;
+  `plan.rs` owns one stored plan per target; `weights.rs` owns the contiguous
+  64-byte-aligned payload. There is no version-1 reader.
 - `python/`: the PyO3 binding, by path from `src/python/mod.rs`; `cli/`: the
   `fastnn-infer` implementation; `mod.rs`: facade and re-exports.
 

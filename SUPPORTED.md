@@ -1,13 +1,15 @@
 # Supported surface
 
-This is the evidence matrix for the `v3` branch, as of 2026-11-22. It is a
+This is the evidence matrix for the `v3` branch, as of 2026-11-23. It is a
 snapshot of what is implemented and proven, not a plan for what will be. The
 contract it measures against is [docs/v3/scope.md](docs/v3/scope.md); the
 architecture decision is [docs/v3/adr-0001-one-runtime.md](docs/v3/adr-0001-one-runtime.md).
 
 The headline is deliberately blunt: **the runtime executes the decoder operator
 set and the CNN operator set, and the CNN families stay `planned` until a
-prepared-model artifact round trip exists.** The frontend maps and shapes
+pinned zoo entry (hash and licence) exists.** The version-2 artifact round trip
+now exists: `tests/fn3_artifact_v2.rs` prepares YOLOv8n, loads it with no ONNX
+source, runs it and compares bit for bit with an in-memory session. The frontend maps and shapes
 `Conv`, the pool family, `BatchNormalization`, `Resize`, `Pad`, `Clip`,
 `Sigmoid`, `Max`, `Min` and `TopK` into the typed IR, and the v3 segment runtime
 executes all twelve on scalar NCHW kernels. An optional oneDNN CPU engine
@@ -16,7 +18,7 @@ and 2-D matmul, folds an activation or a residual sum into the producing
 convolution, and keeps internal conv-to-conv edges in a channels-last layout;
 see [docs/v3/backends.md](docs/v3/backends.md). There is no W8A8 execution path.
 In the vocabulary of this file the twelve CNN ops are `runs` on the CPU, while a
-model *family* still needs a pinned zoo entry and an artifact round trip before
+model *family* still needs a committed zoo entry with a hash and licence before
 it may be called `imports` (see §2 of
 [scope.md](docs/v3/scope.md#2-what-supported-means)).
 
@@ -40,11 +42,11 @@ Legend:
 
 | Family | Example | Status | Evidence today | Required for the next status |
 |---|---|---|---|---|
-| GPT-2-style decoder | tiny GPT-2 (28 MB), trained GPT-2 (498 MB) | `runs` | Strict import (257/257 nodes), `.fnn3` prepare/load, CPU prefill and cached decode, KV parity against the pinned fixtures, session-local weight-only INT8; FP32 logits parity gate exists but requires the external trained graph | `gated`: commit the zoo entry and licence, run the accuracy gate in default CI, publish the metric |
+| GPT-2-style decoder | tiny GPT-2 (28 MB), trained GPT-2 (498 MB) | `runs` | Strict import (257/257 nodes), CPU prefill and cached decode through the in-memory decoder profile, KV parity against the pinned fixtures, session-local weight-only INT8; FP32 logits parity gate exists but requires the external trained graph. The v2 artifact path is static-shape only, so the decoder is not yet artifact-first | `gated`: commit the zoo entry and licence, run the accuracy gate in default CI, publish the metric; separately, a v2 plan for a symbolic shape bucket (or an envelope in the artifact) is needed before the decoder is artifact-first |
 | Llama-style decoder | Llama-family export with RoPE and grouped-query attention | `planned` | IR has `Sin`, `Cos`, `Trilu`, `Gather`, `ScatterND` and a GQA-shaped KV interface; no architecture profile and no parity gate | `imports`: architecture profile and a pinned export in the 13–17 opset range; then `runs`: RoPE/KV parity; then `gated`: token and perplexity gate |
-| YOLO11/26 detection | YOLO11n, YOLO26n | `planned` | Ultralytics YOLOv8n ([1,3,320,320] → [1,84,2100]) and YOLOv8s ([1,3,640,640] → [1,84,8400]) import into the typed IR: 262 source nodes, 240 typed nodes (22 `Constant` nodes folded into weights), 398 values, every value fully static, proven by `tests/fn3_cnn_import.rs` when the files are present. No execution kernel, no zoo entry/hash, no artifact round trip, so this is not yet `imports` | `imports`: commit the zoo entry (hash + licence) and round-trip the graph through an artifact; then `runs`: F32 detection parity; then `gated`: COCO 500-image mAP gate (#105) |
-| EfficientViT depth | EfficientViT | `planned` | The CNN ops import (`Conv`, `BatchNormalization`, `Resize`, `Pad`, pooling); no execution kernel | `imports`: a pinned export in the zoo and an artifact round trip; then `runs`: F32 depth parity; then `gated`: abs-rel/RMSE/delta gate |
-| ResNet/MobileNet classification | ResNet50, MobileNetV4 | `planned` | `Conv`, `BatchNormalization`, `MaxPool` and `GlobalAveragePool` import; no execution kernel | `imports`: a pinned export in the zoo and an artifact round trip; then `runs`: F32 top-1 parity; then `gated`: ImageNet-subset top-1/top-5 gate |
+| YOLO11/26 detection | YOLO11n, YOLO26n | `planned` | Ultralytics YOLOv8n ([1,3,320,320] → [1,84,2100]) and YOLOv8s ([1,3,640,640] → [1,84,8400]) import into the typed IR: 262 source nodes, 240 typed nodes (22 `Constant` nodes folded into weights), 398 values, every value fully static, proven by `tests/fn3_cnn_import.rs`. `prepare` writes a version-2 artifact that carries the typed graph, per-target plans and mmap-backed weights; `load` runs it with no ONNX source and `tests/fn3_artifact_v2.rs` compares the artifact output bit for bit with an in-memory session. No zoo entry/hash/licence is committed, so this is not yet `imports` | `imports`: commit the zoo entry (hash + licence); then `runs`: F32 detection parity; then `gated`: COCO 500-image mAP gate (#105) |
+| EfficientViT depth | EfficientViT | `planned` | The CNN ops import (`Conv`, `BatchNormalization`, `Resize`, `Pad`, pooling); no execution kernel | `imports`: a pinned export in the zoo; then `runs`: F32 depth parity; then `gated`: abs-rel/RMSE/delta gate |
+| ResNet/MobileNet classification | ResNet50, MobileNetV4 | `planned` | `Conv`, `BatchNormalization`, `MaxPool` and `GlobalAveragePool` import; no execution kernel | `imports`: a pinned export in the zoo; then `runs`: F32 top-1 parity; then `gated`: ImageNet-subset top-1/top-5 gate |
 | ViT classification | ViT | `planned` | Patch-embed `Conv` imports; an ONNX `LayerNorm` node is still not mapped (the pinned exports decompose it) | `imports`: frontend coverage; then `runs`; then `gated` on ImageNet-subset top-1/top-5 |
 
 No family is `gated` today. The only runnable path is a GPT-2-shaped decoder on
@@ -174,18 +176,14 @@ The rules behind the table:
 
 Capability gaps:
 
-- The CNN operator set executes on the CPU, but no model family is `imports`
-  yet: a family needs a pinned zoo entry and a prepared-model artifact round
-  trip, and the 3.0 artifact does not carry a CNN graph (`OpParams` format
-  version 1 stores only `axes`, `keep_dims` and `epsilon`). See
+- The CNN operator set executes on the CPU and round-trips through the
+  version-2 artifact, but no model family is `imports` yet: a family still
+  needs a committed zoo entry with a hash and licence. See
   [docs/v3/backends.md](docs/v3/backends.md) for the oneDNN engine's subset.
 - `ConvTranspose`, `GatherElements` and `LeakyRelu` remain unmapped.
 - The typed-IR import requires every extent to be provable. A model whose
   intermediate shape depends on a runtime value is rejected by name; the
   decoder-shaped `import_onnx_model` keeps its symbolic-path contract.
-- The 3.0 artifact format version 1 stores only `axes`, `keep_dims` and
-  `epsilon` from `OpParams`. A CNN graph cannot round-trip through it yet; that
-  is phase 2 work, so no CNN row claims `imports`.
 - The decoder profile is GPT-2-shaped only. It requires a learned position
   table and the `past_key_values.{i}` / `present.{i}` interface; Llama-style
   RoPE and other decoder interfaces are not detected.
@@ -213,15 +211,20 @@ Runtime and packaging gaps:
 - Threads are a process-global Rayon pool with a per-call chunk budget (with
   the `parallel` feature), not a session-owned pool. `FASTNN_CPU_THREADS` caps
   the process; the budget can be narrowed per call.
-- The `.fnn3` artifact is decoder-shaped format version 1: graph, geometry,
-  envelope and weights. It has no per-target plans, no quantization metadata and
-  no mmap; weights are read into memory. Two sessions share `Arc` weights in one
-  process, not across processes.
-- Plans are built and cached per session; they are not stored in the artifact.
-- The CLI has `prepare`, `inspect`, `run`, `generate` and `diagnose`. There is no
-  `doctor`, `bench`, `explain` or `convert` yet (#107, #104).
-- The Python API has `prepare`, `inspect`, `load`, `devices`, and session
-  `prefill`/`decode`. There is no `run`, `benchmark` or `explain` facade yet.
+- The `.fnn3` artifact is format version 2 (`FNN3ART2`): typed graph, one full
+  plan per target, one contiguous 64-byte-aligned weight payload mapped
+  read-only, quantization metadata (empty for f32) and a SHA-256 per section.
+  Two sessions and two processes share the same weight pages; see
+  [docs/v3/artifact.md](docs/v3/artifact.md).
+- `load` decodes the plan stored in the artifact; it does not run the planner.
+  A plan's oneDNN layout reorders are recorded when the engine opens, so the
+  artifact carries the policy and the prepare-time list, not a worker-specific
+  descriptor choice.
+- The CLI has `prepare`, `load`, `run`, `inspect` and `doctor`. There is no
+  `bench`, `explain` or `convert` yet.
+- The Python API has `prepare`, `inspect`, `load`, `doctor`, `devices` and
+  `targets`, and `Model.session().run({name: values})`. There is no
+  `benchmark` or `explain` facade yet.
 - Vulkan is decoder-first and partial: `Trilu` and `ScatterND` have no kernel,
   and twelve of its registered ops are partial, not full. CNN Vulkan is later
   than CPU CNN.

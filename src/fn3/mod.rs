@@ -53,10 +53,11 @@
 //! - [`Fn3Error`]: the only error type, with actionable context.
 //! - `tests/fn3_contracts.rs`: pinned behaviour downstream workers rely on.
 
+pub mod api;
 pub mod backend;
 pub mod cli;
 pub mod device;
-pub(crate) mod digest;
+pub mod digest;
 pub mod dtype;
 pub mod error;
 pub mod import;
@@ -69,11 +70,19 @@ pub mod shape;
 pub mod storage;
 pub mod tensor;
 
+pub use api::{
+    doctor, inspect, load, prepare, DoctorIssue, DoctorReport, DtypeUse, DynamicSymbolUse,
+    PrepareReport, TargetPlanReport,
+};
 pub use backend::cpu::CpuBackend;
 pub use backend::{Backend, Capabilities, CapabilityFeatures, OpParams, Support};
 pub use device::{DeviceId, DeviceRequest, DeviceResolveError, PhysicalDeviceId};
 pub use dtype::DType;
 pub use error::{Fn3Error, Fn3Result};
+pub use model::format::{
+    Artifact, ArtifactHeader, ArtifactInspection, PlanSummary, Precision, PreparedArtifact,
+    SectionHash, SectionInfo,
+};
 pub use model::{ExecutionPlan, Instruction, ModelWeights, PreparedModel, Session};
 pub use ops::OpId;
 pub use runtime::{

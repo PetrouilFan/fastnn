@@ -114,7 +114,6 @@ def test_namespace_is_reachable_from_the_package_and_the_extension():
     assert core_fn3.Session is fn3.Session
     assert fn3.Session.__module__ == "fastnn._core.inference"
     assert not hasattr(fastnn._core, "fn3")
-    assert core_fn3.Logits is fn3.Logits
     assert core_fn3.Fn3DeviceError is fn3.Fn3DeviceError
     assert callable(core_fn3.load) and callable(core_fn3.prepare)
     assert fn3.load.__module__ == "fastnn.inference"
@@ -152,7 +151,9 @@ def test_error_hierarchy_is_catchable_at_every_level():
 
 def test_documented_surface_has_docstrings():
     assert "inference" in fn3.__doc__.lower()
-    assert fn3.prepare.__doc__ and "PrepareReport" in fn3.prepare.__doc__
+    # The v3 surface writes one artifact and returns its report; the docstring
+    # must say so rather than describing the retired in-memory prepare.
+    assert fn3.prepare.__doc__ and "artifact" in fn3.prepare.__doc__
     assert fn3.load.__doc__ and "device" in fn3.load.__doc__
 
 
@@ -174,7 +175,7 @@ def test_devices_lists_cpu_first_and_describes_itself():
 
 def test_unknown_device_spelling_is_typed():
     with pytest.raises(fn3.Fn3DeviceError) as info:
-        fn3.load("unused", "unused", device="tpu")
+        fn3.load("unused", device="tpu")
     error = info.value
     assert error.requested == "tpu"
     assert error.available == ["cpu"]
@@ -195,7 +196,7 @@ def test_explicit_vulkan_request_never_falls_back_to_cpu():
         ("vulkan:7", "vulkan(index=7)"),
     ]:
         with pytest.raises(fn3.Fn3DeviceError) as info:
-            fn3.load("unused", "unused", device=request)
+            fn3.load("unused", device=request)
         error = info.value
         assert error.available == ["cpu"]
         # The message names the request the caller made ...
@@ -204,7 +205,7 @@ def test_explicit_vulkan_request_never_falls_back_to_cpu():
         assert "available devices: [cpu]" in str(error)
     # A named adapter request from a Device object is equally explicit.
     with pytest.raises(fn3.Fn3DeviceError):
-        fn3.load("unused", "unused", device="vulkan")
+        fn3.load("unused", device="vulkan")
 
 
 # ---------------------------------------------------------------------------

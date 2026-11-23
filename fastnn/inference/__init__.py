@@ -1,63 +1,27 @@
 """fastnn.inference — the FastNN 3.0 inference API.
 
-This is the surface that survives the 2.x removal (#65). It is a thin Python
-layer over the same Rust engine the CLI and the Rust tests use: one versioned
-artifact, an explicit device, sessions that own their cache, and logits as
-NumPy arrays.
+One prepared artifact is the whole input. ``prepare`` imports ONNX, plans and
+writes one versioned file; ``load`` maps it (no ONNX, no re-planning) and
+``Model.session().run({...})`` executes one forward.
 
 Quick start
 -----------
 
-Prepare once, then load and run::
+::
 
     import fastnn.inference as fn3
 
-    report = fn3.prepare("model.onnx", "model.fnn3")
+    report = fn3.prepare("model.onnx", "model.fnn3", target="all")
     print(report.status, report.size_bytes, report.sha256)
-    # created 27879928 dc03b3c2...     (the artifact's digest, not the ONNX's)
 
-    model = fn3.load("model.fnn3", source="model.onnx", device="cpu")
+    model = fn3.load("model.fnn3")
     session = model.session()
-    logits = session.prefill(prompt_token_ids)
-    print(int(logits.argmax()), session.cache_len)   # 257 13
+    outputs = session.run({"images": [0.0] * (3 * 320 * 320)})
+    print(outputs["output0"].shape, outputs["output0"].to_numpy())
 
-    for token in [640, 11, 612, 373]:
-        logits = session.decode([token])
-        print(int(logits.argmax()), session.cache_len)
-        # 24671 14 / 11 15 / 612 16 / 373 17
-
-`logits.to_numpy()` (or ``numpy.asarray(logits)``) gives a read-only ``float32``
-view over one copy of the session output; the session can be reset or dropped
-afterwards. ``numpy.array(logits)`` copies if you need a writable array.
-
-Opt-in INT8 weights
--------------------
-
-``load(..., weight_int8=True)`` packs eligible static FP32 projection weights as
-INT8 and keeps everything else FP32. The artifact is unchanged, and the default
-``False`` is the existing path::
-
-    model = fn3.load("model.fnn3", device="cpu", weight_int8=True)
-    session = model.session()
-    session.prefill(prompt_token_ids)
-    report = session.weight_int8_report
-    print(report.packed_matmuls, report.fp32_matmuls)
-    print(report.packed_payload, report.packed_source, report.dense_weight)
-    print(report.as_dict())     # the CLI's own field names
-
-``weight_int8_report`` is ``None`` when the option is off, before the first
-completed step and after ``reset()``. Its ``as_dict()`` returns the CLI's own
-labels, with ``matmul-total`` added for the denominator of ``packed-matmuls``.
-On a host-staged Vulkan session the option is refused with
-:class:`Fn3UnsupportedError`; it never falls back to the CPU.
-
-Devices
--------
-
-``fn3.devices()`` lists what this build can actually execute on. Passing
-``device="vulkan"`` on a build without the Vulkan feature, or on a machine
-without a driver, raises :class:`Fn3DeviceError` naming the request, the reason
-and the available devices. It never returns CPU results.
+``inspect`` describes the file without mapping its weight payload; ``doctor``
+diagnoses an ONNX model before preparing it. A failure is a typed exception from
+the hierarchy below, with the core's own message.
 """
 
 from __future__ import annotations
@@ -67,20 +31,21 @@ import os
 from fastnn._core.inference import (
     ArtifactInfo,
     Device,
-    Envelope,
-    Geometry,
-    Logits,
+    DoctorIssue,
+    DoctorReport,
     Metadata,
     Model,
+    PlanInfo,
     PrepareReport,
+    Section,
     Session,
-    SessionStats,
-    WeightInt8Report,
-    WeightInt8Route,
+    Tensor,
     devices as _devices,
+    doctor as _doctor,
     inspect as _inspect,
     load as _load,
     prepare as _prepare,
+    targets as _targets,
 )
 from fastnn._core.inference import (
     Fn3CapacityError,
@@ -114,147 +79,74 @@ def _path(value) -> str:
 
 
 def devices() -> list[Device]:
-    """Devices this build can execute on, in preference order.
-
-    The CPU is always first. A ``vulkan``-feature build appends every adapter
-    the loader enumerates, including software adapters, which
-    :func:`load` refuses unless the backend was configured to allow them.
-    """
+    """Devices this build can execute on, in preference order."""
     return _devices()
+
+
+def targets() -> tuple[str, ...]:
+    """Target profile names ``prepare`` accepts."""
+    return tuple(_targets())
 
 
 def prepare(
     onnx,
     artifact,
     *,
-    max_total: int | None = None,
-    max_seq: int | None = None,
-    max_past: int | None = None,
+    target: str = "cpu",
+    precision: str = "f32",
     overwrite: bool = False,
 ) -> PrepareReport:
-    """Import ``onnx`` and write (or confirm) a versioned artifact at ``artifact``.
+    """Import ``onnx`` and write one versioned artifact at ``artifact``.
 
-    Parameters
-    ----------
-    onnx:
-        Path of the ONNX file (opset 13..=17, decoder architecture).
-    artifact:
-        Destination path.
-    max_total:
-        Largest ``past + seq`` the artifact authorises, i.e. the context window.
-        Defaults to the model's position table, capped at 1024.
-    max_seq:
-        Longest single call (a prefill). Defaults to ``max_total``.
-    max_past:
-        Largest cached prefix. Defaults to ``max_total - 1``.
-    overwrite:
-        Replace a destination that holds a *different* valid artifact.
-
-    Returns
-    -------
-    PrepareReport
-        ``status`` is ``"created"``, ``"replaced"`` or ``"already_valid"``;
-        ``wrote`` is false only for ``"already_valid"``. The report carries the
-        file size, its SHA-256 (comparable with ``sha256sum``), the artifact's
-        own payload CRC-32, the geometry and the declared window.
-
-    Notes
-    -----
-    A destination that already holds exactly these bytes is left alone. A
-    destination that holds a different valid artifact raises
-    :class:`Fn3ModelExistsError` (with ``.differences``) unless ``overwrite`` is
-    true, and a destination that is not a valid artifact raises
-    :class:`Fn3FormatError`. Every successful write is re-read, re-parsed,
-    re-validated and compared with the digest of the bytes that were written.
+    ``target`` is one of :func:`targets` (``"cpu"``, ``"cpu-reference"`` or
+    ``"all"``); ``precision`` is ``"f32"``. A destination that already holds the
+    same bytes is left alone and reported as ``status="already_valid"``. A
+    different destination needs ``overwrite=True``.
     """
     return _prepare(
         _path(onnx),
         _path(artifact),
-        max_total=max_total,
-        max_seq=max_seq,
-        max_past=max_past,
+        target=target,
+        precision=precision,
         overwrite=overwrite,
     )
 
 
 def inspect(artifact) -> ArtifactInfo:
-    """Describe an artifact file without opening a device or a session.
+    """Describe an artifact without mapping its weight payload.
 
-    Reads the whole file, checks its framing, payload CRC and internal
-    consistency, and reports the geometry, window, provenance, table sizes and
-    SHA-256. A file that fails any check raises :class:`Fn3FormatError` (with
-    ``.kind``) or :class:`Fn3ModelFileError`.
+    ``mapped_bytes`` is 0 and ``bytes_read`` is the evidence: the reader reads
+    the header, directory, ``GRAPH``, ``PLANS``, ``QUANT``, ``HASHES`` and the
+    ``WEIGHTS`` table, never the weight payload.
     """
     return _inspect(_path(artifact))
 
 
-def load(
-    artifact,
-    source=None,
-    *,
-    device=None,
-    capacity: int | None = None,
-    weight_int8: bool = False,
-) -> Model:
-    """Load a prepared artifact and bind it to an explicit device.
+def load(artifact, *, target: str | None = None, device=None) -> Model:
+    """Map an artifact and return an immutable :class:`Model`.
 
-    The artifact is the whole input: it carries the graph, the weights, the
-    geometry and the declared window, so one file is enough and no ONNX is read.
-
-    Parameters
-    ----------
-    artifact:
-        Path of a ``.fnn3`` artifact produced by :func:`prepare`.
-    source:
-        Optional path of the ONNX file the artifact was prepared from. When
-        given, the two files are proved to describe the same model before
-        anything executes — provenance, geometry, every value, every operation
-        and every weight byte — and a disagreement raises
-        :class:`Fn3ModelError`. When omitted, the artifact alone is planned and
-        run; nothing about the session comes from an ONNX file in either case.
-    device:
-        ``None``/``"auto"``, ``"cpu"``, ``"vulkan"``, ``"vulkan:<index>"`` or a
-        :class:`Device` from :func:`devices`. An explicit request either resolves
-        to exactly that device or raises :class:`Fn3DeviceError`; there is no
-        fallback.
-    capacity:
-        KV cache capacity in tokens for each session. Defaults to the artifact's
-        declared window (``max_total``).
-    weight_int8:
-        Pack eligible static FP32 projection weights as INT8 and run those
-        ``MatMul`` instructions on the backend's packed kernel. Activations,
-        accumulators, the KV cache and logits stay FP32, and the artifact is
-        unchanged. ``False`` (the default) is the FP32 path, byte for byte.
-
-        After a step, ``session.weight_int8_report`` carries the same coverage,
-        byte and traffic counters the CLI prints with ``--weight-int8 --steps``;
-        it is ``None`` when this option is off. A host-staged Vulkan session
-        (``FN3_VK_STAGED=1``) raises :class:`Fn3UnsupportedError` from
-        ``model.session()`` when this option is on: there is no CPU fallback.
-
-    Returns
-    -------
-    Model
-        Immutable and shareable between threads. ``model.session()`` creates one
-        independent session (its own KV cache, plan cache and counters).
+    No ONNX file is read and the plan stored in the artifact is decoded, not
+    rebuilt. ``target`` selects one of the stored plans; ``None`` uses the
+    artifact's default. ``device`` accepts ``None``/``"cpu"``; the typed-graph
+    runtime is CPU-only and refuses another device instead of falling back.
     """
-    if not isinstance(weight_int8, bool):
-        raise TypeError(
-            f"weight_int8 must be a bool, found {type(weight_int8).__name__}"
-        )
-    return _load(
-        _path(artifact),
-        source=None if source is None else _path(source),
-        device=device,
-        capacity=capacity,
-        weight_int8=weight_int8,
-    )
+    return _load(_path(artifact), target=target, device=device)
+
+
+def doctor(onnx) -> DoctorReport:
+    """Diagnose an ONNX model before preparing it.
+
+    Reports unsupported operators, dynamic-shape symbols, dtype problems and
+    the expected resident memory, with the source node on every finding.
+    """
+    return _doctor(_path(onnx))
 
 
 __all__ = [
     "ArtifactInfo",
     "Device",
-    "Envelope",
+    "DoctorIssue",
+    "DoctorReport",
     "Fn3CapacityError",
     "Fn3DeviceError",
     "Fn3EnvelopeError",
@@ -270,17 +162,17 @@ __all__ = [
     "Fn3TokenError",
     "Fn3TypeError",
     "Fn3UnsupportedError",
-    "Geometry",
-    "Logits",
     "Metadata",
     "Model",
+    "PlanInfo",
     "PrepareReport",
+    "Section",
     "Session",
-    "SessionStats",
-    "WeightInt8Report",
-    "WeightInt8Route",
+    "Tensor",
     "devices",
+    "doctor",
     "inspect",
     "load",
     "prepare",
+    "targets",
 ]

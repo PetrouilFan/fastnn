@@ -698,12 +698,10 @@ impl PadMode {
 ///
 /// # Compatibility
 ///
-/// Every field is `Default`-constructible and neutral at its default, so a
-/// decoder of an older serialized payload can fill the fields it knows and
-/// leave the rest at [`Default::default`]. The 3.0 artifact format version 1
-/// stores only `axes`, `keep_dims` and `epsilon`; the CNN fields below are
-/// carried by the in-memory graph and the typed IR, and are not yet part of
-/// that format.
+/// Every field is `Default`-constructible and neutral at its default. The
+/// version-2 artifact (`FNN3ART2`) stores every field below, including the
+/// five enums, so a typed graph round-trips without losing a window, a
+/// resampling mode or a TopK attribute.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct OpParams {
     /// Axes for transpose/reduce/softmax/concat/split/unsqueeze/pad/slice.

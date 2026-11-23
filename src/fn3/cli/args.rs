@@ -1,4 +1,4 @@
-//! Command-line syntax for `fastnn-infer`.
+//! Command-line syntax for `fastnn-infer` (the v3 surface).
 //!
 //! Hand-written rather than derived so every rejection names the offending flag
 //! and the accepted forms, and so the same parser is callable from tests. The
@@ -7,21 +7,23 @@
 
 use std::path::PathBuf;
 
-use super::{CliError, DeviceSpec};
+use crate::inference::runtime::Threading;
+
+use super::CliError;
 
 /// One parsed invocation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Command {
-    /// ONNX -> prepared artifact.
+    /// ONNX -> versioned artifact.
     Prepare(PrepareArgs),
-    /// Artifact header and optional section summary.
-    Inspect(InspectArgs),
-    /// Token-ID prefill plus optional explicit decode tokens.
+    /// Map an artifact and build a session, without running it.
+    Load(LoadArgs),
+    /// Map an artifact, build a session and run one forward.
     Run(RunArgs),
-    /// Greedy token generation.
-    Generate(GenerateArgs),
-    /// Build/device/backend matrix.
-    Diagnose(DiagnoseArgs),
+    /// Describe an artifact without mapping or executing it.
+    Inspect(InspectArgs),
+    /// Diagnose an ONNX model before producing an artifact.
+    Doctor(DoctorArgs),
     /// Print help.
     Help(HelpTopic),
     /// Print the tool version.
@@ -33,10 +35,58 @@ pub enum Command {
 pub enum HelpTopic {
     All,
     Prepare,
-    Inspect,
+    Load,
     Run,
-    Generate,
-    Diagnose,
+    Inspect,
+    Doctor,
+}
+
+/// A thread request, parsed once and mapped to [`Threading`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadsArg {
+    /// Physical cores.
+    Auto,
+    /// Exactly `n` workers.
+    Fixed(usize),
+}
+
+impl ThreadsArg {
+    /// Parse `auto` or a positive whole number.
+    pub fn parse(value: &str) -> Result<ThreadsArg, CliError> {
+        if value == "auto" {
+            return Ok(ThreadsArg::Auto);
+        }
+        let workers = value.parse::<usize>().map_err(|_| {
+            CliError::usage(format!(
+                "`--threads` expects `auto` or a whole number, but `{value}` is neither"
+            ))
+        })?;
+        if workers == 0 {
+            return Err(CliError::usage("`--threads` must be at least 1"));
+        }
+        if workers > 1024 {
+            return Err(CliError::usage(format!(
+                "`--threads {workers}` is above this build's limit of 1024"
+            )));
+        }
+        Ok(ThreadsArg::Fixed(workers))
+    }
+
+    /// The runtime request.
+    pub fn threading(self) -> Threading {
+        match self {
+            ThreadsArg::Auto => Threading::Auto,
+            ThreadsArg::Fixed(workers) => Threading::Fixed(workers),
+        }
+    }
+
+    /// Render for a report.
+    pub fn render(self) -> String {
+        match self {
+            ThreadsArg::Auto => "auto".to_string(),
+            ThreadsArg::Fixed(workers) => workers.to_string(),
+        }
+    }
 }
 
 /// Arguments of `prepare`.
@@ -46,71 +96,97 @@ pub struct PrepareArgs {
     pub onnx: PathBuf,
     /// Destination artifact.
     pub out: PathBuf,
-    /// Declared maximum new tokens in one call.
-    pub max_seq: u64,
-    /// Declared maximum already-cached tokens.
-    pub max_past: u64,
-    /// Declared maximum `past + seq`.
-    pub max_total: u64,
+    /// Target profile: `cpu`, `cpu-reference` or `all`.
+    pub target: String,
+    /// Execution precision: `f32`.
+    pub precision: String,
     /// Replace an existing destination.
     pub force: bool,
 }
 
-/// Arguments of `inspect`.
+/// Arguments of `load`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InspectArgs {
-    /// Artifact to inspect.
-    pub artifact: PathBuf,
-    /// Decode META/GEOM/ENV/VALS/NODE/WGHT instead of stopping at the header.
-    pub sections: bool,
+pub struct LoadArgs {
+    /// Artifact to map.
+    pub model: PathBuf,
+    /// Target plan; the artifact default when absent.
+    pub target: Option<String>,
+    /// Worker request.
+    pub threads: ThreadsArg,
 }
 
-/// Arguments shared by `run` and `generate`.
+/// One `--input` value.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InferArgs {
-    /// Prepared artifact: graph, weights, geometry and envelope.
-    pub model: PathBuf,
-    /// Optional source ONNX, verified against the artifact when given.
-    pub onnx: Option<PathBuf>,
-    /// Prompt token IDs: comma/whitespace separated, or `@file`.
-    pub tokens: String,
-    /// Device request string.
-    pub device: DeviceSpec,
-    /// KV capacity in tokens; defaults to the envelope's `total.max()`.
-    pub capacity: Option<u64>,
-    /// Number of tokens to show in the logits table.
-    pub top_k: usize,
-    /// Per-step plan/cache diagnostics.
-    pub steps: bool,
-    /// Opt in to session-local INT8 projection weights.
-    pub weight_int8: bool,
+pub enum InputArg {
+    /// Fill the input with zeros.
+    Zeros(String),
+    /// Fill the input with ones.
+    Ones(String),
+    /// Raw little-endian `f32` bytes from this file.
+    File(String, PathBuf),
+}
+
+impl InputArg {
+    /// Input name.
+    pub fn name(&self) -> &str {
+        match self {
+            InputArg::Zeros(name) | InputArg::Ones(name) | InputArg::File(name, _) => name,
+        }
+    }
+
+    fn parse(value: &str) -> Result<InputArg, CliError> {
+        let (name, source) = value.split_once('=').ok_or_else(|| {
+            CliError::usage(format!(
+                "`--input` expects `name=zeros`, `name=ones` or `name=<raw f32 file>`, found \
+                 `{value}`"
+            ))
+        })?;
+        if name.is_empty() {
+            return Err(CliError::usage("`--input` has an empty input name"));
+        }
+        Ok(match source {
+            "zeros" => InputArg::Zeros(name.to_string()),
+            "ones" => InputArg::Ones(name.to_string()),
+            other => {
+                let path = other.strip_prefix('@').unwrap_or(other);
+                if path.is_empty() {
+                    return Err(CliError::usage(format!(
+                        "`--input {name}=` has no file path"
+                    )));
+                }
+                InputArg::File(name.to_string(), PathBuf::from(path))
+            }
+        })
+    }
 }
 
 /// Arguments of `run`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunArgs {
-    /// Shared inference arguments.
-    pub infer: InferArgs,
-    /// Optional token IDs to feed one at a time after the prompt.
-    pub decode: Option<String>,
+    /// Artifact to map.
+    pub model: PathBuf,
+    /// Target plan; the artifact default when absent.
+    pub target: Option<String>,
+    /// Worker request.
+    pub threads: ThreadsArg,
+    /// Named inputs.
+    pub inputs: Vec<InputArg>,
+    /// Optional directory for raw `f32` outputs.
+    pub output_dir: Option<PathBuf>,
 }
 
-/// Arguments of `generate`.
+/// Arguments of `inspect`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GenerateArgs {
-    /// Shared inference arguments.
-    pub infer: InferArgs,
-    /// Tokens to generate greedily.
-    pub max_new_tokens: u64,
+pub struct InspectArgs {
+    /// Artifact to describe.
+    pub artifact: PathBuf,
 }
 
-/// Arguments of `diagnose`.
+/// Arguments of `doctor`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiagnoseArgs {
-    /// Optional artifact to validate while reporting devices.
-    pub artifact: Option<PathBuf>,
-    /// Optional device to resolve and open; absence reports every device.
-    pub device: Option<DeviceSpec>,
+pub struct DoctorArgs {
+    /// ONNX to diagnose.
+    pub onnx: PathBuf,
 }
 
 /// Parse an argument vector (without the program name).
@@ -120,10 +196,10 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
     };
     match first.as_str() {
         "prepare" => parse_prepare(&args[1..]),
-        "inspect" => parse_inspect(&args[1..]),
+        "load" => parse_load(&args[1..]),
         "run" => parse_run(&args[1..]),
-        "generate" => parse_generate(&args[1..]),
-        "diagnose" => parse_diagnose(&args[1..]),
+        "inspect" => parse_inspect(&args[1..]),
+        "doctor" => parse_doctor(&args[1..]),
         "help" | "--help" | "-h" => parse_help(&args[1..]),
         "--version" | "-V" => Ok(Command::Version),
         other if other.starts_with('-') => Err(CliError::usage(format!("unknown flag `{other}`"))),
@@ -144,13 +220,13 @@ fn parse_help(args: &[String]) -> Result<Command, CliError> {
     let topic = match topic.as_str() {
         "all" => HelpTopic::All,
         "prepare" => HelpTopic::Prepare,
-        "inspect" => HelpTopic::Inspect,
+        "load" => HelpTopic::Load,
         "run" => HelpTopic::Run,
-        "generate" => HelpTopic::Generate,
-        "diagnose" => HelpTopic::Diagnose,
+        "inspect" => HelpTopic::Inspect,
+        "doctor" => HelpTopic::Doctor,
         other => {
             return Err(CliError::usage(format!(
-                "unknown help topic `{other}`; topics: prepare, inspect, run, generate, diagnose"
+                "unknown help topic `{other}`; topics: prepare, load, run, inspect, doctor"
             )))
         }
     };
@@ -158,22 +234,19 @@ fn parse_help(args: &[String]) -> Result<Command, CliError> {
 }
 
 fn parse_prepare(args: &[String]) -> Result<Command, CliError> {
-    let mut onnx: Option<PathBuf> = None;
-    let mut out: Option<PathBuf> = None;
-    let mut max_seq: Option<u64> = None;
-    let mut max_past: Option<u64> = None;
-    let mut max_total: Option<u64> = None;
+    let mut onnx = None;
+    let mut out = None;
+    let mut target = None;
+    let mut precision = None;
     let mut force = false;
-
     let mut cursor = Cursor::new(args);
     while let Some((flag, inline)) = cursor.next_flag() {
         match flag {
             "--help" | "-h" => return Ok(Command::Help(HelpTopic::Prepare)),
             "--onnx" => set_path(&mut onnx, cursor.value(inline, flag)?, flag)?,
             "--out" => set_path(&mut out, cursor.value(inline, flag)?, flag)?,
-            "--max-seq" => set_u64(&mut max_seq, cursor.value(inline, flag)?, flag)?,
-            "--max-past" => set_u64(&mut max_past, cursor.value(inline, flag)?, flag)?,
-            "--max-total" => set_u64(&mut max_total, cursor.value(inline, flag)?, flag)?,
+            "--target" => set_string(&mut target, cursor.value(inline, flag)?, flag)?,
+            "--precision" => set_string(&mut precision, cursor.value(inline, flag)?, flag)?,
             "--force" => {
                 no_inline(inline, flag)?;
                 force = true;
@@ -181,237 +254,125 @@ fn parse_prepare(args: &[String]) -> Result<Command, CliError> {
             other => return Err(unknown_flag("prepare", other)),
         }
     }
-
-    let prepared = PrepareArgs {
+    let target = target.unwrap_or_else(|| crate::inference::model::format::TARGET_CPU.to_string());
+    if !crate::inference::model::format::TARGETS.contains(&target.as_str()) {
+        return Err(CliError::usage(format!(
+            "`--target {target}` is not defined; use {}",
+            crate::inference::model::format::TARGETS.join(", ")
+        )));
+    }
+    let precision = precision.unwrap_or_else(|| "f32".to_string());
+    if precision != "f32" && precision != "fp32" {
+        return Err(CliError::usage(format!(
+            "`--precision {precision}` is not implemented; this build writes `f32` only"
+        )));
+    }
+    Ok(Command::Prepare(PrepareArgs {
         onnx: required_path(onnx, "--onnx", "prepare")?,
         out: required_path(out, "--out", "prepare")?,
-        max_seq: max_seq.unwrap_or(128),
-        max_past: max_past.unwrap_or(1023),
-        max_total: max_total.unwrap_or(1024),
+        target,
+        precision,
         force,
-    };
-    if prepared.max_seq == 0 {
-        return Err(CliError::usage("`--max-seq` must be at least 1"));
+    }))
+}
+
+fn parse_load(args: &[String]) -> Result<Command, CliError> {
+    let mut model = None;
+    let mut target = None;
+    let mut threads = None;
+    let mut positional = None;
+    let mut cursor = Cursor::new(args);
+    while let Some((flag, inline)) = cursor.next_flag() {
+        match flag {
+            "--help" | "-h" => return Ok(Command::Help(HelpTopic::Load)),
+            "--model" | "--artifact" => set_path(&mut model, cursor.value(inline, flag)?, flag)?,
+            "--target" => set_string(&mut target, cursor.value(inline, flag)?, flag)?,
+            "--threads" => set_threads(&mut threads, cursor.value(inline, flag)?, flag)?,
+            other if other.starts_with('-') => return Err(unknown_flag("load", other)),
+            other => set_positional(&mut positional, other, "load")?,
+        }
     }
-    if prepared.max_total == 0 {
-        return Err(CliError::usage("`--max-total` must be at least 1"));
+    Ok(Command::Load(LoadArgs {
+        model: finish_model(model, positional, "load")?,
+        target,
+        threads: threads.unwrap_or(ThreadsArg::Auto),
+    }))
+}
+
+fn parse_run(args: &[String]) -> Result<Command, CliError> {
+    let mut model = None;
+    let mut target = None;
+    let mut threads = None;
+    let mut inputs = Vec::new();
+    let mut output_dir = None;
+    let mut positional = None;
+    let mut cursor = Cursor::new(args);
+    while let Some((flag, inline)) = cursor.next_flag() {
+        match flag {
+            "--help" | "-h" => return Ok(Command::Help(HelpTopic::Run)),
+            "--model" | "--artifact" => set_path(&mut model, cursor.value(inline, flag)?, flag)?,
+            "--target" => set_string(&mut target, cursor.value(inline, flag)?, flag)?,
+            "--threads" => set_threads(&mut threads, cursor.value(inline, flag)?, flag)?,
+            "--input" => {
+                let value = cursor.value(inline, flag)?;
+                let input = InputArg::parse(value)?;
+                if inputs
+                    .iter()
+                    .any(|existing: &InputArg| existing.name() == input.name())
+                {
+                    return Err(CliError::usage(format!(
+                        "`--input {}` was given twice",
+                        input.name()
+                    )));
+                }
+                inputs.push(input);
+            }
+            "--output-dir" => set_path(&mut output_dir, cursor.value(inline, flag)?, flag)?,
+            other if other.starts_with('-') => return Err(unknown_flag("run", other)),
+            other => set_positional(&mut positional, other, "run")?,
+        }
     }
-    Ok(Command::Prepare(prepared))
+    Ok(Command::Run(RunArgs {
+        model: finish_model(model, positional, "run")?,
+        target,
+        threads: threads.unwrap_or(ThreadsArg::Auto),
+        inputs,
+        output_dir,
+    }))
 }
 
 fn parse_inspect(args: &[String]) -> Result<Command, CliError> {
-    let mut artifact: Option<PathBuf> = None;
-    let mut sections = false;
-    let mut positional: Option<PathBuf> = None;
-
+    let mut artifact = None;
+    let mut positional = None;
     let mut cursor = Cursor::new(args);
     while let Some((flag, inline)) = cursor.next_flag() {
         match flag {
             "--help" | "-h" => return Ok(Command::Help(HelpTopic::Inspect)),
             "--model" | "--artifact" => set_path(&mut artifact, cursor.value(inline, flag)?, flag)?,
-            "--sections" | "--full" => {
-                no_inline(inline, flag)?;
-                sections = true;
-            }
             other if other.starts_with('-') => return Err(unknown_flag("inspect", other)),
-            other => {
-                if positional.is_some() {
-                    return Err(CliError::usage(
-                        "`inspect` takes one artifact path; give the others with `--model`",
-                    ));
-                }
-                positional = Some(PathBuf::from(other));
-            }
+            other => set_positional(&mut positional, other, "inspect")?,
         }
     }
-    if let (Some(positional), Some(flag)) = (positional.as_ref(), artifact.as_ref()) {
-        if positional != flag {
-            return Err(CliError::usage(format!(
-                "`inspect` was given two artifact paths (`{}` and `{}`)",
-                positional.display(),
-                flag.display()
-            )));
-        }
-    }
-    let artifact = artifact.or(positional).ok_or_else(|| {
-        CliError::usage("`inspect` needs an artifact path: `fastnn-infer inspect model.fnn3`")
-    })?;
-    Ok(Command::Inspect(InspectArgs { artifact, sections }))
-}
-
-fn parse_run(args: &[String]) -> Result<Command, CliError> {
-    let mut model = None;
-    let mut onnx = None;
-    let mut verify_source = false;
-    let mut tokens = None;
-    let mut decode = None;
-    let mut device = None;
-    let mut capacity = None;
-    let mut top_k = None;
-    let mut steps = false;
-    let mut weight_int8 = false;
-
-    let mut cursor = Cursor::new(args);
-    while let Some((flag, inline)) = cursor.next_flag() {
-        match flag {
-            "--help" | "-h" => return Ok(Command::Help(HelpTopic::Run)),
-            "--model" => set_path(&mut model, cursor.value(inline, flag)?, flag)?,
-            "--onnx" => set_path(&mut onnx, cursor.value(inline, flag)?, flag)?,
-            "--verify-source" => {
-                no_inline(inline, flag)?;
-                verify_source = true;
-            }
-            "--tokens" => set_string(&mut tokens, cursor.value(inline, flag)?, flag)?,
-            "--decode" => set_string(&mut decode, cursor.value(inline, flag)?, flag)?,
-            "--device" => set_device(&mut device, cursor.value(inline, flag)?, flag)?,
-            "--capacity" => set_u64(&mut capacity, cursor.value(inline, flag)?, flag)?,
-            "--top-k" => set_usize(&mut top_k, cursor.value(inline, flag)?, flag)?,
-            "--steps" => {
-                no_inline(inline, flag)?;
-                steps = true;
-            }
-            "--weight-int8" => {
-                no_inline(inline, flag)?;
-                weight_int8 = true;
-            }
-            other => return Err(unknown_flag("run", other)),
-        }
-    }
-
-    let infer = finish_infer(
-        "run",
-        model,
-        onnx,
-        verify_source,
-        tokens,
-        device,
-        capacity,
-        top_k,
-        steps,
-        weight_int8,
-    )?;
-    Ok(Command::Run(RunArgs { infer, decode }))
-}
-
-fn parse_generate(args: &[String]) -> Result<Command, CliError> {
-    let mut model = None;
-    let mut onnx = None;
-    let mut verify_source = false;
-    let mut tokens = None;
-    let mut device = None;
-    let mut capacity = None;
-    let mut top_k = None;
-    let mut steps = false;
-    let mut weight_int8 = false;
-    let mut max_new_tokens = None;
-
-    let mut cursor = Cursor::new(args);
-    while let Some((flag, inline)) = cursor.next_flag() {
-        match flag {
-            "--help" | "-h" => return Ok(Command::Help(HelpTopic::Generate)),
-            "--model" => set_path(&mut model, cursor.value(inline, flag)?, flag)?,
-            "--onnx" => set_path(&mut onnx, cursor.value(inline, flag)?, flag)?,
-            "--verify-source" => {
-                no_inline(inline, flag)?;
-                verify_source = true;
-            }
-            "--tokens" => set_string(&mut tokens, cursor.value(inline, flag)?, flag)?,
-            "--device" => set_device(&mut device, cursor.value(inline, flag)?, flag)?,
-            "--capacity" => set_u64(&mut capacity, cursor.value(inline, flag)?, flag)?,
-            "--top-k" => set_usize(&mut top_k, cursor.value(inline, flag)?, flag)?,
-            "--max-new-tokens" => set_u64(&mut max_new_tokens, cursor.value(inline, flag)?, flag)?,
-            "--steps" => {
-                no_inline(inline, flag)?;
-                steps = true;
-            }
-            "--weight-int8" => {
-                no_inline(inline, flag)?;
-                weight_int8 = true;
-            }
-            other => return Err(unknown_flag("generate", other)),
-        }
-    }
-
-    let infer = finish_infer(
-        "generate",
-        model,
-        onnx,
-        verify_source,
-        tokens,
-        device,
-        capacity,
-        top_k,
-        steps,
-        weight_int8,
-    )?;
-    let max_new_tokens =
-        max_new_tokens.ok_or_else(|| CliError::usage("`generate` needs `--max-new-tokens <n>`"))?;
-    if max_new_tokens == 0 {
-        return Err(CliError::usage("`--max-new-tokens` must be at least 1"));
-    }
-    Ok(Command::Generate(GenerateArgs {
-        infer,
-        max_new_tokens,
+    Ok(Command::Inspect(InspectArgs {
+        artifact: finish_model(artifact, positional, "inspect")?,
     }))
 }
 
-fn finish_infer(
-    command: &str,
-    model: Option<PathBuf>,
-    onnx: Option<PathBuf>,
-    verify_source: bool,
-    tokens: Option<String>,
-    device: Option<DeviceSpec>,
-    capacity: Option<u64>,
-    top_k: Option<usize>,
-    steps: bool,
-    weight_int8: bool,
-) -> Result<InferArgs, CliError> {
-    let top_k = top_k.unwrap_or(5);
-    if top_k == 0 {
-        return Err(CliError::usage("`--top-k` must be at least 1"));
-    }
-    if let Some(0) = capacity {
-        return Err(CliError::usage("`--capacity` must be at least 1 token"));
-    }
-    if verify_source && onnx.is_none() {
-        return Err(CliError::usage(
-            "`--verify-source` asks for a source check, but no source was given",
-        )
-        .with_next(
-            "pass the ONNX the artifact was prepared from with `--onnx <model.onnx>`, or drop \
-             `--verify-source` to run the artifact alone",
-        ));
-    }
-    Ok(InferArgs {
-        model: required_path(model, "--model", command)?,
-        onnx,
-        tokens: tokens.ok_or_else(|| {
-            CliError::usage(format!(
-                "`{command}` needs `--tokens <id[,id...]>` (token IDs, not text)"
-            ))
-        })?,
-        device: device.unwrap_or(DeviceSpec::Auto),
-        capacity,
-        top_k,
-        steps,
-        weight_int8,
-    })
-}
-
-fn parse_diagnose(args: &[String]) -> Result<Command, CliError> {
-    let mut artifact = None;
-    let mut device = None;
+fn parse_doctor(args: &[String]) -> Result<Command, CliError> {
+    let mut onnx = None;
+    let mut positional = None;
     let mut cursor = Cursor::new(args);
     while let Some((flag, inline)) = cursor.next_flag() {
         match flag {
-            "--help" | "-h" => return Ok(Command::Help(HelpTopic::Diagnose)),
-            "--model" | "--artifact" => set_path(&mut artifact, cursor.value(inline, flag)?, flag)?,
-            "--device" => set_device(&mut device, cursor.value(inline, flag)?, flag)?,
-            other => return Err(unknown_flag("diagnose", other)),
+            "--help" | "-h" => return Ok(Command::Help(HelpTopic::Doctor)),
+            "--onnx" | "--model" => set_path(&mut onnx, cursor.value(inline, flag)?, flag)?,
+            other if other.starts_with('-') => return Err(unknown_flag("doctor", other)),
+            other => set_positional(&mut positional, other, "doctor")?,
         }
     }
-    Ok(Command::Diagnose(DiagnoseArgs { artifact, device }))
+    Ok(Command::Doctor(DoctorArgs {
+        onnx: finish_model(onnx, positional, "doctor")?,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -433,8 +394,8 @@ impl<'a> Cursor<'a> {
         let arg = self.args.get(self.index)?;
         self.index += 1;
         match arg.split_once('=') {
-            Some((flag, value)) => Some((flag, Some(value))),
-            None => Some((arg.as_str(), None)),
+            Some((flag, value)) if flag.starts_with('-') => Some((flag, Some(value))),
+            _ => Some((arg.as_str(), None)),
         }
     }
 
@@ -485,37 +446,21 @@ fn set_string(slot: &mut Option<String>, value: &str, flag: &str) -> Result<(), 
     Ok(())
 }
 
-fn set_device(slot: &mut Option<DeviceSpec>, value: &str, flag: &str) -> Result<(), CliError> {
+fn set_threads(slot: &mut Option<ThreadsArg>, value: &str, flag: &str) -> Result<(), CliError> {
     if slot.is_some() {
         return Err(CliError::usage(format!("`{flag}` was given twice")));
     }
-    *slot = Some(DeviceSpec::parse(value)?);
+    *slot = Some(ThreadsArg::parse(value)?);
     Ok(())
 }
 
-fn set_u64(slot: &mut Option<u64>, value: &str, flag: &str) -> Result<(), CliError> {
+fn set_positional(slot: &mut Option<PathBuf>, value: &str, command: &str) -> Result<(), CliError> {
     if slot.is_some() {
-        return Err(CliError::usage(format!("`{flag}` was given twice")));
+        return Err(CliError::usage(format!(
+            "`{command}` takes one path; give the others with a flag"
+        )));
     }
-    let parsed = value.parse::<u64>().map_err(|_| {
-        CliError::usage(format!(
-            "`{flag}` expects a whole number, but `{value}` is not one"
-        ))
-    })?;
-    *slot = Some(parsed);
-    Ok(())
-}
-
-fn set_usize(slot: &mut Option<usize>, value: &str, flag: &str) -> Result<(), CliError> {
-    let parsed = value.parse::<usize>().map_err(|_| {
-        CliError::usage(format!(
-            "`{flag}` expects a whole number, but `{value}` is not one"
-        ))
-    })?;
-    if slot.is_some() {
-        return Err(CliError::usage(format!("`{flag}` was given twice")));
-    }
-    *slot = Some(parsed);
+    *slot = Some(PathBuf::from(value));
     Ok(())
 }
 
@@ -523,54 +468,56 @@ fn required_path(value: Option<PathBuf>, flag: &str, command: &str) -> Result<Pa
     value.ok_or_else(|| CliError::usage(format!("`{command}` needs `{flag} <path>`")))
 }
 
+fn finish_model(
+    flag: Option<PathBuf>,
+    positional: Option<PathBuf>,
+    command: &str,
+) -> Result<PathBuf, CliError> {
+    match (flag, positional) {
+        (Some(flag), Some(positional)) if flag != positional => Err(CliError::usage(format!(
+            "`{command}` was given two paths (`{}` and `{}`)",
+            flag.display(),
+            positional.display()
+        ))),
+        (Some(flag), _) => Ok(flag),
+        (None, Some(positional)) => Ok(positional),
+        (None, None) => Err(CliError::usage(format!(
+            "`{command}` needs a path: `fastnn-infer {command} model.fnn3`"
+        ))),
+    }
+}
+
 /// Help text for one topic.
 pub fn help_text(topic: HelpTopic) -> String {
     match topic {
         HelpTopic::All => HELP_ALL.to_string(),
         HelpTopic::Prepare => HELP_PREPARE.to_string(),
-        HelpTopic::Inspect => HELP_INSPECT.to_string(),
+        HelpTopic::Load => HELP_LOAD.to_string(),
         HelpTopic::Run => HELP_RUN.to_string(),
-        HelpTopic::Generate => HELP_GENERATE.to_string(),
-        HelpTopic::Diagnose => HELP_DIAGNOSE.to_string(),
+        HelpTopic::Inspect => HELP_INSPECT.to_string(),
+        HelpTopic::Doctor => HELP_DOCTOR.to_string(),
     }
 }
 
 const HELP_ALL: &str = "\
-fastnn-infer — FastNN 3.0 inference CLI (FN3-17)
+fastnn-infer — FastNN 3.0 inference CLI
 
 USAGE:
   fastnn-infer <command> [options]
 
 COMMANDS:
   prepare    ONNX -> versioned .fnn3 artifact (atomic write, read-back check)
-  inspect    artifact header and, with --sections, its section summary
-  run        token-ID prefill and optional cached decode on one device
-  generate   greedy, deterministic token generation (no sampling)
-  diagnose   build/device/backend matrix; says what was only enumerated
+  load       map an artifact and build a session, without running it
+  run        map an artifact, build a session and run one forward
+  inspect    describe a header, graph, plans and hashes without mapping weights
+  doctor     diagnose an ONNX model before preparing it
 
 GLOBAL:
   -h, --help [topic]   this list, or one command's options
   -V, --version        print the tool version
 
-COMMON INFERENCE FLAGS:
-  --model <artifact>   prepared .fnn3 artifact; carries graph, weights, geometry
-                       and envelope, so it runs with no ONNX file
-  --onnx <model.onnx>  optional: verify this source against the artifact before
-                       running (metadata, geometry and every weight byte)
-  --verify-source      state that source check explicitly (requires --onnx)
-  --tokens <ids>       prompt token IDs, comma/whitespace separated, or @file
-  --device <request>   auto | cpu | vulkan | vulkan:<index> | vulkan:<uuid>
-  --capacity <n>       KV capacity in tokens (default: envelope total.max)
-  --top-k <n>          logits shown per step (default 5)
-  --steps              per-step plan/cache/timing diagnostics
-
-TEXT INPUT:
-  This alpha takes token IDs. It does not ship a tokenizer and will not guess:
-  a different BPE would silently produce different tokens and different logits.
-  Use the reference tokenizer to obtain IDs, then pass them with --tokens.
-
 EXIT CODES:
-  0 success  2 usage  3 model/input  4 device  5 inference  1 internal
+  0 success  2 usage  3 model/input  5 inference  1 internal
 
 Run `fastnn-infer help <command>` for one command.
 ";
@@ -582,82 +529,63 @@ USAGE:
   fastnn-infer prepare --onnx <model.onnx> --out <model.fnn3> [options]
 
 OPTIONS:
-  --max-seq <n>     maximum new tokens in one call (default 128)
-  --max-past <n>    maximum already-cached tokens (default 1023)
-  --max-total <n>   maximum past + seq (default 1024)
-  --force           replace an existing --out file
+  --target <name>     cpu (default), cpu-reference or all
+  --precision <name>  f32 (default and the only implemented precision)
+  --force             replace an existing --out file
 
-The artifact is written atomically and read back before success is reported.
-The source ONNX is not modified.
+The artifact is written atomically and read back through the strict reader
+before success is reported. The source ONNX is not modified.
 ";
 
-const HELP_INSPECT: &str = "\
-fastnn-infer inspect — what is this artifact?
+const HELP_LOAD: &str = "\
+fastnn-infer load — map an artifact and build a session
 
 USAGE:
-  fastnn-infer inspect <model.fnn3> [--sections]
+  fastnn-infer load <model.fnn3> [--target <name>] [--threads auto|<n>]
 
-OPTIONS:
-  --sections, --full   decode META, GEOM, ENV, VALS, NODE and WGHT and print
-                       their summary; without it only the 64-byte header is
-                       parsed and the payload checksum is not recomputed
+Maps the artifact, validates every section hash and builds the recorded plan.
+No ONNX file is read and the plan is not rebuilt. Nothing executes.
 ";
 
 const HELP_RUN: &str = "\
-fastnn-infer run — token-ID prefill and cached decode
+fastnn-infer run — one forward from an artifact
 
 USAGE:
-  fastnn-infer run --model <model.fnn3> --tokens <ids> [options]
-  fastnn-infer run --model <model.fnn3> --onnx <model.onnx> --tokens <ids> [options]
+  fastnn-infer run <model.fnn3> --input <name>=<value> [options]
 
 OPTIONS:
-  --decode <ids>    feed these token IDs one at a time after the prompt
-  --onnx <path>     verify this ONNX against the artifact before running
-                    (optional; the artifact alone carries everything that runs)
-  --device ...      auto (default), cpu, vulkan, vulkan:<index>, vulkan:<uuid>
-  --capacity <n>    KV capacity; must hold prompt + decoded tokens
-  --top-k <n>       logits shown (default 5)
-  --steps           print token, cache length, plan id, plan hits/misses, time
-  --weight-int8     INT8 projection weights, FP32 activations (CPU/resident Vulkan)
+  --input name=zeros      fill the input with zeros
+  --input name=ones       fill the input with ones
+  --input name=<file>     raw little-endian f32 bytes (exact element count)
+  --target <name>         target plan; the artifact default when absent
+  --threads auto|<n>      worker request (default auto = physical cores)
+  --output-dir <dir>      write each output as raw little-endian f32
 
-Output names the requested and resolved device, the backend that executed, the
-logits summary and the predicted next token. Decoding is greedy: the highest
-logit, ties broken by the lowest token ID. No sampling.
+Every graph input must be supplied exactly once. An output is printed as its
+name, shape, element count, min/max/mean and finite count.
 ";
 
-const HELP_GENERATE: &str = "\
-fastnn-infer generate — greedy, deterministic generation
+const HELP_INSPECT: &str = "\
+fastnn-infer inspect — what is in this artifact?
 
 USAGE:
-  fastnn-infer generate --model <model.fnn3> --tokens <ids> \\
-      --max-new-tokens <n> [options]
-  fastnn-infer generate --model <model.fnn3> --onnx <model.onnx> --tokens <ids> \\
-      --max-new-tokens <n> [options]
+  fastnn-infer inspect <model.fnn3>
 
-OPTIONS:
-  --max-new-tokens <n>  how many tokens to generate (at least 1)
-  --onnx <path>         verify this ONNX against the artifact before running
-                        (optional; the artifact alone carries everything that runs)
-  --device ...          auto (default), cpu, vulkan, vulkan:<index>, vulkan:<uuid>
-  --capacity <n>        KV capacity; must hold prompt + generated tokens
-  --top-k <n>           logits shown (default 5)
-  --steps               per-step diagnostics
-  --weight-int8         INT8 projection weights, FP32 activations (CPU/resident Vulkan)
-
-Generation is greedy argmax on f32 logits: no temperature, top-k sampling or
-randomness of any kind. The same artifact, prompt, device and capacity produce
-the same IDs.
+Prints the header, graph size, every target plan, weight bytes, quantization
+metadata and the stored section hashes. It never maps the weight payload:
+GRAPH, PLANS, QUANT and HASHES are read, the WEIGHTS table is read, and the
+weight payload is not. `mapped bytes: 0` is printed as the evidence.
 ";
 
-const HELP_DIAGNOSE: &str = "\
-fastnn-infer diagnose — build, device and backend matrix
+const HELP_DOCTOR: &str = "\
+fastnn-infer doctor — diagnose an ONNX model before preparing it
 
 USAGE:
-  fastnn-infer diagnose [--artifact <model.fnn3>] [--device <request>]
+  fastnn-infer doctor <model.onnx>
 
-Without --device it reports every device the loader lists and, with the vulkan
-feature, whether the backend can open each one. It does not execute the model:
-'enumerated', 'opened' and 'ran the model' are printed as separate facts.
+Imports the model and reports unsupported operators, dynamic-shape limits,
+dtype problems and an expected-memory estimate before any execution. Every
+message names the source node, e.g. `node 7 (onnx \"Conv\", output \"y\")`.
 ";
 
 #[cfg(test)]
@@ -675,40 +603,37 @@ mod tests {
         let Command::Prepare(args) = command else {
             panic!("wrong command");
         };
-        assert_eq!(args.max_seq, 128);
-        assert_eq!(args.max_past, 1023);
-        assert_eq!(args.max_total, 1024);
+        assert_eq!(args.target, "cpu");
+        assert_eq!(args.precision, "f32");
         assert!(!args.force);
     }
 
     #[test]
-    fn equals_form_and_positional_inspect_are_accepted() {
-        let command = parse(&argv(&["inspect", "--sections", "m.fnn3"])).expect("inspect parses");
+    fn equals_form_and_positional_paths_are_accepted() {
+        let command = parse(&argv(&["inspect", "m.fnn3"])).expect("inspect parses");
         let Command::Inspect(args) = command else {
             panic!("wrong command");
         };
         assert_eq!(args.artifact, PathBuf::from("m.fnn3"));
-        assert!(args.sections);
 
         let command = parse(&argv(&[
             "run",
-            "--tokens=1,2",
             "--model=m.fnn3",
-            "--onnx=m.onnx",
+            "--input=images=zeros",
+            "--threads=4",
         ]))
         .expect("equals form parses");
         let Command::Run(args) = command else {
             panic!("wrong command");
         };
-        assert_eq!(args.infer.tokens, "1,2");
-        assert_eq!(args.infer.top_k, 5);
-        assert!(!args.infer.steps);
+        assert_eq!(args.threads, ThreadsArg::Fixed(4));
+        assert_eq!(args.inputs, vec![InputArg::Zeros("images".to_string())]);
     }
 
     #[test]
     fn duplicate_single_value_flags_are_rejected() {
         let error = parse(&argv(&[
-            "run", "--model", "a", "--model", "b", "--onnx", "m", "--tokens", "1",
+            "run", "--model", "a", "--model", "b", "--input", "x=zeros",
         ]))
         .expect_err("duplicate must fail");
         assert!(error.message().contains("given twice"), "{error:?}");
@@ -728,10 +653,10 @@ mod tests {
     fn subcommand_help_is_accepted_in_every_command() {
         for (command, topic) in [
             ("prepare", HelpTopic::Prepare),
-            ("inspect", HelpTopic::Inspect),
+            ("load", HelpTopic::Load),
             ("run", HelpTopic::Run),
-            ("generate", HelpTopic::Generate),
-            ("diagnose", HelpTopic::Diagnose),
+            ("inspect", HelpTopic::Inspect),
+            ("doctor", HelpTopic::Doctor),
         ] {
             let parsed = parse(&argv(&[command, "--help"])).expect("help parses");
             assert_eq!(parsed, Command::Help(topic), "{command}");
@@ -739,54 +664,14 @@ mod tests {
     }
 
     #[test]
-    fn devices_are_parsed_or_rejected_with_the_accepted_forms() {
-        let command = parse(&argv(&[
-            "run", "--model", "m", "--onnx", "o", "--tokens", "1", "--device", "vulkan:1",
-        ]))
-        .expect("device parses");
-        let Command::Run(args) = command else {
-            panic!("wrong command");
-        };
-        assert_eq!(args.infer.device, DeviceSpec::vulkan_index(1));
-
+    fn zero_threads_and_unknown_targets_are_usage_errors() {
+        let error = parse(&argv(&["load", "m.fnn3", "--threads", "0"]))
+            .expect_err("zero threads is not a worker count");
+        assert_eq!(error.code(), super::super::EXIT_USAGE);
         let error = parse(&argv(&[
-            "run", "--model", "m", "--onnx", "o", "--tokens", "1", "--device", "gpu",
+            "prepare", "--onnx", "m", "--out", "o", "--target", "gpu",
         ]))
-        .expect_err("bad device");
-        assert!(error.message().contains("vulkan:<uuid>"), "{error:?}");
-    }
-
-    #[test]
-    fn zero_length_requests_are_usage_errors() {
-        for args in [
-            argv(&[
-                "generate",
-                "--model",
-                "m",
-                "--onnx",
-                "o",
-                "--tokens",
-                "1",
-                "--max-new-tokens",
-                "0",
-            ]),
-            argv(&[
-                "run", "--model", "m", "--onnx", "o", "--tokens", "1", "--top-k", "0",
-            ]),
-            argv(&[
-                "run",
-                "--model",
-                "m",
-                "--onnx",
-                "o",
-                "--tokens",
-                "1",
-                "--capacity",
-                "0",
-            ]),
-        ] {
-            let error = parse(&args).expect_err("zero is not a valid count");
-            assert_eq!(error.code(), super::super::EXIT_USAGE, "{error:?}");
-        }
+        .expect_err("unknown target");
+        assert!(error.message().contains("cpu-reference"), "{error:?}");
     }
 }

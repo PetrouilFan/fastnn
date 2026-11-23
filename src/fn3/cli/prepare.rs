@@ -9,13 +9,13 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::inference::digest::sha256_hex;
-use crate::inference::import::{import_onnx_model, ModelImport, PositionEmbedding};
-use crate::inference::model::format::PreparedArtifact;
-use crate::inference::model::Planner;
-use crate::inference::{CpuBackend, Symbol};
+use crate::inference::import::import_onnx_graph;
+use crate::inference::model::format::{
+    resolve_targets, Artifact, Precision, PreparedArtifact, HEADER_BYTES,
+};
 
 use super::args::PrepareArgs;
-use super::{thousands, CliError};
+use super::{format_error, import_error, thousands, CliError};
 
 /// Run `prepare`.
 pub fn execute(args: &PrepareArgs, out: &mut dyn Write) -> Result<(), CliError> {
@@ -49,153 +49,84 @@ pub fn execute(args: &PrepareArgs, out: &mut dyn Write) -> Result<(), CliError> 
             "cannot read ONNX model `{}`: {error}",
             args.onnx.display()
         ))
-        .with_next(
-            "check the path; the pinned tiny-GPT-2 model is fetched by \
-             `python3 tools/parity/fetch_models.py --suite tiny-gpt2`",
-        )
+        .with_next("check the path and its permissions")
     })?;
     let source_sha256 = sha256_hex(&source_bytes);
-
-    let import = import_onnx_model(&source_bytes).map_err(|error| {
-        CliError::model(format!(
-            "`{}` is not a model this importer accepts:\n{error}",
-            args.onnx.display()
-        ))
-        .with_next(
-            "use the pinned ONNX export described in `docs/quickstart-fn3.md`; the importer is \
-             strict by design and will not approximate an unknown node",
-        )
-    })?;
-
-    let envelope = {
-        let backend = CpuBackend::new();
-        Planner::new(&import, &backend)
-            .envelope(1, args.max_seq, args.max_past, args.max_total)
-            .map_err(|error| {
-                CliError::model(format!("the requested envelope is not valid: {error}")).with_next(
-                    "keep 1 <= max-seq <= max-total and max-past < max-total; the defaults are \
-                     seq 128, past 1023, total 1024",
-                )
-            })?
-    };
-    let max_positions = match import.geometry().positions {
-        PositionEmbedding::Learned { max_positions, .. } => u64::from(max_positions),
-    };
-    if args.max_total > max_positions {
-        return Err(CliError::model(format!(
-            "the requested `--max-total {}` exceeds the model's learned position table ({max_positions} rows)",
-            args.max_total
-        ))
-        .with_next(format!(
-            "pass `--max-total {max_positions}` or less; a prompt plus its generated tokens \
-             cannot address a position the model does not have"
-        )));
+    let mut source_digest = [0u8; 32];
+    for (index, chunk) in source_sha256.as_bytes().chunks_exact(2).enumerate() {
+        let text = std::str::from_utf8(chunk).unwrap_or("00");
+        source_digest[index] = u8::from_str_radix(text, 16).unwrap_or(0);
     }
 
-    let artifact = PreparedArtifact::from_import(&import, envelope).map_err(|error| {
-        CliError::model(format!("the artifact could not be built: {error}"))
-            .with_next("this is a writer/import disagreement; report it with the ONNX checksum")
-    })?;
-    let artifact_bytes = artifact
-        .to_bytes()
-        .map_err(|error| CliError::model(format!("the artifact could not be encoded: {error}")))?;
+    let imported = import_onnx_graph(&source_bytes).map_err(import_error)?;
+    let precision = Precision::parse(&args.precision)
+        .ok_or_else(|| CliError::usage(format!("`{}` is not a precision", args.precision)))?;
+    let targets = resolve_targets(&args.target).map_err(format_error)?;
+    let artifact = PreparedArtifact::from_imported(&imported, &targets, precision, source_digest)
+        .map_err(format_error)?;
+    let artifact_bytes = artifact.to_bytes().map_err(format_error)?;
     let artifact_sha256 = sha256_hex(&artifact_bytes);
     atomic_write(&args.out, &artifact_bytes)?;
 
-    // Read back through the strict reader: framing, CRC and every section.
-    let loaded = PreparedArtifact::read_file(&args.out).map_err(|error| {
-        CliError::model(format!(
-            "`{}` was written but cannot be read back: {error}",
-            args.out.display()
-        ))
-        .with_next("re-run prepare; a partial or corrupt write is never reported as success")
-    })?;
-    if loaded != artifact {
+    // Read the file back through the strict reader: framing, every section
+    // hash, the graph, the weight table and every plan. `Artifact::open` is the
+    // deployment reader, so a success here is a success for `load` too.
+    let loaded = Artifact::open(&args.out).map_err(format_error)?;
+    if loaded.graph().node_count() != artifact.graph().node_count()
+        || loaded.graph().value_count() != artifact.graph().value_count()
+        || loaded.plans().len() != artifact.plans().len()
+        || loaded.weights().len() != artifact.weights().len()
+    {
         return Err(CliError::model(format!(
             "`{}` was written but reads back differently",
             args.out.display()
         ))
         .with_next("re-run prepare; the filesystem or a concurrent writer changed the file"));
     }
-    let header = crate::inference::model::format::PreparedHeader::parse(&artifact_bytes)
-        .map_err(|error| CliError::model(format!("the written header is invalid: {error}")))?;
-
-    print_summary(
-        args,
-        &import,
-        envelope,
-        &source_bytes,
-        &source_sha256,
-        &artifact_bytes,
-        &artifact_sha256,
-        header.payload_crc32,
-        out,
-    );
-    Ok(())
-}
-
-fn print_summary(
-    args: &PrepareArgs,
-    import: &ModelImport,
-    envelope: crate::inference::ShapeEnvelope,
-    source_bytes: &[u8],
-    source_sha256: &str,
-    artifact_bytes: &[u8],
-    artifact_sha256: &str,
-    payload_crc32: u32,
-    out: &mut dyn Write,
-) {
-    let geometry = import.geometry();
-    let summary = import.summary();
-    let epsilon = geometry
-        .layer_norm_epsilon
-        .map(|value| format!("{value:e}"))
-        .unwrap_or_else(|| "not detected".to_string());
-    let positions = match geometry.positions {
-        PositionEmbedding::Learned { max_positions, .. } => {
-            format!("learned ({max_positions} rows)")
-        }
-    };
+    if loaded.header().file_bytes != artifact_bytes.len() as u64 {
+        return Err(CliError::model(format!(
+            "`{}` was written but its length changed",
+            args.out.display()
+        ))
+        .with_next("re-run prepare; a partial write is never reported as success"));
+    }
 
     let _ = writeln!(out, "fastnn-infer prepare");
     let _ = writeln!(out, "  source: {}", args.onnx.display());
     let _ = writeln!(out, "    bytes:  {}", thousands(source_bytes.len() as u64));
     let _ = writeln!(out, "    sha256: {source_sha256}");
+    let summary = imported.summary();
     let _ = writeln!(
         out,
-        "  imported: {} fn3 ops from {} ONNX nodes, {} values, {} weights ({} initializers, {} bytes)",
-        summary.fn3_nodes,
+        "  imported: {} typed nodes from {} ONNX nodes, {} values, {} weights ({} bytes)",
+        loaded.graph().node_count(),
         summary.onnx_nodes,
-        summary.values,
-        import.weights().len(),
-        summary.initializers,
-        thousands(summary.weight_bytes)
+        loaded.graph().value_count(),
+        loaded.weights().len(),
+        thousands(loaded.weight_bytes())
     );
     let _ = writeln!(
         out,
-        "  geometry: layers={} hidden={} mlp={} heads={}/{} x {} vocab={} positions={} epsilon={}",
-        geometry.layers,
-        geometry.hidden_size,
-        geometry.mlp_hidden_size,
-        geometry.query_heads,
-        geometry.kv_heads,
-        geometry.head_dim,
-        thousands(u64::from(geometry.vocab_size)),
-        positions,
-        epsilon
+        "  target:   {} ({} profiles, precision {})",
+        args.target,
+        loaded.plans().len(),
+        precision
     );
-    let _ = writeln!(
-        out,
-        "  envelope: batch {}..={}, seq {}..={}, past {}..={}, total {}..={}",
-        envelope.get(Symbol::Batch).min(),
-        envelope.get(Symbol::Batch).max(),
-        envelope.get(Symbol::Seq).min(),
-        envelope.get(Symbol::Seq).max(),
-        envelope.get(Symbol::Past).min(),
-        envelope.get(Symbol::Past).max(),
-        envelope.get(Symbol::Total).min(),
-        envelope.get(Symbol::Total).max(),
-    );
+    for plan in loaded.plan_summaries() {
+        let _ = writeln!(
+            out,
+            "    {:<14} segments={} fusions={} reorders={} ({}) arena={} B peak={} B engines scalar={} onednn={}",
+            plan.target,
+            plan.segments,
+            plan.fusions,
+            plan.reorders,
+            thousands(plan.reorder_bytes),
+            thousands(plan.arena_bytes),
+            thousands(plan.peak_bytes),
+            plan.engines.scalar,
+            plan.engines.one_dnn
+        );
+    }
     let _ = writeln!(out, "  wrote: {}", args.out.display());
     let _ = writeln!(
         out,
@@ -203,23 +134,25 @@ fn print_summary(
         thousands(artifact_bytes.len() as u64)
     );
     let _ = writeln!(out, "    sha256: {artifact_sha256}");
-    let _ = writeln!(out, "    payload crc32: {payload_crc32:#010x}");
     let _ = writeln!(
         out,
-        "    sections: META, GEOM, ENV, VALS ({} values), NODE ({} ops), WGHT ({} weights, {} bytes)",
-        summary.values,
-        summary.fn3_nodes,
-        import.weights().len(),
-        thousands(summary.weight_bytes)
+        "    header: magic FNN3ART2, version {}, {} B, {} sections, weights at byte {} ({} B)",
+        loaded.header().version,
+        HEADER_BYTES,
+        loaded.header().section_count,
+        thousands(loaded.header().weight_payload_offset),
+        thousands(loaded.header().weight_payload_bytes)
     );
     let _ = writeln!(
         out,
-        "  verified: read back through PreparedArtifact::read_file (framing, checksum and sections)"
+        "  verified: read back through Artifact::open (header, SHA-256 per section, graph, \
+         weight table and every plan)"
     );
+    Ok(())
 }
 
 /// Write `bytes` to `path` through a same-directory temporary and a rename.
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty());

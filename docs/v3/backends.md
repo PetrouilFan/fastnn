@@ -1,7 +1,7 @@
 # CPU providers: the scalar reference and the optional oneDNN engine
 
-- **Status:** implemented, opt-in (`cpu-onednn`); phase 4a adds fused segments,
-  a channels-last layout policy and a row-wise softmax
+- **Status:** implemented, opt-in (`cpu-onednn`); phase 4a adds fused segments, a channels-last layout policy and a row-wise
+  softmax; phase 4b stores the plan and the mapped weights in the artifact
 - **Date:** 2026-11-23
 - **Authority:** [ADR-0001](adr-0001-one-runtime.md). The live operator matrix is
   [SUPPORTED.md](../../SUPPORTED.md).
@@ -20,6 +20,14 @@ plan chose and either one graph op or one recognised chain:
 Segment { op: Op(OpId) | Fused(FusedOp), engine: Scalar | OneDnn,
           inputs, outputs, params, loc }
 ```
+
+The plan is data the artifact carries. `prepare` serializes one entry per target
+profile (`PLANS` in [artifact.md](artifact.md)): the engine per segment, the
+layout policy, the reorder list with byte counts, the arena and peak sizes and
+the fusion report. `load` decodes that plan and opens a session on it; it does
+not run the planner again. A oneDNN block split is still decided at session open
+from the worker count (the plan cannot carry a library descriptor), but the
+segment engines and the layout policy are fixed by the file.
 
 The planner folds chains before it measures or asks anyone (`runtime::fuse`):
 `conv -> relu`, the ONNX SiLU `mul(conv, sigmoid(conv))` and `add(conv, other)`

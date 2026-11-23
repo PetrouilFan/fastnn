@@ -163,17 +163,19 @@ pub(crate) fn format_kind(kind: &FormatErrorKind) -> &'static str {
     match kind {
         FormatErrorKind::Io { .. } => "io",
         FormatErrorKind::BadMagic { .. } => "bad_magic",
+        FormatErrorKind::ObsoleteFormat { .. } => "obsolete_format",
         FormatErrorKind::UnsupportedVersion { .. } => "unsupported_version",
         FormatErrorKind::UnsupportedDtypeEncoding { .. } => "unsupported_dtype_encoding",
         FormatErrorKind::ReservedField { .. } => "reserved_field",
         FormatErrorKind::Truncated { .. } => "truncated",
         FormatErrorKind::LengthMismatch { .. } => "length_mismatch",
-        FormatErrorKind::ChecksumMismatch { .. } => "checksum_mismatch",
+        FormatErrorKind::HashMismatch { .. } => "hash_mismatch",
         FormatErrorKind::LimitExceeded { .. } => "limit_exceeded",
-        FormatErrorKind::Malformed { .. } => "malformed",
+        FormatErrorKind::MalformedAt { .. } => "malformed",
         FormatErrorKind::Inconsistent { .. } => "inconsistent",
         FormatErrorKind::UnknownDType(_) => "unknown_dtype",
         FormatErrorKind::UnknownOpCode { .. } => "unknown_op_code",
+        FormatErrorKind::UnsupportedPrecision { .. } => "unsupported_precision",
         FormatErrorKind::Contract { .. } => "contract",
     }
 }
@@ -228,14 +230,6 @@ pub(crate) fn typed_device(
     })
 }
 
-/// A token id that is not an id this model can consume.
-pub(crate) fn token_error(py: Python<'_>, message: String, token: i64, vocab_size: u32) -> PyErr {
-    typed::<Fn3TokenError>(py, message, |value| {
-        value.setattr("token", token)?;
-        value.setattr("vocab_size", vocab_size)
-    })
-}
-
 /// A model file could not be read or written.
 pub(crate) fn file_error(py: Python<'_>, message: String, path: String) -> PyErr {
     typed::<Fn3ModelFileError>(py, message, |value| {
@@ -260,21 +254,6 @@ pub(crate) fn model_exists(
         value.setattr("path", path)?;
         value.setattr("kind", "exists")?;
         value.setattr("differences", differences)
-    })
-}
-
-/// A bounded resource would be exceeded before anything was done.
-pub(crate) fn capacity(
-    py: Python<'_>,
-    message: String,
-    what: &'static str,
-    requested: u64,
-    capacity: u64,
-) -> PyErr {
-    typed::<Fn3CapacityError>(py, message, |value| {
-        value.setattr("what", what)?;
-        value.setattr("requested", requested)?;
-        value.setattr("capacity", capacity)
     })
 }
 

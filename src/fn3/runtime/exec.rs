@@ -61,6 +61,8 @@ use crate::inference::backend::{ScalarOnly, SegmentEngine, SegmentProvider};
 use crate::inference::dtype::DType;
 use crate::inference::error::Fn3Error;
 use crate::inference::import::ImportedGraph;
+use crate::inference::model::format::Artifact;
+use crate::inference::model::weights::WeightId;
 use crate::inference::ops::OpId;
 use crate::inference::runtime::arena::Arena;
 use crate::inference::runtime::kernels;
@@ -248,7 +250,7 @@ pub struct Session {
     #[cfg(feature = "cpu-onednn")]
     onednn: Option<OneDnnEngine>,
     arena: Arena,
-    source: Arc<ImportedGraph>,
+    source: WeightStore,
     /// One contiguous, offset-zero metadata per slot, built once.
     slot_meta: Vec<TensorMeta>,
     /// Per slot: an aligned copy of a weight payload, only when the importer's
@@ -325,9 +327,9 @@ impl Session {
         choice: EngineChoice,
         options: PlanOptions,
     ) -> Result<Session, Fn3Error> {
-        let source = imported.into();
+        let source: Arc<ImportedGraph> = imported.into();
         let plan = Plan::from_imported_with_options(&source, provider_for(choice), options)?;
-        Session::from_plan(plan, source, threading)
+        Session::from_plan_and_store(plan, WeightStore::Imported(source), threading)
     }
 
     /// Open a session on an already-built plan.
@@ -342,11 +344,68 @@ impl Session {
         imported: impl Into<Arc<ImportedGraph>>,
         threading: Threading,
     ) -> Result<Session, Fn3Error> {
+        Session::from_plan_and_store(plan, WeightStore::Imported(imported.into()), threading)
+    }
+
+    /// Open a session on a mapped artifact and its stored plan.
+    ///
+    /// The plan is the one `prepare` serialized for the artifact's default
+    /// target; it is decoded, not rebuilt. Weight slots point into the mapping
+    /// and are never copied.
+    pub fn from_artifact(artifact: &Artifact, threading: Threading) -> Result<Session, Fn3Error> {
+        Session::from_shared_artifact(Arc::new(artifact.clone()), threading)
+    }
+
+    /// Open a session on an already shared artifact, without cloning its
+    /// metadata. This is the deployment path: `load` maps the file once and
+    /// every session shares the one `Arc`.
+    pub fn from_shared_artifact(
+        artifact: Arc<Artifact>,
+        threading: Threading,
+    ) -> Result<Session, Fn3Error> {
+        let plan = artifact.default_plan().clone();
+        Session::from_plan_and_store(plan, WeightStore::Artifact(artifact), threading)
+    }
+
+    /// Open a session on a named target plan from an artifact.
+    ///
+    /// The target must be in the file; an unknown name is a typed error rather
+    /// than a silent fallback to the default plan.
+    pub fn from_artifact_for(
+        artifact: &Artifact,
+        target: &str,
+        threading: Threading,
+    ) -> Result<Session, Fn3Error> {
+        let plan = artifact
+            .plan_for(target)
+            .ok_or_else(|| Fn3Error::InvalidShape {
+                context: "runtime Session::from_artifact_for",
+                detail: format!(
+                    "the artifact has no target `{target}`; targets are {}",
+                    artifact
+                        .plans()
+                        .iter()
+                        .map(|plan| plan.target())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            })?;
+        Session::from_plan_and_store(
+            plan.clone(),
+            WeightStore::Artifact(Arc::new(artifact.clone())),
+            threading,
+        )
+    }
+
+    fn from_plan_and_store(
+        plan: Plan,
+        source: WeightStore,
+        threading: Threading,
+    ) -> Result<Session, Fn3Error> {
         // Mutable only when the optional engine records its layout decisions on
         // the plan; a build without it stores the plan unchanged.
         #[allow(unused_mut)]
         let mut plan = plan;
-        let source = imported.into();
         let threads = SessionThreads::new(threading)?;
         let mut slot_meta = Vec::with_capacity(plan.slots.len());
         let mut aligned_weights = Vec::with_capacity(plan.slots.len());
@@ -369,23 +428,20 @@ impl Session {
             aligned_weights.push(match slot.source {
                 SlotSource::Arena => None,
                 SlotSource::Weight(id) => {
-                    let weight = source.weights().get(id).ok_or(Fn3Error::OutOfBounds {
-                        what: "runtime Session weight id",
-                        index: id.index() as u64,
-                        len: source.weights().len() as u64,
-                    })?;
-                    if weight.dtype() != slot.ty.dtype {
+                    let (dtype, bytes) = source.bytes(id)?;
+                    if dtype != slot.ty.dtype {
                         return Err(Fn3Error::DTypeMismatch {
                             op: None,
                             expected: slot.ty.dtype,
-                            actual: weight.dtype(),
+                            actual: dtype,
                         });
                     }
-                    let bytes = weight.bytes();
-                    if (bytes.as_ptr() as usize).is_multiple_of(weight.dtype().alignment_hint()) {
+                    if (bytes.as_ptr() as usize).is_multiple_of(dtype.alignment_hint()) {
                         None
                     } else {
-                        // One copy at open time, never per forward.
+                        // One copy at open time, never per forward. An artifact
+                        // weight is 64-byte aligned, so this is only reachable
+                        // for an in-memory import's `Vec<u8>` payload.
                         Some(AlignedBuffer::from_bytes(bytes)?)
                     }
                 }
@@ -441,6 +497,40 @@ impl Session {
     /// The plan this session executes.
     pub fn plan(&self) -> &Plan {
         &self.plan
+    }
+
+    /// The artifact this session was opened from, when it was opened from one.
+    ///
+    /// The `Arc<Artifact>` is what keeps the mmap alive for the weight slices
+    /// below.
+    pub fn artifact(&self) -> Option<&Artifact> {
+        match &self.source {
+            WeightStore::Artifact(artifact) => Some(artifact),
+            WeightStore::Imported(_) => None,
+        }
+    }
+
+    /// The bytes of a weight slot, borrowed from the model.
+    ///
+    /// For an artifact session this is a slice of the mapping: no copy, and the
+    /// same address for every session opened on the same artifact.
+    pub fn weight_slot_bytes(&self, id: SlotId) -> Result<&[u8], Fn3Error> {
+        weight_bytes(&self.source, &self.aligned_weights, &self.plan, id)
+    }
+
+    /// The `f32` elements of a weight slot, borrowed from the model.
+    pub fn weight_slot_f32(&self, id: SlotId) -> Result<&[f32], Fn3Error> {
+        let bytes = self.weight_slot_bytes(id)?;
+        bytemuck::try_cast_slice(bytes).map_err(|error| Fn3Error::StorageCast {
+            element: "f32",
+            byte_len: bytes.len(),
+            detail: format!("weight slot {id}: {error:?}"),
+        })
+    }
+
+    /// The number of weights the model carries.
+    pub fn weight_count(&self) -> usize {
+        self.source.len()
     }
 
     /// The arena, for its size and allocation counter.
@@ -950,7 +1040,7 @@ fn engine_unavailable(segment: usize, detail: &str) -> Fn3Error {
 #[cfg(feature = "cpu-onednn")]
 fn prepare_onednn(
     plan: &Plan,
-    source: &ImportedGraph,
+    source: &WeightStore,
     aligned: &[Option<AlignedBuffer>],
     workers: usize,
 ) -> Result<Option<OneDnnEngine>, Fn3Error> {
@@ -1041,7 +1131,7 @@ fn blocked_destination(plan: &Plan, index: usize) -> bool {
 #[cfg(feature = "cpu-onednn")]
 fn segment_spec<'a>(
     plan: &'a Plan,
-    source: &'a ImportedGraph,
+    source: &'a WeightStore,
     aligned: &'a [Option<AlignedBuffer>],
     segment: &'a crate::inference::runtime::plan::Segment,
     workers: usize,
@@ -1107,7 +1197,7 @@ fn segment_spec<'a>(
 
 /// The bytes of a weight slot: the importer's payload, or its aligned copy.
 fn weight_bytes<'a>(
-    source: &'a ImportedGraph,
+    source: &'a WeightStore,
     aligned: &'a [Option<AlignedBuffer>],
     plan: &Plan,
     id: SlotId,
@@ -1122,15 +1212,55 @@ fn weight_bytes<'a>(
     if let Some(buffer) = aligned.get(id.index()).and_then(Option::as_ref) {
         return Ok(buffer.as_bytes());
     }
-    let weight = source
-        .weights()
-        .get(weight_id)
-        .ok_or(Fn3Error::OutOfBounds {
-            what: "runtime Session weight id",
-            index: weight_id.index() as u64,
-            len: source.weights().len() as u64,
-        })?;
-    Ok(weight.bytes())
+    Ok(source.bytes(weight_id)?.1)
+}
+
+/// Where a session's read-only weight bytes come from.
+#[derive(Debug, Clone)]
+enum WeightStore {
+    /// An importer's owned weight table (the in-memory path).
+    Imported(Arc<ImportedGraph>),
+    /// A mapped artifact. The `Arc<Artifact>` keeps the mapping alive for every
+    /// slice this session hands to a kernel.
+    Artifact(Arc<Artifact>),
+}
+
+impl WeightStore {
+    fn len(&self) -> usize {
+        match self {
+            WeightStore::Imported(imported) => imported.weights().len(),
+            WeightStore::Artifact(artifact) => artifact.weights().len(),
+        }
+    }
+
+    fn bytes(&self, id: WeightId) -> Result<(DType, &[u8]), Fn3Error> {
+        match self {
+            WeightStore::Imported(imported) => {
+                let weight = imported.weights().get(id).ok_or(Fn3Error::OutOfBounds {
+                    what: "runtime Session weight id",
+                    index: id.index() as u64,
+                    len: imported.weights().len() as u64,
+                })?;
+                Ok((weight.dtype(), weight.bytes()))
+            }
+            WeightStore::Artifact(artifact) => {
+                let entry = artifact
+                    .weights()
+                    .get(id.index())
+                    .ok_or(Fn3Error::OutOfBounds {
+                        what: "runtime Session weight id",
+                        index: id.index() as u64,
+                        len: artifact.weights().len() as u64,
+                    })?;
+                let bytes = artifact.weight_bytes_at(id).ok_or(Fn3Error::OutOfBounds {
+                    what: "runtime Session weight bytes",
+                    index: id.index() as u64,
+                    len: artifact.weights().len() as u64,
+                })?;
+                Ok((entry.dtype(), bytes))
+            }
+        }
+    }
 }
 
 /// The op ids the CNN kernel table owns, for a caller that wants to explain a

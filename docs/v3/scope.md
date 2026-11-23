@@ -29,13 +29,17 @@ FastNN v3 is one compiler, one runtime and one artifact for inference only
   hashes; `load` and every session run from it alone (#99).
 
 **Artifact-first inference** is the deployment rule: a production process needs
-the artifact, not the source model, the `onnx` package or Python. The 3.0
-`.fnn3` artifact (`FNN3PREP`, format version 1) already proves the source-free
-path for decoders: it carries graph, decoder geometry, the dynamic envelope and
-weights, and [`tests/fn3_model_format.rs`](../../tests/fn3_model_format.rs) loads
-it with no ONNX path passed, stored or read.
-It is not the v3 artifact: it is decoder-shaped, has no target plans, and its
-weights are read into memory rather than mapped (#99).
+the artifact, not the source model, the `onnx` package or Python. The v3
+`.fnn3` artifact (`FNN3ART2`, format version 2) carries the typed IR, one full
+plan per target profile, one contiguous 64-byte-aligned weight payload mapped
+read-only, quantization metadata and a SHA-256 per section. `load` maps it,
+validates every hash and decodes the stored plan; it does not read ONNX and does
+not re-plan. Two sessions, in one process or across processes, share the same
+weight pages. The layout, budgets and mapping rules are in
+[artifact.md](artifact.md); [`tests/fn3_artifact_v2.rs`](../../tests/fn3_artifact_v2.rs)
+prepares YOLOv8n, loads it with no ONNX source and runs it bit for bit against
+an in-memory session. Format version 1 (`FNN3PREP`) is refused with a typed
+"re-prepare" error and has no compatibility reader (#99).
 
 **Primary workloads** are CNN/vision models (detection, depth, classification)
 and transformer decoders (prefill plus cached token-by-token decoding), on CPU
@@ -219,13 +223,13 @@ is a panic, a silent default, or a partially executed model.
 
 | Failure | Detected at | Type | Message contract |
 |---|---|---|---|
-| Unsupported operator | Import (`prepare`; `doctor` is planned, #104) | `ImportProblemKind::UnmappedOp`, `UnimplementedOpId`, `ControlFlow` | Node index, node name, ONNX op type; every independent problem is reported, up to the diagnostic cap |
+| Unsupported operator | Import (`prepare` and `doctor`) | `ImportProblemKind::UnmappedOp`, `UnimplementedOpId`, `ControlFlow` | Node index, node name, ONNX op type; every independent problem is reported, up to the diagnostic cap |
 | Backend cannot run an op or shape | Plan preflight, then execution | `Fn3Error::UnsupportedOp` | Op, backend, reason and owning issue |
 | Dynamic shape outside the envelope | Session creation or step | `Fn3Error::DimOutOfEnvelope` | Symbol, requested extent, inclusive bounds |
 | Shape/rank/count budget exceeded | Import, load or session | `ImportProblemKind::LimitExceeded`, `Fn3Error::CapacityExceeded`, `Fn3Error::InvalidShape` | What was requested, what the limit is |
 | Out of memory | Allocation | `Fn3Error::Allocation`, `AllocationSizeUnknown` | Byte request when known; a failed step leaves the KV extent and step counter unchanged |
 | Device unavailable | Device resolution | `Fn3Error::DeviceUnavailable` | The request, the reason and every device this build can run; CLI exit 4 |
-| Invalid artifact | Load | `FormatErrorKind` (`BadMagic`, `UnsupportedVersion`, `ChecksumMismatch`, `Truncated`, ...) | Section and offset; no partial read; CLI exit 3 |
+| Invalid artifact | Load | `FormatErrorKind` (`BadMagic`, `ObsoleteFormat`, `UnsupportedVersion`, `HashMismatch`, `MalformedAt`, `Truncated`, ...) | Section and offset; no partial read; CLI exit 3 |
 | Invalid model or attributes | Import, plan or execution | Mismatch variants of `ImportProblemKind` and `Fn3Error` (`DTypeMismatch`, `ShapeMismatch`, `RankMismatch`, `ArityMismatch`) | Expected versus found, with the op named |
 
 **The rule that matters most:** an unsupported model fails **before execution**
@@ -237,11 +241,11 @@ dtypes; a rejected plan never runs. If a kernel rejects a shape that could not b
 known earlier, it fails before writing an output. A model is never partially
 executed and then reported as unsupported at token 400.
 
-The planned `doctor model.onnx` (#104) is the preflight form of the same checks:
-it imports, runs plan preflight and reports unsupported nodes, dynamic-shape
-limits, dtype problems and expected memory without writing an artifact or
-opening a session. `prepare` and `doctor` therefore reject the same models; only
-`prepare` writes the artifact.
+`fastnn-infer doctor model.onnx` (and `fastnn::inference::doctor`) is the
+preflight form of the same checks: it imports, runs plan preflight and reports
+unsupported nodes, dynamic-shape limits, dtype problems and expected memory
+without writing an artifact or opening a session. `prepare` and `doctor`
+therefore reject the same models; only `prepare` writes the artifact.
 
 ## 10. Accuracy budgets
 
@@ -280,7 +284,7 @@ structural and tested.
 When a common export genuinely needs a graph rewrite, it is an **adapter**: a
 named transform with a declared input/output contract, its own tests, a pinned
 model in the zoo, and a report that says it ran. Adapters are never applied
-silently, and the planned `doctor` (#104) reports the ones a model would need.
+silently, and `doctor` (#104) reports the ones a model would need.
 No adapter exists today; the importer accepts or rejects the graph as exported.
 
 ## 12. Non-goals

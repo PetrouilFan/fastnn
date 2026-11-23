@@ -20,13 +20,13 @@
 //! 3. [`infer_shapes`] runs once. A failure is the typed pass's own node-named
 //!    error, wrapped in an [`ImportError`] so a caller sees one failure type.
 //!
-//! # Why attributes can differ from the artifact's
+//! # Attributes the shape pass needs
 //!
-//! The 3.0 artifact format version 1 stores `axes`, `keep_dims` and `epsilon`.
 //! `Reshape`, `Slice` and `Split` need their constant operands visible to the
 //! shape pass, which reads [`OpParams`] and never a tensor payload. The importer
-//! carries those resolved bounds in a side table (`GraphParts::typed_params`)
-//! so the typed graph sees them without changing what an artifact stores.
+//! carries those resolved bounds in a side table (`GraphParts::typed_params`);
+//! the version-2 artifact stores the complete [`OpParams`] those bounds live in,
+//! so a decoded graph feeds the same shape pass without an ONNX file.
 
 use crate::inference::backend::OpParams;
 use crate::inference::error::Fn3Error;

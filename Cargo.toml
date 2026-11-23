@@ -29,9 +29,11 @@ pyo3        = { version = "0.28", features = ["extension-module", "abi3-py311"],
 rayon       = { version = "1.8", optional = true }
 half        = "2.3"
 bytemuck    = "1.14"
-# The Python session object holds its inner state behind a parking_lot mutex so a
-# second call from another thread cannot observe a half-updated session.
-parking_lot = { version = "0.12", optional = true }
+# Memory-mapped prepared-model weights. A read-only artifact is mapped once and
+# every session binds its weight slots to slices of that one mapping: this is
+# the only way to share weights between sessions and across processes without
+# copying them. Not optional: `Artifact::open` is part of the core reader.
+memmap2     = "0.9"
 # Raw Vulkan loader for the Vulkan backend. Optional so a default build never
 # touches the loader; enabled by `--features vulkan`.
 ash         = { version = "0.38", optional = true }
@@ -52,7 +54,7 @@ serde_json = "1.0"
 default = ["parallel", "python"]
 
 # FastNN Python bindings (`fastnn._core`).
-python = ["dep:pyo3", "dep:parking_lot"]
+python = ["dep:pyo3"]
 # Session-managed CPU worker pool.
 parallel = ["dep:rayon"]
 # The Vulkan compute backend.

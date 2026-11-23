@@ -391,12 +391,12 @@ impl GraphIr {
     /// Build a graph from parts a caller already validated.
     ///
     /// The importer builds a `GraphIr` while decoding an ONNX file. A reader of
-    /// a serialized model ([`crate::inference::model::format::PreparedGraph`], which
-    /// validates the same invariants) needs the identical container without an
+    /// a serialized model ([`crate::inference::ir::Graph`], which validates the
+    /// same invariants) needs the identical container without an
     /// ONNX file present, and private fields make that otherwise impossible.
     /// This is the additive seam those callers use; it performs no validation,
     /// so the caller owns the invariants listed on
-    /// [`crate::inference::model::format::PreparedGraph`].
+    /// [`crate::inference::ir::Graph`].
     pub fn from_parts(
         values: Vec<ValueInfo>,
         nodes: Vec<GraphNode>,
