@@ -36,6 +36,47 @@ segment reason (one primitive per block, 44 channel-split convolutions, no
 convolution epilogue fusion inside oneDNN's own kernels) rather than claiming a
 win.
 
+### Without the Python binding
+
+The numbers above come from the in-process harness. Because a session is also
+reachable from the CLI, the same forward can be measured with no Python in the
+process at all, which is the honest way to answer "how much of this is the
+binding":
+
+```
+fastnn-infer prepare --onnx yolov8n.onnx --out yolov8n.fnn3
+fastnn-infer run yolov8n.fnn3 --input images=ones --threads 8 --warmup 5 --repeat 50
+```
+
+`--repeat` times `Session::execute` (arena in place, no output copy per
+forward) and prints median and p95; the outputs are materialised once, after
+the series. Measured on this machine, 5 warm-ups + 50 forwards, same `ones`
+input for every engine:
+
+| | 1 thread | 4 threads | 8 threads |
+|---|---:|---:|---:|
+| fastnn scalar, Rust CLI | 1322.39 ms | 390.60 ms | 256.21 ms |
+| fastnn oneDNN, Rust CLI | 44.26 ms | **32.29 ms** | 32.48 ms |
+| ONNX Runtime, Python per-call | 23.86 ms | 7.82 ms | 7.64 ms |
+
+The Python binding is not what separates them: the floor for a Python + ORT
+`session.run` call measured **0.032 ms** on a trivial identity model, which is
+0.13 % of ORT's 1-thread number and 0.4 % of its 8-thread number.
+
+What the Python-free measurement does show is the real shape of the gap:
+
+- At **one thread the gap is 1.86x** — inside the <=2x goal.
+- From 1 to 8 threads fastnn gains only 1.36x, while ORT gains 3.12x. The
+  problem is scaling, not single-core throughput: 59 of the 126 segments are
+  still scalar and run with a one-thread budget, so Amdahl's law sets the
+  ceiling long before the convolutions do.
+
+The in-process harness (`fn3_cnn_perf`, which uses borrowed outputs) measures
+40.79 / 26.47 / 28.22 ms on the seeded-random input; the CLI measures a fresh
+process per run. Differences of 5-20 % between the two are host and process
+noise, not binding overhead, which is why both are quoted rather than one
+"official" number.
+
 The accuracy gates are real: oneDNN against scalar is within
 `1e-4 + 1e-4|ref|`, against ORT within `2e-4 + 1e-3|ref|`, and the scalar path
 is bit-identical across 1/4/8 workers. oneDNN is numerically stable but not

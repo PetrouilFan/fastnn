@@ -91,13 +91,43 @@ pub fn execute(args: &RunArgs, out: &mut dyn Write) -> Result<(), CliError> {
         .map(|(name, values)| (name.as_str(), values.as_slice()))
         .collect();
 
-    let started = std::time::Instant::now();
-    let outputs = session.run(&borrowed).map_err(|error| {
+    let forward_error = |error: crate::inference::Fn3Error| {
         CliError::inference(format!("the forward failed: {error}")).with_next(
             "run `fastnn-infer doctor` on the source ONNX, and `inspect` on the artifact",
         )
-    })?;
-    let elapsed = started.elapsed();
+    };
+
+    // A warm-up run exists because the first forward pays for page faults on
+    // the mapped weights and for oneDNN's first primitive creation; measuring
+    // it alongside steady state would report a number no user experiences.
+    for _ in 0..args.warmup {
+        session.run(&borrowed).map_err(forward_error)?;
+    }
+
+    // `execute` writes the arena and returns nothing; the outputs are copied
+    // once, after the series. `run` would allocate and copy every output on
+    // every measured forward, which is a cost of building a result rather than
+    // of running the model.
+    let mut series: Vec<f64> = Vec::with_capacity(args.repeat);
+    for _ in 0..args.repeat {
+        let started = std::time::Instant::now();
+        session.execute(&borrowed).map_err(forward_error)?;
+        series.push(started.elapsed().as_secs_f64() * 1e3);
+    }
+    let mut outputs: Vec<(String, Vec<f32>)> = Vec::new();
+    for (name, tensor) in session.outputs().map_err(forward_error)? {
+        match tensor {
+            crate::inference::runtime::HostTensor::F32(values) => outputs.push((name, values)),
+            other => {
+                return Err(CliError::inference(format!(
+                    "output `{name}` is {}, but this CLI prints f32 outputs only",
+                    other.dtype()
+                )))
+            }
+        }
+    }
+    let elapsed =
+        std::time::Duration::from_secs_f64(series.iter().copied().fold(0.0f64, f64::max) / 1e3);
 
     let _ = writeln!(out, "fastnn-infer run");
     let _ = writeln!(out, "  artifact: {}", args.model.display());
@@ -116,7 +146,25 @@ pub fn execute(args: &RunArgs, out: &mut dyn Write) -> Result<(), CliError> {
         session.plan().reorders.len(),
         thousands(session.arena().bytes() as u64)
     );
-    let _ = writeln!(out, "  forward: {:.3} ms", elapsed.as_secs_f64() * 1e3);
+    if series.len() == 1 {
+        let _ = writeln!(out, "  forward: {:.3} ms", elapsed.as_secs_f64() * 1e3);
+    } else {
+        let mut sorted = series.clone();
+        sorted.sort_by(f64::total_cmp);
+        let median = sorted[sorted.len() / 2];
+        let p95 = sorted[(sorted.len() * 95 / 100).min(sorted.len() - 1)];
+        let mean = series.iter().sum::<f64>() / series.len() as f64;
+        let _ = writeln!(out, "  forward: median {median:.3} ms, p95 {p95:.3} ms");
+        let _ = writeln!(
+            out,
+            "  series:  {} forwards, min {:.3}, mean {:.3}, max {:.3} ms (warm-up {})",
+            series.len(),
+            sorted[0],
+            mean,
+            sorted[sorted.len() - 1],
+            args.warmup
+        );
+    }
 
     if let Some(directory) = &args.output_dir {
         std::fs::create_dir_all(directory).map_err(|error| {

@@ -173,6 +173,10 @@ pub struct RunArgs {
     pub inputs: Vec<InputArg>,
     /// Optional directory for raw `f32` outputs.
     pub output_dir: Option<PathBuf>,
+    /// Warm-up forwards before the measured series.
+    pub warmup: usize,
+    /// Measured forwards; 1 reports the cold forward only.
+    pub repeat: usize,
 }
 
 /// Arguments of `inspect`.
@@ -305,6 +309,8 @@ fn parse_run(args: &[String]) -> Result<Command, CliError> {
     let mut threads = None;
     let mut inputs = Vec::new();
     let mut output_dir = None;
+    let mut warmup = None;
+    let mut repeat = None;
     let mut positional = None;
     let mut cursor = Cursor::new(args);
     while let Some((flag, inline)) = cursor.next_flag() {
@@ -328,6 +334,8 @@ fn parse_run(args: &[String]) -> Result<Command, CliError> {
                 inputs.push(input);
             }
             "--output-dir" => set_path(&mut output_dir, cursor.value(inline, flag)?, flag)?,
+            "--warmup" => set_count(&mut warmup, cursor.value(inline, flag)?, flag, true)?,
+            "--repeat" => set_count(&mut repeat, cursor.value(inline, flag)?, flag, false)?,
             other if other.starts_with('-') => return Err(unknown_flag("run", other)),
             other => set_positional(&mut positional, other, "run")?,
         }
@@ -338,6 +346,8 @@ fn parse_run(args: &[String]) -> Result<Command, CliError> {
         threads: threads.unwrap_or(ThreadsArg::Auto),
         inputs,
         output_dir,
+        warmup: warmup.unwrap_or(0),
+        repeat: repeat.unwrap_or(1),
     }))
 }
 
@@ -454,6 +464,34 @@ fn set_threads(slot: &mut Option<ThreadsArg>, value: &str, flag: &str) -> Result
     Ok(())
 }
 
+/// Parse a whole-number count. `allow_zero` distinguishes "repeat none" from
+/// "repeat at least once": a warm-up may be zero, a measured series may not.
+fn set_count(
+    slot: &mut Option<usize>,
+    value: &str,
+    flag: &str,
+    allow_zero: bool,
+) -> Result<(), CliError> {
+    if slot.is_some() {
+        return Err(CliError::usage(format!("`{flag}` was given twice")));
+    }
+    let parsed: usize = value.parse().map_err(|_| {
+        CliError::usage(format!(
+            "`{flag}` expects a whole number, but `{value}` is not"
+        ))
+    })?;
+    if parsed == 0 && !allow_zero {
+        return Err(CliError::usage(format!("`{flag}` must be at least 1")));
+    }
+    if parsed > 1_000_000 {
+        return Err(CliError::usage(format!(
+            "`{flag} {parsed}` is unreasonably large; cap it at 1000000"
+        )));
+    }
+    *slot = Some(parsed);
+    Ok(())
+}
+
 fn set_positional(slot: &mut Option<PathBuf>, value: &str, command: &str) -> Result<(), CliError> {
     if slot.is_some() {
         return Err(CliError::usage(format!(
@@ -560,9 +598,16 @@ OPTIONS:
   --target <name>         target plan; the artifact default when absent
   --threads auto|<n>      worker request (default auto = physical cores)
   --output-dir <dir>      write each output as raw little-endian f32
+  --warmup <n>            forwards before the measured series (default 0)
+  --repeat <n>            measured forwards (default 1); >1 prints median/p95
 
 Every graph input must be supplied exactly once. An output is printed as its
 name, shape, element count, min/max/mean and finite count.
+
+With `--repeat`, the reported number is the forward only: the artifact is
+already mapped, the plan is already built and the inputs are already resident,
+so the series measures the executor. Use `--warmup` to exclude the first
+forward's page faults on the mapped weights.
 ";
 
 const HELP_INSPECT: &str = "\
