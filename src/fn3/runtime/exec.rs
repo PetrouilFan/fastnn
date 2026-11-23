@@ -1077,6 +1077,9 @@ fn prepare_onednn(
                 other => other,
             })?;
     }
+    // One shared staging pool per session, sized after every segment has
+    // declared its row blocks (#115).
+    engine.finish_staging(workers)?;
     Ok(Some(engine))
 }
 
