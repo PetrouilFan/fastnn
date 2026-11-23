@@ -231,10 +231,24 @@ only buy staging buffers. Against the shipped 3.0 baseline binary, interleaved:
 **33.26 → 22.73 ms at four workers (1.46×) and 31.68 → 18.90 ms at eight
 (1.68×)**, with the one-worker number unchanged at 44.3 ms. At this floor the
 plan reports 42 row-split and 22 channel-split convolutions, 21 channels-last
-segments, 14.1 MB of staging and 12.8 MB of prepacked weights; peak RSS
-(`VmHWM`) is 76 MB at one worker, 117 MB at four and 125 MB at eight, against
-105 MB at eight for the 16 Ki floor. That trade — 1.45x the wall speed for
-20 MB — is what #115 has to buy back by bounding staging per worker.
+segments, 12.8 MB of prepacked weights and (before the pooling below) 14.1 MB
+of staging; peak RSS (`VmHWM`) was 76 MB at one worker, 117 MB at four and
+125 MB at eight, against 105 MB at eight for the 16 Ki floor.
+
+The staging cost is now bounded per worker rather than per block. A row block
+needs dense source and destination rows while it runs, and at most one staged
+block per worker runs at a time, so the engine allocates one slot per worker —
+each as large as the largest staged block — and leases a slot to a block for
+the duration of its `execute`. `OneDnnEngine::finish_staging` sizes the pool
+after every segment is prepared (`min(workers, largest staged block count)`),
+and the segments share it through an `Arc`. Measured at eight workers on
+yolov8n: `staging_bytes` falls from 14,110,720 B to **2,048,000 B** (−86%), and
+peak RSS of the CLI process (`ru_maxrss`, three interleaved runs each) from
+105,908–106,220 KiB to 93,676–94,380 KiB; at four workers 97,172–97,700 KiB to
+84,888–85,572 KiB. Median wall time is unchanged within host noise (45.4/19.9/
+20.0 ms before at 1/4/8 workers against 44.5/18.7/21.0 ms after, 20 forwards
+each). An 8 MiB → 2 MiB worker stack was also tried and made no measurable RSS
+difference on this host, so it was not kept.
 
 Two things this sweep **did not** fix, recorded so the next person does not
 re-derive them:

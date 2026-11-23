@@ -115,7 +115,7 @@ use crate::inference::error::Fn3Error;
 use crate::inference::ops::OpId;
 use crate::inference::shape::Shape;
 use crate::inference::storage::AlignedBuffer;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use self::ffi::{
     context, Desc, EngineHandle, ExecArg, MemoryHandle, PostOpsHandle, PrimitiveAttrHandle,
@@ -500,10 +500,12 @@ struct Block {
 /// input traffic, not the O(blocks) the channel split pays.
 #[derive(Debug)]
 struct RowStaging {
-    /// Dense NCHW input rows, allocated only when the block reads from staging.
-    source: Option<AlignedBuffer>,
-    /// Dense NCHW output rows, allocated only when the block writes staging.
-    destination: Option<AlignedBuffer>,
+    /// Byte length of the dense source rows this block copies in; zero when
+    /// the source is already dense (a channels-last block reads its buffer).
+    source_bytes: usize,
+    /// Byte length of the dense destination rows; zero when the destination is
+    /// blocked.
+    destination_bytes: usize,
     /// Byte length of the parent input slot (what the executor hands us).
     source_len: usize,
     /// Byte length of the parent output slot.
@@ -522,10 +524,11 @@ struct RowStaging {
 }
 
 impl RowStaging {
-    fn copy_in(&self, address: usize) -> Result<(), Fn3Error> {
-        let Some(destination_buffer) = self.source.as_ref() else {
+    /// Copy this block's input rows into `destination_buffer`, a pooled slot.
+    fn copy_in(&self, address: usize, destination_buffer: &AlignedBuffer) -> Result<(), Fn3Error> {
+        if self.source_bytes == 0 {
             return Ok(());
-        };
+        }
         if address == 0 {
             return Err(segment_error(
                 "a staged source has a null address".to_string(),
@@ -534,8 +537,8 @@ impl RowStaging {
         // SAFETY: `address` is the executor's live source window for this
         // call. The plan sized that slot to `source_len` bytes (batch, channels,
         // in_h, in_w), which is the length used here; the window outlives the
-        // copy. The destination is this block's own staging buffer, and the
-        // block is executed by one worker at a time.
+        // copy. The destination is the staging slot this block leased for the
+        // call, and one worker runs the block at a time.
         let source = unsafe { std::slice::from_raw_parts(address as *const u8, self.source_len) };
         let destination = unsafe {
             std::slice::from_raw_parts_mut(
@@ -555,10 +558,11 @@ impl RowStaging {
         Ok(())
     }
 
-    fn copy_out(&self, address: usize) -> Result<(), Fn3Error> {
-        let Some(source_buffer) = self.destination.as_ref() else {
+    /// Copy this block's output rows back out of `source_buffer`, a pooled slot.
+    fn copy_out(&self, address: usize, source_buffer: &AlignedBuffer) -> Result<(), Fn3Error> {
+        if self.destination_bytes == 0 {
             return Ok(());
-        };
+        }
         if address == 0 {
             return Err(segment_error(
                 "a staged destination has a null address".to_string(),
@@ -566,8 +570,8 @@ impl RowStaging {
         }
         // SAFETY: `address` is the executor's live destination window for this
         // call, `destination_len` bytes (batch, channels, out_h, out_w), and it
-        // is disjoint from the source by the plan. The staging buffer is owned
-        // by this block; one worker runs the block at a time.
+        // is disjoint from the source by the plan. The staging buffer is the
+        // slot this block leased; one worker runs the block at a time.
         let destination =
             unsafe { std::slice::from_raw_parts_mut(address as *mut u8, self.destination_len) };
         let source =
@@ -582,6 +586,106 @@ impl RowStaging {
             }
         }
         Ok(())
+    }
+}
+
+/// Row-staging buffers shared by every block of the session's engine.
+///
+/// # Why it exists
+///
+/// A row block stages dense source and destination rows while it runs (see
+/// [`RowStaging`]). Those buffers used to be owned by the block, allocated at
+/// session open and retained for the session's life, so staging memory grew
+/// with the *block count*: eight workers on YOLOv8n allocated 14,110,720 B.
+/// At most one staged block per worker runs at a time, so one slot per worker
+/// is enough, and each slot only has to be as large as the largest block. The
+/// pool makes staging O(workers x block) instead of O(blocks), while every
+/// block still gets a dense buffer for its own geometry.
+#[derive(Debug)]
+struct StagingPool {
+    slots: Vec<StagingSlot>,
+    /// Indices of free slots. Locking costs a few nanoseconds per block,
+    /// against the millisecond-scale primitive the block runs.
+    free: Mutex<Vec<usize>>,
+}
+
+#[derive(Debug)]
+struct StagingSlot {
+    /// Dense NCHW input rows; `None` when no staged block copies input rows
+    /// (every source is already blocked).
+    source: Option<AlignedBuffer>,
+    /// Dense NCHW output rows; `None` when every destination is blocked.
+    destination: Option<AlignedBuffer>,
+}
+
+/// One leased staging slot, returned to the pool on drop.
+struct StagingLease<'a> {
+    pool: &'a StagingPool,
+    index: usize,
+}
+
+impl<'a> StagingLease<'a> {
+    fn slot(&self) -> &'a StagingSlot {
+        &self.pool.slots[self.index]
+    }
+}
+
+impl Drop for StagingLease<'_> {
+    fn drop(&mut self) {
+        let mut free = self
+            .pool
+            .free
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        free.push(self.index);
+    }
+}
+
+impl StagingPool {
+    fn new(slots: usize, source_bytes: usize, destination_bytes: usize) -> Result<Self, Fn3Error> {
+        assert!(slots > 0, "a pool with no slot cannot serve a staged block");
+        let mut buffers = Vec::with_capacity(slots);
+        for _ in 0..slots {
+            let source = if source_bytes == 0 {
+                None
+            } else {
+                Some(AlignedBuffer::zeroed(source_bytes)?)
+            };
+            let destination = if destination_bytes == 0 {
+                None
+            } else {
+                Some(AlignedBuffer::zeroed(destination_bytes)?)
+            };
+            buffers.push(StagingSlot {
+                source,
+                destination,
+            });
+        }
+        Ok(StagingPool {
+            slots: buffers,
+            free: Mutex::new((0..slots).rev().collect()),
+        })
+    }
+
+    fn acquire(&self) -> StagingLease<'_> {
+        let mut free = self
+            .free
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let index = free
+            .pop()
+            .expect("the pool has one slot per concurrently running staged block");
+        StagingLease { pool: self, index }
+    }
+
+    fn bytes(&self) -> usize {
+        self.slots
+            .iter()
+            .map(|slot| {
+                slot.source.as_ref().map_or(0, AlignedBuffer::len)
+                    + slot.destination.as_ref().map_or(0, AlignedBuffer::len)
+            })
+            .sum()
     }
 }
 
@@ -686,13 +790,30 @@ enum ArgSource {
 }
 
 impl Block {
-    fn run(&self, inputs: &[usize], outputs: &[usize]) -> Result<(), Fn3Error> {
-        if let Some(staging) = &self.staging {
-            if staging.source.is_some() {
+    fn run(
+        &self,
+        inputs: &[usize],
+        outputs: &[usize],
+        pool: Option<&StagingPool>,
+    ) -> Result<(), Fn3Error> {
+        // One slot per concurrently running staged block: a lease held for the
+        // whole call, returned when the block finishes (including on error).
+        let lease = match (&self.staging, pool) {
+            (Some(_), Some(pool)) => Some(pool.acquire()),
+            (Some(_), None) => {
+                return Err(segment_error(
+                    "a row-split block has no staging pool".to_string(),
+                ))
+            }
+            (None, _) => None,
+        };
+        let slot = lease.as_ref().map(StagingLease::slot);
+        if let (Some(staging), Some(slot)) = (&self.staging, slot) {
+            if let Some(source_buffer) = slot.source.as_ref() {
                 let source = *inputs
                     .first()
                     .ok_or_else(|| segment_error("missing input window 0".to_string()))?;
-                staging.copy_in(source)?;
+                staging.copy_in(source, source_buffer)?;
             }
         }
         for (memory, source) in self.memories.iter().zip(self.sources.iter()) {
@@ -703,16 +824,12 @@ impl Block {
                 ArgSource::Output(index) => *outputs
                     .get(index)
                     .ok_or_else(|| segment_error(format!("missing output window {index}")))?,
-                ArgSource::StagingSource => self
-                    .staging
-                    .as_ref()
-                    .and_then(|staging| staging.source.as_ref())
+                ArgSource::StagingSource => slot
+                    .and_then(|slot| slot.source.as_ref())
                     .map(|buffer| buffer.as_ptr() as usize)
                     .ok_or_else(|| segment_error("a block has no source staging".to_string()))?,
-                ArgSource::StagingDestination => self
-                    .staging
-                    .as_ref()
-                    .and_then(|staging| staging.destination.as_ref())
+                ArgSource::StagingDestination => slot
+                    .and_then(|slot| slot.destination.as_ref())
                     .map(|buffer| buffer.as_ptr() as usize)
                     .ok_or_else(|| {
                         segment_error("a block has no destination staging".to_string())
@@ -762,10 +879,8 @@ impl Block {
                 EpilogueTarget::Output => *outputs
                     .first()
                     .ok_or_else(|| segment_error("missing output window 0".to_string()))?,
-                EpilogueTarget::StagingDestination => self
-                    .staging
-                    .as_ref()
-                    .and_then(|staging| staging.destination.as_ref())
+                EpilogueTarget::StagingDestination => slot
+                    .and_then(|slot| slot.destination.as_ref())
                     .map(|buffer| buffer.as_ptr() as usize)
                     .ok_or_else(|| {
                         segment_error("a fused epilogue has no destination staging".to_string())
@@ -778,12 +893,12 @@ impl Block {
             // block alone writes.
             unsafe { epilogue.apply(address) }?;
         }
-        if let Some(staging) = &self.staging {
-            if staging.destination.is_some() {
+        if let (Some(staging), Some(slot)) = (&self.staging, slot) {
+            if let Some(destination_buffer) = slot.destination.as_ref() {
                 let destination = *outputs
                     .first()
                     .ok_or_else(|| segment_error("missing output window 0".to_string()))?;
-                staging.copy_out(destination)?;
+                staging.copy_out(destination, destination_buffer)?;
             }
         }
         Ok(())
@@ -917,6 +1032,10 @@ pub(crate) struct PreparedSegment {
     prelude: Option<Arc<SegmentReorder>>,
     /// `true` when the result stays in the engine's channels-last layout.
     blocked: bool,
+    /// Shared staging slots for this segment's row blocks, `None` when it has
+    /// none. `Arc` because the pool is session-wide: one allocation serves
+    /// every staged segment.
+    staging_pool: Option<Arc<StagingPool>>,
 }
 
 impl PreparedSegment {
@@ -956,7 +1075,7 @@ impl PreparedSegment {
             index: index as u64,
             len: self.blocks.len() as u64,
         })?;
-        block.run(inputs, outputs)
+        block.run(inputs, outputs, self.staging_pool.as_deref())
     }
 }
 
@@ -1210,6 +1329,44 @@ impl OneDnnEngine {
     /// The prepared segment at a plan position, if one was built.
     pub(crate) fn prepared(&self, index: usize) -> Option<&PreparedSegment> {
         self.prepared.get(index).and_then(Option::as_ref)
+    }
+
+    /// Build the shared staging pool once every segment is prepared.
+    ///
+    /// The pool has one slot per worker, and never more than the largest
+    /// number of staged blocks in one segment (segments execute one at a
+    /// time). Each slot is as large as the largest staged block, so staging
+    /// memory is O(workers x block) rather than O(blocks) — the #115 fix.
+    pub(crate) fn finish_staging(&mut self, workers: usize) -> Result<(), Fn3Error> {
+        let mut max_blocks = 0usize;
+        let mut max_source = 0usize;
+        let mut max_destination = 0usize;
+        for prepared in self.prepared.iter().flatten() {
+            let mut count = 0usize;
+            for staging in prepared
+                .blocks
+                .iter()
+                .filter_map(|block| block.staging.as_ref())
+            {
+                count += 1;
+                max_source = max_source.max(staging.source_bytes);
+                max_destination = max_destination.max(staging.destination_bytes);
+            }
+            max_blocks = max_blocks.max(count);
+        }
+        if max_blocks == 0 {
+            self.staging_bytes = 0;
+            return Ok(());
+        }
+        let slots = workers.max(1).min(max_blocks);
+        let pool = Arc::new(StagingPool::new(slots, max_source, max_destination)?);
+        self.staging_bytes = pool.bytes();
+        for prepared in self.prepared.iter_mut().flatten() {
+            if prepared.blocks.iter().any(|block| block.staging.is_some()) {
+                prepared.staging_pool = Some(Arc::clone(&pool));
+            }
+        }
+        Ok(())
     }
 
     /// The convolution split recorded for plan segment `index`, if it is a
@@ -1709,18 +1866,9 @@ impl OneDnnEngine {
                 if source_bytes + destination_bytes == 0 {
                     None
                 } else {
-                    self.staging_bytes += source_bytes + destination_bytes;
                     Some(RowStaging {
-                        source: if source_bytes == 0 {
-                            None
-                        } else {
-                            Some(AlignedBuffer::zeroed(source_bytes)?)
-                        },
-                        destination: if destination_bytes == 0 {
-                            None
-                        } else {
-                            Some(AlignedBuffer::zeroed(destination_bytes)?)
-                        },
+                        source_bytes,
+                        destination_bytes,
                         source_len: staging_bytes(
                             &[conv.batch, conv.in_channels, conv.in_hw[0], conv.in_hw[1]],
                             std::mem::size_of::<f32>(),
@@ -1891,6 +2039,7 @@ impl OneDnnEngine {
             blocks: prepared,
             prelude: preload,
             blocked: dst_layout.is_some(),
+            staging_pool: None,
         })
     }
 
@@ -2030,6 +2179,7 @@ impl OneDnnEngine {
             blocks: prepared,
             prelude: None,
             blocked: false,
+            staging_pool: None,
         })
     }
 
@@ -2165,6 +2315,7 @@ impl OneDnnEngine {
             blocks: prepared,
             prelude: None,
             blocked: false,
+            staging_pool: None,
         })
     }
 
@@ -2281,6 +2432,33 @@ mod tests {
             dtype: DType::F32,
             constant,
         }
+    }
+
+    #[test]
+    fn the_staging_pool_reuses_a_slot_after_the_block_finishes() {
+        let pool = StagingPool::new(2, 128, 64).unwrap();
+        assert_eq!(pool.bytes(), 2 * (128 + 64));
+        let first = pool.acquire();
+        let second = pool.acquire();
+        // Both slots are leased; the two leases address different buffers.
+        assert_ne!(
+            first.slot().source.as_ref().unwrap().as_ptr(),
+            second.slot().source.as_ref().unwrap().as_ptr()
+        );
+        let first_index = first.index;
+        drop(first);
+        let third = pool.acquire();
+        assert_eq!(third.index, first_index, "the freed slot is reused");
+        drop(second);
+        drop(third);
+        assert_eq!(pool.bytes(), 384, "a lease never changes the pool size");
+    }
+
+    #[test]
+    fn a_pool_with_no_destination_only_allocates_sources() {
+        let pool = StagingPool::new(1, 0, 64).unwrap();
+        assert!(pool.slots[0].source.is_none());
+        assert_eq!(pool.bytes(), 64);
     }
 
     #[test]

@@ -47,7 +47,10 @@ convolution throughput, not block count: the 57 fused `Conv+Swish` segments are
 75 % of the forward, and the small layers (10x10, 20x20) cannot fill eight
 workers. `docs/v3/backends.md` records the per-op table, the negative results
 (one pool region per forward: no change; graph-level scheduling: 1.59x ceiling
-on this graph) and the cost in peak RSS (105 MB -> 125 MB at eight workers, 76 MB at one).
+on this graph). Staging is now pooled per worker (#115): `staging_bytes` at
+eight workers fell from 14,110,720 B to 2,048,000 B and CLI peak RSS at eight
+workers from ~106 MB to ~94 MB, with median wall time unchanged within noise
+(measured A/B, three runs each; see `docs/v3/backends.md`).
 
 ### Without the Python binding
 
@@ -164,9 +167,10 @@ immutable, and every `session()` owns its own arena and thread pool.
    one op at a time through `backend::cpu::dispatch_kernels`, and
    `model/{plan,session,specialize,kv}.rs` overlap `runtime/`. This is the last
    place where the old shape survives.
-3. **#115 peak RSS**: the 4 Ki floor raised eight-worker peak RSS on yolov8n
-   from 105 MB to 125 MB (76 MB at one worker); the row-split staging buffers
-   are per block and should be bounded per worker rather than per plan.
+3. ~~#115 peak RSS~~ (done): row staging is a session-wide pool of one slot per
+   worker instead of one buffer per block. `staging_bytes` at eight workers:
+   14,110,720 B → 2,048,000 B; CLI peak RSS: ~106 MB → ~94 MB at eight, ~97 MB
+   → ~85 MB at four, with no wall-time change outside host noise.
 4. **Phase 5 W8A8** (#103): oneDNN int8 with per-channel scales and calibration,
    gated on accuracy rather than on a dtype name.
 5. **Phase 6 decoder/KV** (#108) and **phase 7 packaging** (#109), hardening
