@@ -260,6 +260,17 @@ fn recognise_sum(
     if other == conv_out {
         return None;
     }
+    // The residual must already exist when the anchor runs. A graph value is
+    // defined by an earlier segment, but nothing stops an `Add` far below the
+    // convolution from reading a value produced in between: folding that add
+    // into the anchor would make the fused segment read a value that has not
+    // been written yet, and the liveness allocator — which trusts program
+    // order — would then hand the same arena offset to two live values.
+    if let Some(producer) = segments.iter().position(|seg| seg.outputs.contains(&other)) {
+        if producer >= anchor {
+            return None;
+        }
+    }
     let sum_out = add_segment.outputs[0];
     // The type rule: the residual operand and the result have the anchor's own
     // type. No broadcast is fused, because a oneDNN sum has no broadcast and
@@ -462,6 +473,29 @@ mod tests {
         assert_eq!(fusions.len(), 1);
         assert_eq!(fusions[0].fused.activation, Some(Activation::Swish));
         assert_eq!(segments[1].op_id(), OpId::Add);
+    }
+
+    #[test]
+    fn a_residual_produced_after_the_convolution_is_not_fused() {
+        // conv -> relu -> add(conv, relu): the add sits below the convolution
+        // but its residual is written only after it. Fusing would read that
+        // value before it exists and overlap two live arena slots.
+        let mut script = Script::new(&[]);
+        let x = script.value(&[1, 2, 4, 4]);
+        let w = script.value(&[4, 2, 3, 3]);
+        let conv = script.value(&[1, 4, 4, 4]);
+        let residual = script.value(&[1, 4, 4, 4]);
+        let out = script.value(&[1, 4, 4, 4]);
+        script.push(OpId::Conv, &[x, w], conv);
+        script.push(OpId::Relu, &[conv], residual);
+        script.push(OpId::Add, &[conv, residual], out);
+        let (segments, fusions) = fuse(script.segments, &script.types);
+        assert!(
+            fusions.is_empty(),
+            "a use-before-def residual must not be fused"
+        );
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[2].op_id(), OpId::Add);
     }
 
     #[test]

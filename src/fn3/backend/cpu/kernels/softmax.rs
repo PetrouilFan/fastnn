@@ -121,6 +121,57 @@ pub(crate) fn softmax(
         return Ok(());
     }
 
+    // Mid-axis fast path: the tensor is contiguous but the softmax axis is in
+    // the middle, so a row is a strided run with a constant stride of `inner`
+    // elements. That is the shape a detector head produces (`[1, 64, 8400]`
+    // with axis 1), and the generic locator below spends most of its time
+    // decomposing coordinates there. The three passes keep the general path's
+    // arithmetic order, so the result is bit-identical.
+    if inner > 1 && contiguous_io {
+        let needed = rows * width_usize;
+        if source.len() < needed || destination.len() < needed {
+            return Err(Fn3Error::ShapeMismatch {
+                op: Some(op),
+                expected: format!("{needed} elements for {rows} rows of {width_usize}"),
+                actual: format!("{} input, {} output", source.len(), destination.len()),
+            });
+        }
+        let inner_usize = inner as usize;
+        let outer_usize = outer as usize;
+        let plane = width_usize
+            .checked_mul(inner_usize)
+            .ok_or(Fn3Error::ShapeOverflow {
+                context: "cpu softmax mid-axis stride",
+                axis: None,
+                detail: format!("{width_usize} x {inner_usize}"),
+            })?;
+        for outer_index in 0..outer_usize {
+            let base = outer_index * plane;
+            for row in 0..inner_usize {
+                let offset = base + row;
+                let mut maximum = f32::NEG_INFINITY;
+                for position in 0..width_usize {
+                    let value = source[offset + position * inner_usize];
+                    if value > maximum {
+                        maximum = value;
+                    }
+                }
+                let mut total = 0.0f32;
+                for position in 0..width_usize {
+                    let index = offset + position * inner_usize;
+                    let exponent = (source[index] - maximum).exp();
+                    destination[index] = exponent;
+                    total += exponent;
+                }
+                for position in 0..width_usize {
+                    let index = offset + position * inner_usize;
+                    destination[index] /= total;
+                }
+            }
+        }
+        return Ok(());
+    }
+
     let leading_dims = input.shape().dims()[..axis].to_vec();
     let trailing_dims = input.shape().dims()[axis + 1..].to_vec();
     let mut coordinates = vec![0u64; rank];
@@ -257,6 +308,62 @@ mod tests {
                 .map(|value| value.to_bits())
                 .collect::<Vec<_>>(),
             "the row-wise softmax changed a bit"
+        );
+    }
+
+    #[test]
+    fn the_contiguous_mid_axis_path_is_bit_identical_to_the_reference_loop() {
+        // [2, 4, 5] with axis 1: outer 2, width 4, inner 5, so every row is a
+        // strided run. Compare the fast path against the documented algorithm.
+        let shape = [2u64, 4, 5];
+        let elements = (shape[0] * shape[1] * shape[2]) as usize;
+        let values: Vec<f32> = (0..elements)
+            .map(|index| ((index as f32) * 0.31).cos() * 6.0)
+            .collect();
+        let input = Tensor::from_f32(Shape::from_dims(shape), &values).unwrap();
+        let mut out = Tensor::zeros(Shape::from_dims(shape), DType::F32, DeviceId::Cpu).unwrap();
+        {
+            let input_view = input.as_view().unwrap();
+            let mut out_view = out.as_mut_view().unwrap();
+            softmax(
+                OpId::Softmax,
+                &input_view,
+                &mut out_view,
+                &OpParams::default().with_axes([1]),
+            )
+            .unwrap();
+        }
+        let got = out.as_f32_slice().unwrap().to_vec();
+        let (outer, width, inner) = (2usize, 4usize, 5usize);
+        let mut expected = vec![0.0f32; elements];
+        for o in 0..outer {
+            for row in 0..inner {
+                let index = |position: usize| o * width * inner + row + position * inner;
+                let mut maximum = f32::NEG_INFINITY;
+                for position in 0..width {
+                    let value = values[index(position)];
+                    if value > maximum {
+                        maximum = value;
+                    }
+                }
+                let mut total = 0.0f32;
+                for position in 0..width {
+                    let exponent = (values[index(position)] - maximum).exp();
+                    expected[index(position)] = exponent;
+                    total += exponent;
+                }
+                for position in 0..width {
+                    expected[index(position)] /= total;
+                }
+            }
+        }
+        assert_eq!(
+            got.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            "the mid-axis softmax changed a bit"
         );
     }
 
