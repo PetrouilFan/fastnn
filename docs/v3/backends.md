@@ -608,8 +608,21 @@ the host's background load affects both equally:
 
 Against ONNX Runtime on the same host and input that is **1.86× at one worker**
 (44.46 vs 23.86, inside the ≤2× goal), 2.91× at four (22.73 vs 7.82) and
-**2.47× at eight** (18.90 vs 7.64), down from 4.1×. The four-worker
-configuration is again the better one relative to the eight-worker one.
+**2.47× at eight** (18.90 vs 7.64), down from 4.3×. The eight-worker
+configuration is now the better one relative to four; on the phase-4a tree it
+was the *worse* one (28.22 ms at eight against 26.47 at four), which is what the
+one-block-per-convolution diagnosis predicted and what the floor change fixed.
+
+The whole curve, min of three rounds, CLI, load average 5.2 during the runs:
+
+| Workers | 1 | 2 | 3 | 4 | 6 | 8 |
+|---|--:|--:|--:|--:|--:|--:|
+| Median ms | 44.56 | 29.75 | 25.48 | 23.27 | 21.73 | 22.28 |
+
+It now improves monotonically to six workers and is flat (within the host's
+noise) from six to eight. The absolute numbers in this table are 2–3 ms worse
+than the interleaved A/B above because it ran at a different moment on a shared
+desktop; the shape of the curve is the point, and it is measured in one batch.
 
 The per-op table at eight threads, current tree (23.0 ms forward, 125 MB peak):
 
