@@ -275,29 +275,83 @@ fn matmul(node: &Node, inputs: &[TensorType]) -> Result<Vec<TensorType>, Fn3Erro
             ),
         ));
     }
-    if lhs.rank() != 2 || rhs.rank() != 2 {
+    if lhs.rank() < 2 || rhs.rank() < 2 {
         return Err(invalid(
             node,
             format!(
-                "op matmul is a rank-2 contract; operands are {} and {}",
+                "op matmul needs rank >= 2 with the matrix axes last; operands are {} and {}",
                 render(lhs.dims()),
                 render(rhs.dims())
             ),
         ));
     }
-    if lhs.dims()[1] != rhs.dims()[0] {
+    let lhs_dims = lhs.dims();
+    let rhs_dims = rhs.dims();
+    let (rows, inner) = (lhs_dims[lhs_dims.len() - 2], lhs_dims[lhs_dims.len() - 1]);
+    let (rhs_inner, columns) = (rhs_dims[rhs_dims.len() - 2], rhs_dims[rhs_dims.len() - 1]);
+    if inner != rhs_inner {
         return Err(shape_mismatch(
             node,
-            format!("inner extents to match in {}", render(lhs.dims())),
+            format!("inner extents to match in {}", render(lhs_dims)),
             format!(
-                "{} has inner extent {} vs {}",
-                render(rhs.dims()),
-                rhs.dims()[0],
-                lhs.dims()[1]
+                "{} contracts {} vs {}",
+                render(rhs_dims),
+                rhs_inner,
+                render(&[inner])
             ),
         ));
     }
-    Ok(vec![lhs.with_shape(vec![lhs.dims()[0], rhs.dims()[1]])])
+    // ONNX MatMul is NumPy matmul: the leading dimensions broadcast right
+    // aligned, and only the last two axes are the matrix. A transformer
+    // attention block multiplies [1, heads, seq, head_dim] by
+    // [1, heads, head_dim, seq] this way, which is why a rank-2-only rule
+    // could not import a current YOLO export.
+    let lhs_batch = &lhs_dims[..lhs_dims.len() - 2];
+    let rhs_batch = &rhs_dims[..rhs_dims.len() - 2];
+    let batch_len = lhs_batch.len().max(rhs_batch.len());
+    let mut out_dims = Vec::with_capacity(batch_len + 2);
+    for position in 0..batch_len {
+        let left = lhs_batch
+            .len()
+            .checked_sub(batch_len - position)
+            .map(|index| lhs_batch[index]);
+        let right = rhs_batch
+            .len()
+            .checked_sub(batch_len - position)
+            .map(|index| rhs_batch[index]);
+        let extent = match (left, right) {
+            (Some(left), Some(right)) => matmul_batch_dim(node, left, right)?,
+            (Some(only), None) | (None, Some(only)) => only,
+            (None, None) => unreachable!("position is inside max(len)"),
+        };
+        out_dims.push(extent);
+    }
+    out_dims.push(rows);
+    out_dims.push(columns);
+    Ok(vec![lhs.with_shape(out_dims)])
+}
+
+/// Broadcast one pair of extents the way NumPy does.
+///
+/// A symbolic extent only broadcasts against a literal one, which is the
+/// literal `1`; two different symbols describe two batch sizes that this
+/// graph cannot serve with one kernel, so they are rejected rather than
+/// guessed.
+fn matmul_batch_dim(node: &Node, left: DimExpr, right: DimExpr) -> Result<DimExpr, Fn3Error> {
+    if left == right {
+        return Ok(left);
+    }
+    match (left, right) {
+        (DimExpr::Const(1), other) | (other, DimExpr::Const(1)) => Ok(other),
+        (left, right) => Err(invalid(
+            node,
+            format!(
+                "batch extents {} and {} do not broadcast (only a literal 1 does)",
+                render(&[left]),
+                render(&[right])
+            ),
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2916,7 +2970,10 @@ mod tests {
     }
 
     #[test]
-    fn matmul_rejects_a_non_rank_two_operand() {
+    fn matmul_broadcasts_leading_batch_axes() {
+        // [2,3,4] x [4,5] is a batched matrix product with a rank-2 right
+        // operand: the leading 2 broadcasts against nothing, so the result is
+        // [2,3,5].
         let mut graph = Graph::new();
         let lhs = add_value(&mut graph, DType::F32, consts(&[2, 3, 4]));
         let rhs = add_value(&mut graph, DType::F32, consts(&[4, 5]));
@@ -2929,9 +2986,68 @@ mod tests {
             OpParams::new(),
             0,
         );
+        infer_shapes(&mut graph).expect("a batched product infers");
+        assert_eq!(graph.value(out).unwrap().ty.dims(), consts(&[2, 3, 5]));
+    }
+
+    #[test]
+    fn matmul_broadcasts_one_batch_axis_against_many() {
+        // The attention product: [1,2,400,32] x [1,2,32,400] -> [1,2,400,400],
+        // and the same with a rank-3 left operand against a rank-4 right one.
+        let mut graph = Graph::new();
+        let lhs = add_value(&mut graph, DType::F32, consts(&[1, 2, 400, 32]));
+        let rhs = add_value(&mut graph, DType::F32, consts(&[2, 32, 400]));
+        let out = add_value(&mut graph, DType::F32, Vec::new());
+        add_node(
+            &mut graph,
+            OpId::MatMul,
+            &[lhs, rhs],
+            &[out],
+            OpParams::new(),
+            0,
+        );
+        infer_shapes(&mut graph).expect("the batch axes broadcast");
+        assert_eq!(
+            graph.value(out).unwrap().ty.dims(),
+            consts(&[1, 2, 400, 400])
+        );
+    }
+
+    #[test]
+    fn matmul_rejects_batch_axes_that_do_not_broadcast() {
+        let mut graph = Graph::new();
+        let lhs = add_value(&mut graph, DType::F32, consts(&[2, 3, 4]));
+        let rhs = add_value(&mut graph, DType::F32, consts(&[5, 4, 6]));
+        let out = add_value(&mut graph, DType::F32, Vec::new());
+        add_node(
+            &mut graph,
+            OpId::MatMul,
+            &[lhs, rhs],
+            &[out],
+            OpParams::new(),
+            0,
+        );
         let error = infer_shapes(&mut graph).unwrap_err();
-        assert!(error.to_string().contains("rank-2"), "{error}");
+        assert!(error.to_string().contains("do not broadcast"), "{error}");
         assert!(error.to_string().contains("node 0"), "{error}");
+    }
+
+    #[test]
+    fn matmul_rejects_a_rank_one_operand() {
+        let mut graph = Graph::new();
+        let lhs = add_value(&mut graph, DType::F32, consts(&[4]));
+        let rhs = add_value(&mut graph, DType::F32, consts(&[4, 6]));
+        let out = add_value(&mut graph, DType::F32, Vec::new());
+        add_node(
+            &mut graph,
+            OpId::MatMul,
+            &[lhs, rhs],
+            &[out],
+            OpParams::new(),
+            0,
+        );
+        let error = infer_shapes(&mut graph).unwrap_err();
+        assert!(error.to_string().contains("rank >= 2"), "{error}");
     }
 
     // -----------------------------------------------------------------------

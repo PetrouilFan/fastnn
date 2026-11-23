@@ -470,6 +470,50 @@ mod tests {
     }
 
     #[test]
+    fn batched_product_broadcasts_the_leading_axes() {
+        // [2,2,3] x [3,2] -> [2,2,2]: the right operand has no batch axis, so
+        // it is reused for both batches, which is the ONNX MatMul contract.
+        let lhs_dims = [2u64, 2, 3];
+        let rhs_dims = [3u64, 2];
+        let lhs_values: Vec<f32> = (0..12).map(|index| index as f32).collect();
+        let rhs_values: Vec<f32> = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0].to_vec();
+
+        let mut lhs = Tensor::zeros(Shape::from_dims(lhs_dims), DType::F32, DeviceId::Cpu).unwrap();
+        lhs.as_mut_view()
+            .unwrap()
+            .as_mut_slice::<f32>()
+            .unwrap()
+            .copy_from_slice(&lhs_values);
+        let mut rhs = Tensor::zeros(Shape::from_dims(rhs_dims), DType::F32, DeviceId::Cpu).unwrap();
+        rhs.as_mut_view()
+            .unwrap()
+            .as_mut_slice::<f32>()
+            .unwrap()
+            .copy_from_slice(&rhs_values);
+        let mut out =
+            Tensor::zeros(Shape::from_dims([2u64, 2, 2]), DType::F32, DeviceId::Cpu).unwrap();
+
+        let lhs_view = lhs.as_view().unwrap();
+        let rhs_view = rhs.as_view().unwrap();
+        let mut out_view = out.as_mut_view().unwrap();
+        matmul(OpId::MatMul, &lhs_view, &rhs_view, &mut out_view, 1).unwrap();
+
+        let mut expected = Vec::with_capacity(8);
+        for batch in 0..2usize {
+            for row in 0..2usize {
+                for column in 0..2usize {
+                    let mut sum = 0.0f32;
+                    for k in 0..3usize {
+                        sum += lhs_values[batch * 6 + row * 3 + k] * rhs_values[k * 2 + column];
+                    }
+                    expected.push(sum);
+                }
+            }
+        }
+        assert_eq!(out.as_f32_slice().unwrap(), expected.as_slice());
+    }
+
+    #[test]
     fn rank_two_product_accumulates_ascending_k() {
         let lhs =
             Tensor::from_f32(Shape::from_dims([2, 3]), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();

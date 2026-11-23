@@ -120,7 +120,7 @@ em-dash means the id exists in the IR but no ONNX node maps to it.
 
 Frontend restrictions that matter in practice:
 
-- The default-domain opset range is 12..=17. Opset 12 is the last revision with
+- The default-domain opset range is 12..=22. Opset 12 is the last revision with
   the `split` attribute form of `Split`; both that and the opset-13 input form
   are implemented.
 - `Constant` nodes are folded into the weight table, not executed.

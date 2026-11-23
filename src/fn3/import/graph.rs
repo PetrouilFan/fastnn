@@ -90,7 +90,7 @@ pub const MIN_OPSET: i64 = 12;
 ///
 /// Opset 18 moved `ReduceMean` axes from an attribute to an input, which this
 /// mapping would silently ignore. The pinned model is opset 14.
-pub const MAX_OPSET: i64 = 17;
+pub const MAX_OPSET: i64 = 22;
 
 /// Position of one value in [`GraphIr`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -5320,9 +5320,17 @@ impl<'a> Builder<'a> {
                     // hole in the middle. The planner identifies the surviving
                     // tail by dtype, so the hole is allowed there and nowhere
                     // else.
+                    // `Resize` in opset 13+ carries `X, roi?, scales?,
+                    // sizes?`; an exporter may omit `roi` (position 1), `scales`
+                    // (position 2) or both and keep `sizes`. Any hole the
+                    // planner can resolve by dtype is allowed.
                     let resize_scales_hole = node.op_type == "Resize"
-                        && position == 2
-                        && node.inputs.get(3).is_some_and(|later| !later.is_empty());
+                        && matches!(position, 1 | 2)
+                        && node
+                            .inputs
+                            .iter()
+                            .skip(position + 1)
+                            .any(|later| !later.is_empty());
                     if !resize_scales_hole {
                         omitted_before_present = true;
                     }
