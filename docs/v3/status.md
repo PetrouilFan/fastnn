@@ -105,31 +105,39 @@ truncates at every boundary and rejects v1 and future versions by number.
 
 | issue | state | commit |
 |---|---|---|
-| #112 stock YOLO11n import | opset 12..=22, `Resize(X, "", sizes)` / `Resize(X, roi, scales)`, batched attention `MatMul`, and input-shape binding now work; one blocker remains (below) | `84dec2e` |
+| #112 stock YOLO11n import | opset 12..=22, `Resize(X, "", sizes)` / `Resize(X, roi, scales)`, batched attention `MatMul`, input-shape binding, and the DFL decode's `Range(Cast(Gather(Shape(conv))))` now import; the model prepares and runs with ORT parity | `84dec2e`, `3ee9295` |
 | #113 Conv+Add fusion could read a residual produced later | rejected when the producer is at or after the anchor, with a regression test | `e004a46` |
 | #116 softmax on a contiguous mid-axis tensor | second contiguous path, bit-identical to the reference loop | `e004a46` |
 | #120 segment timing hid a fused activation under `Conv` | segments are reported by their whole chain (`Conv+Swish`) | `8ac736a` |
 
 `fastnn-infer doctor` on the stock `yolo11n.onnx` (11 MB, upstream asset,
-SHA-256 `634279b4…053b`, 421 ONNX nodes, opset 22) now gets past the operator
-set, both `Resize` forms, the rank-4 `MatMul` and the symbolic input, and stops
-at exactly one problem:
+SHA-256 `634279b4…053b`, 421 ONNX nodes, opset 22) reports **ready to prepare**:
+421 typed nodes, 641 values, every extent static. Inputs are declared
+`[batch, 3, height, width]`; `--shape images=1,3,640,640` replaces those extents
+before shape inference (see `docs/v3/scope.md` §6).
 
-```
-fastnn-infer doctor yolo11n.onnx --shape images=1,3,640,640
-1. [shape] value `/model.23/Range_output_0` produced by node 240
-   (onnx "Range"): an extent this import could not prove
-   (Range length from non-constant operands)
-```
+The last blocker was the DFL decode's index machinery:
+`Range(0, Cast(Gather(Shape(conv), i)), 1)`. The importer already tracked
+constant payloads, but `Cast` dropped them and `Range` only read integer atoms,
+so the f32 spelling of the same indices was untrackable. `3ee9295` folds both
+and adds the typed-IR shape rules for `Cast`, `Range`, `ConstantOfShape` and
+`Expand` (ops whose result type or length is data), and lifts the opset-13
+axes-as-input form of `Unsqueeze`/`Squeeze` into `OpParams.axes`.
 
-Inputs are declared `[batch, 3, height, width]`; `--shape` replaces those
-extents before shape inference (see `docs/v3/scope.md` §6), which is what makes
-the attention reshape and the detector head's `Reshape` targets static. The one
-remaining blocker is the DFL decode's index machinery: `Range` length comes from
-`Cast(Gather(Shape(conv)))`, and the importer does not yet fold a shape chain
-into values, so the length is unprovable. That is a constant-folding pass
-(#97's explicit pass), not an operator gap — `Range`, `Expand` and
-`ConstantOfShape` are already in the op table.
+Measured on the same host and protocol as the table above (5 warm-ups + 30
+forwards, median first, p95 from the same series), yolov8n's successor with an
+attention block and a 26k-anchor head:
+
+| yolo11n, 640x640 | 1 thread | 4 threads | 8 threads |
+|---|---:|---:|---:|
+| fastnn oneDNN | 165.74 ms | 75.14 ms | 61.79 ms |
+| ONNX Runtime | 77.78 ms | 32.07 ms | 27.90 ms |
+
+That is 2.13x / 2.34x / 2.21x, worse than yolov8n's 1.86x / 2.91x / 2.47x
+because the head's scalar segments and the attention block make the tail
+longer: 174 of 265 segments are scalar and run with a one-thread budget. Output
+parity on the same input, tolerance `2e-4 + 1e-3|ref|`: 0 of 705,600 values
+outside it (max_abs 2.3e-3 on values up to 637, mean_abs 2.4e-6).
 
 ## What the CLI and API look like now
 
@@ -148,12 +156,10 @@ immutable, and every `session()` owns its own arena and thread pool.
 
 ## Open work, in the order it should be taken
 
-1. **Constant folding through `Shape`** (#97, #104): the stock YOLO11n's last
-   blocker is the DFL decode, which builds index tensors with
-   `Range(Gather(Shape(conv)))`. The importer resolves shape payloads through
-   `OpParams` today but does not evaluate a shape chain into values, so the
-   `Range` length is unprovable. Folding those constant subgraphs is the
-   remaining step for #112.
+1. ~~Constant folding through `Shape`~~ (done in `3ee9295`): stock YOLO11n
+   imports, prepares and runs with ORT parity. The remaining shape work is
+   arbitrary constant subgraphs that are neither shape arithmetic nor a single
+   unary (a general `Constant` folder), which no pinned model needs yet.
 2. **#117 remove the pre-v3 CPU runtime**: the 40 decoder ops still dispatch
    one op at a time through `backend::cpu::dispatch_kernels`, and
    `model/{plan,session,specialize,kv}.rs` overlap `runtime/`. This is the last
