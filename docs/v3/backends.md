@@ -155,9 +155,9 @@ That is far cheaper than re-reading the whole input per block.
 **The choice**, deterministic from `(shape, params, worker count)`:
 
 1. compute the channel split (the phase-3a rule below);
-2. compute the row split: `min_rows` is the larger of the 16 Ki-element
-   payload floor divided by one output row (`N * Oc * W_out` elements) and one
-   dilated kernel span `ceil((kh - 1) * dilation / stride) + 1`;
+2. compute the row split: `min_rows` is the larger of the payload floor
+   divided by one output row (`N * Oc * W_out` elements) and one dilated
+   kernel span `ceil((kh - 1) * dilation / stride) + 1`;
    `B_r = min(workers, H_out / min_rows)` with contiguous row ranges;
 3. choose rows when `B_r > 1`, `B_r >= B_c` and the row split's estimated
    input cells (`sum over blocks of C_in * rows * W_in`) are fewer than the
@@ -197,11 +197,67 @@ min_units)` with `units` the indivisible pieces above and `min_units` the
 larger of:
 
 - `ceil(8 channels / channels-per-unit)`;
-- the smallest unit count whose output payload is at least 16 Ki `f32`
-  elements (64 KiB) — about one cache line per worker.
+- the smallest unit count whose output payload is at least [`MIN_BLOCK_ELEMENTS`]
+  `f32` elements.
 
 A problem below both floors stays one block, and one worker is always one
 block.
+
+### The payload floor, measured
+
+[`MIN_BLOCK_ELEMENTS`]: ../../../src/fn3/backend/cpu/onednn/geometry.rs
+
+The floor was **16 Ki elements** (64 KiB) from phase 3a until it was measured on
+a real graph. It was chosen from the reasoning "one cache line per worker on a
+16-core host", which is the right reasoning for a large layer and the wrong one
+for a detector at 320×320: a 64-channel 20×20 convolution has 25 600 outputs,
+so a 16 Ki floor makes it **one block**, and seven workers wait. The plan
+reported 146 blocks for 64 convolutions, and the median convolution had one.
+
+Sweep, AMD Ryzen 7 3700X (8 physical / 16 logical, AVX2), eight workers,
+yolov8n at `[1,3,320,320]`, five warm-ups + thirty forwards, best of three to
+four interleaved rounds (the host is shared, so the minimum is the estimate,
+not the mean):
+
+| floor | blocks per conv (min/median/max) | 8-thread wall | peak RSS |
+|---|---|---|---|
+| 16 Ki elements | 1 / 1 / 7 | 29.79 ms | 105 MB |
+| **4 Ki elements** | 1 / 4 / 8 | **20.08 ms** | 125 MB |
+| 2 Ki elements | 1 / 4 / 8 | 20.52 ms | 164 MB |
+| 1 Ki element | 1 / 4 / 8 | 20.58 ms | 174 MB |
+
+4 Ki elements is where the wall time stops improving; below it the extra blocks
+only buy staging buffers. Against the shipped 3.0 baseline binary, interleaved:
+**33.26 → 22.73 ms at four workers (1.46×) and 31.68 → 18.90 ms at eight
+(1.68×)**, with the one-worker number unchanged at 44.3 ms. At this floor the
+plan reports 42 row-split and 22 channel-split convolutions, 21 channels-last
+segments, 14.1 MB of staging and 12.8 MB of prepacked weights; peak RSS
+(`VmHWM`) is 76 MB at one worker, 117 MB at four and 125 MB at eight, against
+105 MB at eight for the 16 Ki floor. That trade — 1.45x the wall speed for
+20 MB — is what #115 has to buy back by bounding staging per worker.
+
+Two things this sweep **did not** fix, recorded so the next person does not
+re-derive them:
+
+- **The remaining gap is convolution efficiency, not block count.** At the 4 Ki
+  floor the 57 fused `Conv+Swish` segments are 17.0 ms of a 23.0 ms forward
+  (75 %), i.e. 129 GFLOPS. A single 64→64 3×3 convolution at 40×40 in isolation
+  reaches 209 GFLOPS at eight workers, so the small layers (10×10, 20×20, one
+  to three blocks) are the ones that cannot be filled — Amdahl on the graph, not
+  a missing split. For reference, in the same minute on the same host a pure
+  AVX2 FMA loop scales 7.6× from one to eight threads, so the host is not the
+  limit; `/tmp`-style measurements that only scale 2.4× are our own.
+- **One pool region per forward does not help.** Wrapping the whole segment
+  loop in `threads.install` (one Rayon region instead of 126) measured 30.22 ms
+  against 29.79 ms with the 16 Ki floor and 20.08 against 20.52 with the 4 Ki
+  one — i.e. nothing, inside noise. The workers are not the bottleneck at these
+  segment sizes; it was rejected and not kept.
+
+The textbook alternative — schedule independent segments concurrently instead
+of running them one at a time — is bounded on this graph: at 320×320 yolov8n is
+2.20 GFLOP total with a 1.39 GFLOP critical path, so **perfect** graph-level
+parallelism caps at 1.59×. ONNX Runtime's 3.1× on the same model therefore
+comes from inside its operators, not from its scheduler.
 
 **Descriptors.** Each block binds:
 
@@ -535,6 +591,41 @@ difference is not in any one segment: with 8 blocks per row-split convolution th
 halo traffic and the per-block fixed costs grow, and the desktop's load makes the
 last two workers expensive. Four workers is the better configuration here; eight
 is what the historical tables use, so both are reported.
+
+### After the payload-floor fix
+
+The table above is the phase-4a tree (16 Ki-element blocks). Lowering the block
+payload floor to 4 Ki elements ([§4](#the-payload-floor-measured)) changed the
+block count only, and was measured against the shipped baseline binary
+(`57272fc`) with both binaries run alternately against the **same** artifact, so
+the host's background load affects both equally:
+
+| Threads | Baseline `57272fc` | This tree | Change |
+|--:|--:|--:|--:|
+| 1 | 44.33 ms | 44.46 ms | — |
+| 4 | 33.26 ms | 22.73 ms | **1.46×** |
+| 8 | 31.68 ms | 18.90 ms | **1.68×** |
+
+Against ONNX Runtime on the same host and input that is **1.86× at one worker**
+(44.46 vs 23.86, inside the ≤2× goal), 2.91× at four (22.73 vs 7.82) and
+**2.47× at eight** (18.90 vs 7.64), down from 4.1×. The four-worker
+configuration is again the better one relative to the eight-worker one.
+
+The per-op table at eight threads, current tree (23.0 ms forward, 125 MB peak):
+
+| Label | Calls | Total ms | Share |
+|---|--:|--:|--:|
+| `conv+swish` (fused segments) | 57 | 16.97 | 75.2% |
+| `max_pool` | 3 | 1.08 | 4.8% |
+| `concat` | 17 | 1.03 | 4.6% |
+| `conv` (unfused, with bias/sum) | 7 | 0.71 | 3.1% |
+| `softmax` | 1 | 0.49 | 2.2% |
+| `resize` | 2 | 0.40 | 1.8% |
+| `split`, `reshape`, `slice`, `add`, `transpose`, `sigmoid`, `mul` | 33 | 1.85 | 8.0% |
+
+The convolutions are now the graph, and the remaining non-convolution work is
+5.6 ms of small data-movement and reduction segments, most of which are below
+the ~8 Ki-element parallel floor and run on one worker by construction.
 
 ### Where the time goes, before and after
 

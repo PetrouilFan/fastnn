@@ -42,9 +42,34 @@ pub(crate) const MIN_BLOCK_CHANNELS: usize = 8;
 
 /// Smallest output payload, in `f32` elements, worth another worker.
 ///
-/// 16 Ki elements is 64 KiB: one cache line per worker on a 16-core host and
-/// roughly the point where a task hand-off stops dominating a block.
-pub(crate) const MIN_BLOCK_ELEMENTS: usize = 16 * 1024;
+/// 4 Ki elements is 16 KiB of output: a block that writes less than that does
+/// not pay back a task hand-off, an `execute` and a `dnnl_stream_wait`.
+///
+/// The phase-3a value was **16 Ki elements**, chosen on the reasoning that a
+/// block should have one cache line per worker on a 16-core host. Measured, it
+/// was leaving the machine idle: yolo11n and yolov8n at 320x320 are graphs of
+/// *small* layers, and 16 Ki elements per block means a 64-channel 20x20
+/// convolution (25 600 outputs) is **one block**, i.e. one worker while seven
+/// wait. The median convolution in the yolov8n plan had one block at eight
+/// workers, and the plan reported 146 blocks for 64 convolutions.
+///
+/// This floor was picked from a sweep on the Ryzen 7 3700X, eight workers,
+/// yolov8n at `[1,3,320,320]`, five warm-ups and thirty forwards, best of three
+/// interleaved rounds (the host is shared, so the minimum is the estimate):
+///
+/// | floor | blocks per conv (min/median/max) | wall | peak RSS |
+/// |---|---|---|---|
+/// | 16 Ki elements | 1 / 1 / 7 | 31.68 ms | 105 MB |
+/// | **4 Ki elements** | 1 / 4 / 8 | **20.08 ms** | 125 MB |
+/// | 2 Ki elements | 1 / 4 / 8 | 20.5 ms | 164 MB |
+/// | 1 Ki element | 1 / 4 / 8 | 20.6 ms | 174 MB |
+///
+/// 4 Ki is where the wall time stops improving; below it the extra blocks only
+/// cost staging buffers. The split stays inside the <=2x-of-ORT goal at one
+/// worker (1.86x) and narrows the eight-worker gap from 4.1x to 2.6x; the
+/// remaining gap is convolution efficiency, not block count — see
+/// `docs/v3/backends.md`.
+pub(crate) const MIN_BLOCK_ELEMENTS: usize = 4 * 1024;
 
 fn dims(shape: &Shape, what: &'static str) -> Result<Vec<usize>, Fn3Error> {
     shape
@@ -751,25 +776,25 @@ mod tests {
             &params(),
         )
         .unwrap();
-        // 64 channels of 40x40 is 102 Ki elements; the 16 Ki payload floor
-        // keeps a channel block to at least 11 channels, so the channel split
-        // gives five blocks. The row split also gives five blocks (eight output
-        // rows each) but reads 49 input rows instead of 5 x 40, so it wins.
+        // 64 channels of 40x40 is 102 Ki elements, so at the 4 Ki payload floor
+        // both splits fill eight workers: eight channel blocks of eight
+        // channels, or eight row blocks of five output rows. The row split wins
+        // because it reads 54 input rows instead of 8 x 40.
         let split = conv.split(8);
         assert_eq!(split.axis, ConvSplitAxis::Rows);
-        assert_eq!(split.blocks.len(), 5);
+        assert_eq!(split.blocks.len(), 8);
         assert_eq!(
             split.blocks.iter().map(|b| b.out_rows).collect::<Vec<_>>(),
-            vec![8, 8, 8, 8, 8]
+            vec![5; 8]
         );
         assert_eq!(
             split.blocks.iter().map(|b| b.in_rows).sum::<usize>(),
-            48,
-            "eight output rows need nine input rows, interior blocks ten, plus a nine-row tail"
+            54,
+            "five output rows need seven input rows, and each edge block one fewer"
         );
         assert_eq!(split.blocks[0].pad_top, 1);
         assert_eq!(split.blocks[0].in_row_start, 0);
-        assert_eq!(split.blocks[4].pad_bottom, 1);
+        assert_eq!(split.blocks[7].pad_bottom, 1);
         for block in &split.blocks {
             assert_eq!(block.out_channels, 64);
             assert_eq!(block.in_channels, 64);
@@ -857,17 +882,18 @@ mod tests {
             &p,
         )
         .unwrap();
-        // One group per channel, 32x32 each: the payload floor wants 16
-        // channels per block, so eight workers get four blocks.
+        // One group per channel, 32x32 each: eight workers get eight blocks of
+        // eight channels, and rows are rejected because a channel block already
+        // reads only its own input channels (a halo would add traffic).
         let split = conv.split(8);
         assert_eq!(split.axis, ConvSplitAxis::Channels);
-        assert_eq!(split.blocks.len(), 4);
+        assert_eq!(split.blocks.len(), 8);
         assert_eq!(
             split.blocks.iter().map(|b| b.out_channels).sum::<usize>(),
             64
         );
-        assert!(split.blocks.iter().all(|b| b.out_channels == 16));
-        assert_eq!(split.blocks[1].group_start, 16);
+        assert!(split.blocks.iter().all(|b| b.out_channels == 8));
+        assert_eq!(split.blocks[1].group_start, 8);
     }
 
     #[test]

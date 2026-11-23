@@ -30,11 +30,24 @@ YOLOv8n, `f32[1,3,320,320] -> f32[1,84,2100]`:
 | oneDNN | 40.79 ms | **26.47 ms** | 28.22 ms |
 | ONNX Runtime | 22.90 ms | 7.10 ms | 6.63 ms |
 
-oneDNN is 30x the scalar path at one thread, and 1.8x / 3.7x / 4.3x behind
-ORT. The <=2x goal is **not met**; `docs/v3/backends.md` records the segment-by-
-segment reason (one primitive per block, 44 channel-split convolutions, no
-convolution epilogue fusion inside oneDNN's own kernels) rather than claiming a
-win.
+That table is the phase-4a tree. The block payload floor was lowered from 16 Ki
+to 4 Ki elements (see `docs/v3/backends.md`), which is the scaling fix: measured
+against the shipped baseline binary with both run alternately on the same
+artifact,
+
+| engine | 1 thread | 4 threads | 8 threads |
+|---|---:|---:|---:|
+| oneDNN, baseline `57272fc` | 44.33 ms | 33.26 ms | 31.68 ms |
+| oneDNN, current | 44.46 ms | **22.73 ms** | **18.90 ms** |
+| ONNX Runtime | 23.86 ms | 7.82 ms | 7.64 ms |
+
+so oneDNN is now **1.86x** ORT at one worker (inside the <=2x goal), 2.91x at
+four and 2.47x at eight, down from 3.7x / 4.3x. The remaining gap is
+convolution throughput, not block count: the 57 fused `Conv+Swish` segments are
+75 % of the forward, and the small layers (10x10, 20x20) cannot fill eight
+workers. `docs/v3/backends.md` records the per-op table, the negative results
+(one pool region per forward: no change; graph-level scheduling: 1.59x ceiling
+on this graph) and the cost in peak RSS (105 MB -> 125 MB at eight workers, 76 MB at one).
 
 ### Without the Python binding
 
@@ -136,8 +149,9 @@ immutable, and every `session()` owns its own arena and thread pool.
    one op at a time through `backend::cpu::dispatch_kernels`, and
    `model/{plan,session,specialize,kv}.rs` overlap `runtime/`. This is the last
    place where the old shape survives.
-3. **#115 peak RSS**: four-worker row-split staging reaches 1.7x ORT on
-   YOLO11n; staging should be bounded per worker rather than per plan.
+3. **#115 peak RSS**: the 4 Ki floor raised eight-worker peak RSS on yolov8n
+   from 105 MB to 125 MB (76 MB at one worker); the row-split staging buffers
+   are per block and should be bounded per worker rather than per plan.
 4. **Phase 5 W8A8** (#103): oneDNN int8 with per-channel scales and calibration,
    gated on accuracy rather than on a dtype name.
 5. **Phase 6 decoder/KV** (#108) and **phase 7 packaging** (#109), hardening
