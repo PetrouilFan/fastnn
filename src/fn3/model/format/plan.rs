@@ -57,6 +57,10 @@ pub enum Precision {
     /// IEEE-754 binary32 activations and weights.
     #[default]
     F32,
+    /// 8-bit activations and 8-bit weights. Reserved, not executable yet:
+    /// `prepare` refuses it with the measured reason (#103), and the artifact
+    /// encoder rejects a plan that carries it.
+    W8A8,
 }
 
 impl Precision {
@@ -64,6 +68,7 @@ impl Precision {
     pub const fn name(self) -> &'static str {
         match self {
             Precision::F32 => "f32",
+            Precision::W8A8 => "w8a8",
         }
     }
 
@@ -71,6 +76,7 @@ impl Precision {
     pub const fn code(self) -> u8 {
         match self {
             Precision::F32 => 0,
+            Precision::W8A8 => 1,
         }
     }
 
@@ -78,6 +84,7 @@ impl Precision {
     pub fn parse(value: &str) -> Option<Precision> {
         match value {
             "f32" | "fp32" => Some(Precision::F32),
+            "w8a8" | "int8" => Some(Precision::W8A8),
             _ => None,
         }
     }
@@ -86,6 +93,7 @@ impl Precision {
     pub fn from_code(code: u8) -> Option<Precision> {
         match code {
             0 => Some(Precision::F32),
+            1 => Some(Precision::W8A8),
             _ => None,
         }
     }

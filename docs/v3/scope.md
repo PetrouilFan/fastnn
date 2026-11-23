@@ -200,8 +200,9 @@ Precision is a planner decision, not a tensor tag ([ADR-0001](adr-0001-one-runti
   silently mixed plan.
 
 Today the IR has no quantized dtype, QDQ operators are unmapped and rejected,
-and no W8A8 path exists. The only quantized work is the session-local
-weight-only option above.
+and no W8A8 path exists. `prepare --precision w8a8` accepts the name and refuses
+it with the target's ISA and a measurement, so a request cannot produce an
+artifact this runtime cannot execute.
 
 ## 8. Devices and CPU features
 

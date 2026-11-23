@@ -62,6 +62,10 @@ pub fn execute(args: &PrepareArgs, out: &mut dyn Write) -> Result<(), CliError> 
         import_onnx_graph_with_shapes(&source_bytes, &args.shapes).map_err(import_error)?;
     let precision = Precision::parse(&args.precision)
         .ok_or_else(|| CliError::usage(format!("`{}` is not a precision", args.precision)))?;
+    // One policy for the API and the CLI: w8a8 is refused with the measured
+    // reason before anything is written (#103).
+    crate::inference::api::refuse_unexecutable_precision(precision)
+        .map_err(|error| CliError::model(format!("{error}")))?;
     let targets = resolve_targets(&args.target).map_err(format_error)?;
     let artifact = PreparedArtifact::from_imported(&imported, &targets, precision, source_digest)
         .map_err(format_error)?;

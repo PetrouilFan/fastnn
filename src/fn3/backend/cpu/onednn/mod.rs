@@ -129,6 +129,20 @@ use self::geometry::{Conv, ConvSplitAxis, MatMul, Pool};
 /// Provider name in errors.
 const BACKEND: &str = "oneDNN";
 
+/// The ISA oneDNN executes on and whether it has a JIT int8 convolution there.
+///
+/// Returns `(isa code, isa name, int8 available)`. Used by `prepare` to refuse
+/// `precision = "w8a8"` with a measured reason instead of writing an artifact
+/// no engine can run.
+pub(crate) fn int8_execution_support() -> (i32, &'static str, bool) {
+    let isa = ffi::effective_cpu_isa();
+    (
+        isa,
+        ffi::cpu_isa_name(isa),
+        ffi::int8_kernels_available(isa),
+    )
+}
+
 /// The planner-facing capability: it owns no oneDNN object.
 ///
 /// A plan is built before a session (and therefore before an engine) exists, so

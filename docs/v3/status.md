@@ -12,7 +12,7 @@ here points at a commit, a test or a measurement; nothing is projected.
 | 2 scalar segment executor, arena, session threads | done | `10cda68`; ORT parity on yolov8n, 1/4/8 workers exact, one arena allocation per session |
 | 3 oneDNN provider | done | `b94922a` (engine behind `cpu-onednn`), `ca5801f` (memcpy-shaped glue, row-split convs) |
 | 4 fused segments, blocked layouts, artifact v2, API | done | `13595be`, `6235f37`, `e004a46` |
-| 5 true W8A8 + calibration + `precision="auto"` | open | not started |
+| 5 true W8A8 + calibration + `precision="auto"` | open, hardware-gated | `w8a8` parses and is refused with a measured reason (`prepare`, CLI, API; `tests/fn3_cli.rs`); on this AVX2 host oneDNN's int8 convolution has no JIT kernel and runs 848x slower than f32 (1332 ms vs 1.57 ms for 32x80x80x3x3), so an executable path needs VNNI/AMX hardware before it can be measured and shipped (#103) |
 | 6 decoder/KV on the same plan and artifact, Vulkan re-wire | open | fn3 decoder still runs the v1-shaped plan path |
 | 7 packaging, fuzzing/OOM hardening, docs | partially | wheels, fuzz corpus refresh and the benchmark methodology are open |
 

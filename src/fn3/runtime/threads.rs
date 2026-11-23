@@ -274,15 +274,6 @@ impl SessionThreads {
         }
     }
 
-    /// A build without `parallel` has no pool, so a region is the caller's.
-    #[cfg(not(feature = "parallel"))]
-    pub(crate) fn install<F, R>(&self, body: F) -> R
-    where
-        F: FnOnce() -> R,
-    {
-        body()
-    }
-
     /// Run `count` independent blocks, in parallel when the session has a pool.
     ///
     /// Used by the optional oneDNN engine, whose blocks are already the unit of
