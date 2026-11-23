@@ -113,8 +113,11 @@ authority is `docs/archive/roadmap/fn3-architecture.md`.
   it claims must be read-only model data and is prepacked at session open; a
   forward never reorders a weight, installs a data handle only for the duration
   of one `dnnl_primitive_execute`, and never touches a process-global oneDNN
-  setting or cache. Blocks divide a convolution along output channels (whole
-  groups for a grouped convolution, one channel per group for depthwise) or,
+  setting or cache. The user scratchpad is a session pool slot leased for one
+  block call, not a buffer per block: there are 391-672 blocks on the YOLO
+  graphs, and per-block buffers cost 27-29 MB. Blocks divide a convolution
+  along output channels (whole groups for a grouped convolution, one channel
+  per group for depthwise) or,
   when the channel split is limited by the output-channel count and re-reads
   the whole input per block, along output rows with a clamped halo: each row
   block's source is a row submemory, its destination a row submemory, and the
@@ -127,8 +130,8 @@ authority is `docs/archive/roadmap/fn3-architecture.md`.
   every consumer is a oneDNN convolution, and it inserts one counted conversion
   at each family boundary; a fused residual forces the plain destination, and a
   channels-last destination forces a row split. Each block owns its primitive,
-  stream and user scratchpad; the row blocks of one convolution share one
-  read-only prepacked weight buffer.
+  stream and one leased scratchpad slot; the row blocks of one convolution
+  share one read-only prepacked weight buffer.
 - Plan preflight asks `Backend::admits` for the plan's concrete operand shapes
   and dtypes; the default body is `supports`. An `admits` override may confirm
   a `Partial` subset, never widen `Unsupported`.

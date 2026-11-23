@@ -345,7 +345,7 @@ fn cnn_forward_latency() {
                         "oneDNN {} ({} runtime), {} segments ({} conv: {} row-split, {} \
                          channel-split; {} pool, {} matmul), {} fused, {} channels-last ({} \
                          bytes), {} reorders ({} bytes), {} prepacked bytes, {} staging bytes, \
-                         {} reordered weight blocks, parallel blocks {}",
+                         {} scratchpad bytes, {} reordered weight blocks, parallel blocks {}",
                         report.version,
                         report.cpu_runtime,
                         report.segments,
@@ -361,6 +361,7 @@ fn cnn_forward_latency() {
                         report.reorder_bytes,
                         report.prepacked_bytes,
                         report.staging_bytes,
+                        report.scratchpad_bytes,
                         report.reordered_blocks,
                         report.parallel_blocks
                     )
