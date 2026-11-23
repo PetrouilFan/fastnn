@@ -810,6 +810,20 @@ impl Atom {
         }
     }
 
+    /// The atom as a number, when it has one.
+    ///
+    /// `Range` operands are `i64` in some exports and `f32` in others, and
+    /// both spell the same indices; folding them through one numeric reading
+    /// keeps a shape chain from depending on which dtype the exporter chose.
+    fn as_number(&self) -> Option<f64> {
+        match self {
+            Atom::Int(value) => Some(*value as f64),
+            Atom::Float(value) if value.is_finite() => Some(f64::from(*value)),
+            Atom::Dim(Dim::Known(extent)) => Some(*extent as f64),
+            _ => None,
+        }
+    }
+
     fn as_dim(&self) -> Dim {
         atom_as_dim(self)
             .unwrap_or_else(|| Dim::unknown(format!("{} is not an extent", self.render())))
@@ -2304,6 +2318,7 @@ fn plan_squeeze(
             PlannedValue::tensor(dtype, ValueShape::Unknown),
         ));
     };
+    let mut lifted_axes: Option<Vec<i64>> = None;
     let axes: Vec<usize> = if ins.len() == 2 {
         let (axes_dtype, _, series) = input_series(ins, 1, "Squeeze axes")?;
         if axes_dtype != DType::I64 {
@@ -2317,6 +2332,9 @@ fn plan_squeeze(
         for axis in axes {
             normalized.push(normalize_axis(axis, rank, "Squeeze")?);
         }
+        // The IR carries the removed axes in `OpParams` and takes one
+        // operand; see `plan_unsqueeze`.
+        lifted_axes = Some(normalized.iter().map(|&axis| axis as i64).collect());
         normalized
     } else {
         shape
@@ -2346,10 +2364,9 @@ fn plan_squeeze(
         .map(|(_, dim)| dim.clone())
         .collect();
     let output = ValueShape::Dims(dims);
-    let operands = if ins.len() == 2 {
-        vec![Operand::Input(0), Operand::Input(1)]
-    } else {
-        vec![Operand::Input(0)]
+    let params = match lifted_axes {
+        Some(axes) => OpParams::new().with_axes(axes),
+        None => OpParams::new(),
     };
     let series = series_of(&ins[0]).cloned();
     let value = match series {
@@ -2358,8 +2375,8 @@ fn plan_squeeze(
     };
     Ok(PlannedOp::single(
         OpId::Squeeze,
-        operands,
-        OpParams::new(),
+        vec![Operand::Input(0)],
+        params,
         value,
     ))
 }
@@ -2380,11 +2397,15 @@ fn plan_unsqueeze(
         });
     }
     let axes = int_list(&series, "Unsqueeze axes")?;
+    // The IR carries the inserted axes in `OpParams` and takes one operand;
+    // the opset-13 form passes them as an input tensor, whose value is a
+    // constant initializer in every export this importer accepts.
+    let params = OpParams::new().with_axes(axes.iter().copied());
     let Some(rank) = shape.rank() else {
         return Ok(PlannedOp::single(
             OpId::Unsqueeze,
-            vec![Operand::Input(0), Operand::Input(1)],
-            OpParams::new(),
+            vec![Operand::Input(0)],
+            params,
             PlannedValue::tensor(dtype, ValueShape::Unknown),
         ));
     };
@@ -2416,8 +2437,8 @@ fn plan_unsqueeze(
     };
     Ok(PlannedOp::single(
         OpId::Unsqueeze,
-        vec![Operand::Input(0), Operand::Input(1)],
-        OpParams::new(),
+        vec![Operand::Input(0)],
+        params,
         value,
     ))
 }
@@ -2849,28 +2870,33 @@ fn plan_range(
             "Range operands are {start_dtype}, {limit_dtype} and {delta_dtype}"
         )));
     }
-    let start_value = start.only().and_then(Atom::as_i64);
-    let limit_value = limit.only().and_then(Atom::as_i64);
-    let delta_value = delta.only().and_then(Atom::as_i64);
-    let len = match (start_value, limit_value, delta_value) {
-        (Some(start), Some(limit), Some(delta)) if delta != 0 => {
-            let count = ((limit - start) as f64 / delta as f64).ceil();
+    // `Range` operands are i64 or f32 depending on the exporter; the
+    // arithmetic is in f64 so both spellings fold. A symbolic limit
+    // (`Range(0, dim, 1)`) keeps the length as that same symbolic extent.
+    let start_number = start.only().and_then(Atom::as_number);
+    let limit_number = limit.only().and_then(Atom::as_number);
+    let delta_number = delta.only().and_then(Atom::as_number);
+    let len = match (start_number, limit_number, delta_number) {
+        (Some(start), Some(limit), Some(delta)) if delta != 0.0 => {
+            let count = ((limit - start) / delta).ceil();
             Dim::Known(count.max(0.0) as u64)
         }
-        (Some(0), None, Some(1)) => match limit.only() {
+        (Some(start), None, Some(delta)) if start == 0.0 && delta == 1.0 => match limit.only() {
             Some(Atom::Dim(dim)) => dim.clone(),
-            Some(Atom::Int(value)) if *value >= 0 => Dim::Known(*value as u64),
             _ => Dim::unknown("Range length"),
         },
         _ => Dim::unknown("Range length from non-constant operands"),
     };
-    let items = match (len.as_known(), start_value, delta_value) {
+    let items = match (len.as_known(), start_number, delta_number) {
         (Some(len), Some(start), Some(delta)) if len <= MAX_TRACKED_ELEMENTS as u64 => {
             let mut items = Vec::with_capacity(len as usize);
             for index in 0..len {
-                items.push(Atom::Int(
-                    start.wrapping_add(index as i64).wrapping_mul(delta),
-                ));
+                let value = start + index as f64 * delta;
+                items.push(match start_dtype {
+                    DType::F32 => Atom::Float(value as f32),
+                    DType::Bool => Atom::Bool(value != 0.0),
+                    DType::I64 | DType::I32 => Atom::Int(value as i64),
+                });
             }
             Some(items)
         }
@@ -2910,12 +2936,88 @@ fn plan_cast(
         });
     }
     let dtype = onnx_dtype(to, format!("the `to` attribute of {}", ctx.name))?;
+    // A cast of a tracked value is still tracked: shape arithmetic casts
+    // `Gather(Shape(x), i)` to f32 before building a `Range`, and dropping the
+    // elements here is what made that range unprovable.
+    let value = match series_of(&ins[0]) {
+        Some(series) => {
+            let items = series.items.as_ref().and_then(|items| {
+                items
+                    .iter()
+                    .map(|atom| cast_atom(atom, dtype))
+                    .collect::<Option<Vec<Atom>>>()
+            });
+            PlannedValue::values(
+                dtype,
+                shape,
+                AtomSeries {
+                    len: series.len.clone(),
+                    items,
+                },
+            )
+        }
+        None => PlannedValue::tensor(dtype, shape),
+    };
     Ok(PlannedOp::single(
         OpId::Cast,
         vec![Operand::Input(0)],
         OpParams::new(),
-        PlannedValue::tensor(dtype, shape),
+        value,
     ))
+}
+
+/// `Cast(atom, to)` for a tracked element.
+///
+/// Follows the conversion the scalar kernel implements: float to integer
+/// truncates toward zero, integer to bool is "non-zero", and a symbolic
+/// extent stays symbolic so a later `Range` can still fold against it.
+fn cast_atom(atom: &Atom, to: DType) -> Option<Atom> {
+    match to {
+        DType::F32 => match atom {
+            Atom::Float(_) | Atom::Dim(_) => Some(atom.clone()),
+            Atom::Int(value) => Some(Atom::Float(*value as f32)),
+            Atom::Bool(value) => Some(Atom::Float(if *value { 1.0 } else { 0.0 })),
+            Atom::Unknown => None,
+        },
+        DType::I64 => match atom {
+            Atom::Int(_) | Atom::Dim(_) => Some(atom.clone()),
+            Atom::Float(value) if value.is_finite() => {
+                let truncated = f64::from(*value).trunc();
+                if truncated >= i64::MIN as f64 && truncated <= i64::MAX as f64 {
+                    Some(Atom::Int(truncated as i64))
+                } else {
+                    None
+                }
+            }
+            Atom::Bool(value) => Some(Atom::Int(if *value { 1 } else { 0 })),
+            Atom::Float(_) | Atom::Unknown => None,
+        },
+        DType::I32 => match atom {
+            Atom::Int(value) => i32::try_from(*value)
+                .ok()
+                .map(|value| Atom::Int(i64::from(value))),
+            Atom::Float(value) if value.is_finite() => {
+                let truncated = f64::from(*value).trunc();
+                if truncated >= f64::from(i32::MIN) && truncated <= f64::from(i32::MAX) {
+                    Some(Atom::Int(truncated as i64))
+                } else {
+                    None
+                }
+            }
+            Atom::Bool(value) => Some(Atom::Int(if *value { 1 } else { 0 })),
+            Atom::Dim(Dim::Known(extent)) => i32::try_from(*extent)
+                .ok()
+                .map(|value| Atom::Int(i64::from(value))),
+            Atom::Float(_) | Atom::Dim(_) | Atom::Unknown => None,
+        },
+        DType::Bool => match atom {
+            Atom::Bool(_) => Some(atom.clone()),
+            Atom::Int(value) => Some(Atom::Bool(*value != 0)),
+            Atom::Float(value) => Some(Atom::Bool(*value != 0.0)),
+            Atom::Dim(Dim::Known(extent)) => Some(Atom::Bool(*extent != 0)),
+            Atom::Dim(_) | Atom::Unknown => None,
+        },
+    }
 }
 
 /// `Where(condition, x, y)`.

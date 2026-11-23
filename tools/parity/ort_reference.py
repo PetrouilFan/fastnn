@@ -60,17 +60,52 @@ def sha256_of(path: Path) -> str:
     return digest.hexdigest()
 
 
-def tensor_shape(value_info) -> list[int]:
+def tensor_shape(value_info, bindings: dict[str, list[int]] | None = None) -> list[int]:
+    """The concrete feed shape: the model's, or the ``--shape`` binding.
+
+    A dynamic export names its extents (`height`, `width`) instead of fixing
+    them; v3 prepares against one concrete shape, so the dump must feed the
+    same one. Binding the values here is what keeps the reference and the
+    fastnn run comparable: ONNX Runtime accepts a concrete feed for a symbolic
+    input, it just cannot allocate one on its own.
+    """
+    bindings = bindings or {}
+    if value_info.name in bindings:
+        bound = bindings[value_info.name]
+        rank = len(value_info.type.tensor_type.shape.dim)
+        if len(bound) != rank:
+            raise SystemExit(
+                f"--shape {value_info.name}=... has {len(bound)} extents, but the "
+                f"model declares rank {rank}"
+            )
+        return list(bound)
     dims = value_info.type.tensor_type.shape.dim
     shape: list[int] = []
     for dim in dims:
         if not dim.HasField("dim_value"):
             raise SystemExit(
-                f"{value_info.name}: symbolic extents are not supported by this dump "
-                "(the v3 CNN path requires static shapes)"
+                f"{value_info.name}: symbolic extents need a `--shape {value_info.name}=...` "
+                "binding (the v3 CNN path prepares against one concrete shape)"
             )
         shape.append(int(dim.dim_value))
     return shape
+
+
+def parse_bindings(items: list[str] | None) -> dict[str, list[int]]:
+    """`--shape images=1,3,640,640` into a name -> extents map."""
+    bindings: dict[str, list[int]] = {}
+    for item in items or []:
+        name, _, spec = item.partition("=")
+        if not name or not spec:
+            raise SystemExit(f"--shape expects name=d1,d2,..., found {item!r}")
+        try:
+            extents = [int(part) for part in spec.split(",")]
+        except ValueError:
+            raise SystemExit(f"--shape {item!r}: every extent must be an integer")
+        if any(extent <= 0 for extent in extents):
+            raise SystemExit(f"--shape {item!r}: every extent must be positive")
+        bindings[name] = extents
+    return bindings
 
 
 def dtype_of(value_info) -> str:
@@ -106,7 +141,13 @@ def peak_rss_mib() -> float:
     return rss / 1024.0 if sys.platform != "darwin" else rss / (1024.0 * 1024.0)
 
 
-def time_mode(model: Path, threads: int, warmup: int, iterations: int) -> int:
+def time_mode(
+    model: Path,
+    threads: int,
+    warmup: int,
+    iterations: int,
+    bindings: dict[str, list[int]],
+) -> int:
     graph = onnx.load(str(model)).graph
     rng = np.random.default_rng(0)
     feeds: dict[str, np.ndarray] = {}
@@ -114,10 +155,13 @@ def time_mode(model: Path, threads: int, warmup: int, iterations: int) -> int:
         if any(initializer.name == value_info.name for initializer in graph.initializer):
             continue
         feeds[value_info.name] = rng.standard_normal(
-            size=tensor_shape(value_info), dtype=np.float64
+            size=tensor_shape(value_info, bindings), dtype=np.float64
         ).astype(np.float32)
     if not feeds:
         raise SystemExit("the model declares no feedable inputs")
+    unused = set(bindings) - set(feeds)
+    if unused:
+        raise SystemExit(f"--shape names no feedable input: {', '.join(sorted(unused))}")
 
     options = ort.SessionOptions()
     options.log_severity_level = 2  # WARNING
@@ -181,13 +225,22 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--iterations", type=int, default=30, help="timed forwards (default 30)"
     )
+    parser.add_argument(
+        "--shape",
+        action="append",
+        metavar="NAME=D1,D2,...",
+        help="bind a dynamic input's extents (e.g. images=1,3,640,640); repeatable",
+    )
     args = parser.parse_args(argv)
+    bindings = parse_bindings(args.shape)
 
     if not args.model.is_file():
         print(f"model not found: {args.model}", file=sys.stderr)
         return 2
     if args.time:
-        return time_mode(args.model, args.threads, args.warmup, args.iterations)
+        return time_mode(
+            args.model, args.threads, args.warmup, args.iterations, bindings
+        )
     if args.output_dir is None:
         parser.error("OUTPUT_DIR is required unless --time is given")
 
@@ -205,12 +258,15 @@ def main(argv: list[str]) -> int:
                 f"input {value_info.name} is {dtype_of(value_info)}, not float32; this "
                 "dump only generates f32 inputs"
             )
-        shape = tensor_shape(value_info)
+        shape = tensor_shape(value_info, bindings)
         values = rng.standard_normal(size=shape, dtype=np.float64).astype(np.float32)
         feeds[value_info.name] = values
         inputs.append((value_info, values))
     if not feeds:
         raise SystemExit("the model declares no feedable inputs")
+    unused = set(bindings) - set(feeds)
+    if unused:
+        raise SystemExit(f"--shape names no feedable input: {', '.join(sorted(unused))}")
 
     options = ort.SessionOptions()
     options.log_severity_level = 2  # WARNING

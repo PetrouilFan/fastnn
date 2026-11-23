@@ -95,7 +95,23 @@ pub fn infer_shapes(graph: &mut Graph) -> Result<(), Fn3Error> {
             })?;
             inputs.push(value.ty.clone());
         }
-        let outputs = infer_node(&node, &inputs)?;
+        // `Cast` is the one op whose result dtype is not derivable from its
+        // operands in the IR: the target lives in the value the graph builder
+        // declared. Read it before the mutable type write below.
+        let declared = graph
+            .value(*node.outputs.first().ok_or(Fn3Error::OutOfBounds {
+                what: "ir node output value",
+                index: 0,
+                len: 0,
+            })?)
+            .ok_or(Fn3Error::OutOfBounds {
+                what: "ir node output value",
+                index: u64::try_from(node.outputs[0].index()).unwrap_or(u64::MAX),
+                len: graph.value_count() as u64,
+            })?
+            .ty
+            .clone();
+        let outputs = infer_node(&node, &inputs, &declared)?;
         if outputs.len() != node.outputs.len() {
             return Err(invalid(
                 &node,
@@ -114,7 +130,11 @@ pub fn infer_shapes(graph: &mut Graph) -> Result<(), Fn3Error> {
     Ok(())
 }
 
-fn infer_node(node: &Node, inputs: &[TensorType]) -> Result<Vec<TensorType>, Fn3Error> {
+fn infer_node(
+    node: &Node,
+    inputs: &[TensorType],
+    declared: &TensorType,
+) -> Result<Vec<TensorType>, Fn3Error> {
     match node.op {
         OpId::Add
         | OpId::Sub
@@ -132,6 +152,10 @@ fn infer_node(node: &Node, inputs: &[TensorType]) -> Result<Vec<TensorType>, Fn3
         | OpId::Sin
         | OpId::Cos
         | OpId::Sigmoid => unary(node, inputs),
+        OpId::Cast => cast(node, inputs, declared),
+        OpId::Range => range(node, inputs, declared),
+        OpId::ConstantOfShape => constant_of_shape(node, inputs, declared),
+        OpId::Expand => expand(node, inputs, declared),
         OpId::MatMul => matmul(node, inputs),
         OpId::Transpose => transpose(node, inputs),
         OpId::Reshape => reshape(node, inputs),
@@ -161,6 +185,163 @@ fn infer_node(node: &Node, inputs: &[TensorType]) -> Result<Vec<TensorType>, Fn3
 // ---------------------------------------------------------------------------
 // Elementwise
 // ---------------------------------------------------------------------------
+
+/// `Cast` keeps every extent and changes only the element type.
+///
+/// The IR has no dtype attribute: the graph builder declares the output value
+/// with the target dtype, so inference copies the declared dtype and the
+/// input's extents. A shape mismatch between two casts would otherwise be
+/// silently absorbed, which is why the declared value is read rather than a
+/// second dtype parameter being threaded through the importer.
+fn cast(
+    node: &Node,
+    inputs: &[TensorType],
+    declared: &TensorType,
+) -> Result<Vec<TensorType>, Fn3Error> {
+    expect_inputs(node, inputs, 1)?;
+    require_params(node, Req::NONE)?;
+    Ok(vec![TensorType {
+        dtype: declared.dtype,
+        shape: inputs[0].shape.clone(),
+    }])
+}
+
+/// `Range(start, limit, delta)`.
+///
+/// The length depends on operand *values*, which the IR does not carry, so
+/// the importer folds there and declares the result. Inference verifies the
+/// declaration is a rank-1 sequence of the operands' dtype instead of
+/// re-deriving it.
+fn range(
+    node: &Node,
+    inputs: &[TensorType],
+    declared: &TensorType,
+) -> Result<Vec<TensorType>, Fn3Error> {
+    expect_inputs(node, inputs, 3)?;
+    require_params(node, Req::NONE)?;
+    for input in inputs {
+        if input.rank() != 0 {
+            return Err(invalid(
+                node,
+                format!("op range takes scalar operands, not rank {}", input.rank()),
+            ));
+        }
+    }
+    if declared.rank() != 1 {
+        return Err(invalid(
+            node,
+            format!(
+                "op range produces a rank-1 sequence, not rank {}",
+                declared.rank()
+            ),
+        ));
+    }
+    if declared.dtype != inputs[0].dtype {
+        return Err(invalid(
+            node,
+            format!(
+                "op range operands are {} but the declared result is {}",
+                inputs[0].dtype, declared.dtype
+            ),
+        ));
+    }
+    Ok(vec![declared.clone()])
+}
+
+/// `ConstantOfShape(shape, value)`.
+///
+/// The importer lifts the fill `value` attribute to a constant operand, so
+/// the output extents are the *values* of input 0 and the element type is the
+/// second operand's. Both are declaration-checked, not invented.
+fn constant_of_shape(
+    node: &Node,
+    inputs: &[TensorType],
+    declared: &TensorType,
+) -> Result<Vec<TensorType>, Fn3Error> {
+    expect_inputs(node, inputs, 2)?;
+    require_params(node, Req::NONE)?;
+    if inputs[0].dtype != DType::I64 || inputs[0].rank() != 1 {
+        return Err(invalid(
+            node,
+            format!(
+                "op constant-of-shape takes a rank-1 i64 shape, not {}[{}]",
+                inputs[0].dtype,
+                inputs[0].rank()
+            ),
+        ));
+    }
+    if inputs[1].static_numel()? != Some(1) {
+        return Err(invalid(
+            node,
+            "op constant-of-shape needs a single fill value".to_string(),
+        ));
+    }
+    if declared.dtype != inputs[1].dtype {
+        return Err(invalid(
+            node,
+            format!(
+                "op constant-of-shape fills with {} but declares {}",
+                inputs[1].dtype, declared.dtype
+            ),
+        ));
+    }
+    Ok(vec![declared.clone()])
+}
+
+/// `Expand(data, shape)`.
+///
+/// The target extents live in the second operand's values, so inference
+/// checks the declared result is a broadcast of the data instead of
+/// re-deriving it: every data axis is either 1 or equal to the result's.
+fn expand(
+    node: &Node,
+    inputs: &[TensorType],
+    declared: &TensorType,
+) -> Result<Vec<TensorType>, Fn3Error> {
+    expect_inputs(node, inputs, 2)?;
+    require_params(node, Req::NONE)?;
+    if inputs[1].dtype != DType::I64 || inputs[1].rank() != 1 {
+        return Err(invalid(
+            node,
+            format!(
+                "op expand takes a rank-1 i64 target shape, not {}[{}]",
+                inputs[1].dtype,
+                inputs[1].rank()
+            ),
+        ));
+    }
+    if declared.dtype != inputs[0].dtype {
+        return Err(invalid(
+            node,
+            format!(
+                "op expand keeps {} but declares {}",
+                inputs[0].dtype, declared.dtype
+            ),
+        ));
+    }
+    let data = &inputs[0];
+    let data_rank = data.rank();
+    let out_rank = declared.rank();
+    if data_rank > out_rank {
+        return Err(invalid(
+            node,
+            format!("op expand would drop axes: data rank {data_rank}, result rank {out_rank}"),
+        ));
+    }
+    let offset = out_rank - data_rank;
+    for (axis, dim) in data.shape.iter().enumerate() {
+        if dim.as_const() != Some(1) && dim != &declared.shape[offset + axis] {
+            return Err(invalid(
+                node,
+                format!(
+                    "op expand axis {axis} is {dim} but the result axis is {}",
+                    declared.shape[offset + axis]
+                ),
+            ));
+        }
+    }
+    Ok(vec![declared.clone()])
+}
 
 fn unary(node: &Node, inputs: &[TensorType]) -> Result<Vec<TensorType>, Fn3Error> {
     expect_inputs(node, inputs, 1)?;
@@ -2747,6 +2928,55 @@ mod tests {
             }
         ));
         assert!(error.to_string().contains("node 0"), "{error}");
+    }
+
+    #[test]
+    fn cast_keeps_the_extents_and_takes_the_declared_dtype() {
+        let mut graph = Graph::new();
+        let input = add_value(&mut graph, DType::I64, consts(&[2, 5]));
+        let out = add_value(&mut graph, DType::F32, Vec::new());
+        add_node(&mut graph, OpId::Cast, &[input], &[out], OpParams::new(), 0);
+        infer_shapes(&mut graph).unwrap();
+        assert_eq!(ty(&graph, out).dtype, DType::F32);
+        assert_eq!(ty(&graph, out).dims(), consts(&[2, 5]).as_slice());
+    }
+
+    #[test]
+    fn range_keeps_the_declared_length_and_rejects_non_scalars() {
+        let mut graph = Graph::new();
+        let start = add_value(&mut graph, DType::F32, consts(&[]));
+        let limit = add_value(&mut graph, DType::F32, consts(&[]));
+        let delta = add_value(&mut graph, DType::F32, consts(&[]));
+        let out = add_value(&mut graph, DType::F32, consts(&[4]));
+        add_node(
+            &mut graph,
+            OpId::Range,
+            &[start, limit, delta],
+            &[out],
+            OpParams::new(),
+            0,
+        );
+        infer_shapes(&mut graph).unwrap();
+        assert_eq!(ty(&graph, out).dims(), consts(&[4]).as_slice());
+
+        // A rank-1 operand is not a scalar range bound; the importer's fold is
+        // what turns shape payloads into scalars, and a graph that skips it is
+        // refused rather than guessed.
+        let mut graph = Graph::new();
+        let start = add_value(&mut graph, DType::F32, consts(&[1]));
+        let limit = add_value(&mut graph, DType::F32, consts(&[]));
+        let delta = add_value(&mut graph, DType::F32, consts(&[]));
+        let out = add_value(&mut graph, DType::F32, consts(&[4]));
+        add_node(
+            &mut graph,
+            OpId::Range,
+            &[start, limit, delta],
+            &[out],
+            OpParams::new(),
+            0,
+        );
+        let error = infer_shapes(&mut graph).unwrap_err();
+        assert!(error.to_string().contains("scalar"), "{error}");
     }
 
     #[test]
