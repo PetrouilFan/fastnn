@@ -110,12 +110,13 @@ pub(crate) const PROP_KIND_FORWARD_INFERENCE: i32 = 96;
 
 /// `dnnl_convolution_direct`.
 ///
-/// `auto` (which may choose Winograd) was re-checked on the pinned graph: 42.0
-/// ms at one worker against 44.2 direct, one run each, inside this host's
-/// noise. It is not adopted because it makes the accumulation order a
-/// heuristic's decision for a difference that does not reproduce. Winograd
-/// itself is unavailable in this build: its primitive descriptor creation
-/// fails on AVX2.
+/// `auto` (which may choose Winograd) was checked twice on the pinned graph,
+/// four interleaved 50-forward runs each, one worker: auto 44.15 / 41.30 /
+/// 44.05 / 41.34 ms against direct 44.23 / 43.19 / 41.25 / 43.84 ms. There is
+/// no reproducible difference (the ordering flips between runs), so the engine
+/// keeps `direct` and does not hand the accumulation order to a heuristic.
+/// Winograd itself is unavailable in this build: its primitive descriptor
+/// creation fails on AVX2. Recorded in `docs/v3/backends.md`.
 pub(crate) const ALG_CONVOLUTION_DIRECT: i32 = 1;
 /// `dnnl_pooling_max`.
 pub(crate) const ALG_POOLING_MAX: i32 = 511;
