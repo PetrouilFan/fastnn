@@ -156,10 +156,9 @@ Three things fall out of it:
   0.716 at eight, 3.4x worse. Those are the segments where the row split
   yields fewer blocks than workers, so `prefer_rows` gives up and the split
   moves to channels, where each channel block re-reads the whole source.
-- **One to two workers is 1.38x, not 2x.** That is per-segment overhead, not
-  arithmetic: 64 convolutions and 62 scalar segments, each a separate parallel
-  region. If the overhead is `e` per region, `T2 = T1/2 + 126e` and the measured
-  20.03 ms against 13.84 gives `e` of roughly 50 us.
+- **One to two workers is 1.38x, not 2x**, and 63 of the 126 segments gain
+  less than 5 % at two workers (they total 2.15 ms at one thread). The shortfall
+  is below, joined to two measurements that rule out the obvious suspects.
 
 Three policy changes were measured against this, and all three were rejected:
 
@@ -179,12 +178,39 @@ Three policy changes were measured against this, and all three were rejected:
    is a loss. The pathology needs a two-dimensional split - rows, then channels
    inside a row block - not a different tie-break.
 
-The conclusion for the next step is therefore **not** a layout or a block-count
-knob: at eight workers the loss is per-parallel-region overhead. The measurement
-that separates its parts is a micro-benchmark of one `run_blocks` dispatch on an
-empty body, which divides that ~50 us between rayon's wake-up and block
-imbalance; only then is a fix (a spin phase, or running small segments inline)
-a decision rather than a guess.
+### Where the eight-worker loss actually is
+
+The ~50 us per segment above was an inference from the 1->2 shortfall, and it is
+wrong. Two measurements replace it:
+
+**Dispatch is 5-8 us, not 50.** `SessionThreads::run_blocks` on an empty body,
+release build, 2000 iterations per cell (`cargo test --release --lib --features
+parallel dispatch_cost -- --ignored --nocapture`):
+
+| workers | 1 block | 2 blocks | 4 blocks | 8 blocks | `install` only |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 0.00 us | 0.00 | 0.00 | 0.00 | 0.00 |
+| 2 | 0.00 | 4.58 | 5.26 | 5.11 | 2.52 |
+| 4 | 0.00 | 5.23 | 5.15 | 5.68 | 3.92 |
+| 8 | 0.00 | 6.12 | 7.22 | 7.92 | 5.53 |
+
+A forward has 126 segments, so the whole scheduling bill at eight workers is
+about **1 ms**, not the 6 ms the 1->2 shortfall loses.
+
+**The runtime scales; the engine does not.** The same harness and the same
+segments through the scalar reference engine: 1214.56 / 641.23 / 385.37 /
+228.64 ms at 1/2/4/8 workers, i.e. **1.89x at two and 5.31x at eight**. Pinning
+the oneDNN sweep to eight distinct physical CPUs (`taskset -c 0-7`) changes
+little (15.12 ms at eight against 15.97 unpinned), so it is not the scheduler
+putting two workers on one core, and a block cap of 2 is clearly worse (22.81
+ms at eight) while 4 against 8 cannot be separated: the run-to-run spread at
+four workers was 14.85-17.90 ms in that session.
+
+So the loss is inside the engine's per-block work - the row staging copies and
+the halo - and it needs an attribution that does not depend on this host's
+noise: per-segment staging, reorder and prepacked bytes in the engine report,
+compared against the segment's payload. That is the next measurement, and it is
+cheaper than another timing sweep.
 
 ## Reproducing
 

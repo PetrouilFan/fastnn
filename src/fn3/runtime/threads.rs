@@ -304,6 +304,50 @@ impl SessionThreads {
 mod tests {
     use super::*;
 
+    /// Measure one dispatch on an empty body, per worker and block count.
+    ///
+    /// A measurement, not a check. The numbers divide the per-segment cost the
+    /// per-layer map sees (`docs/v3/per-layer.md`) into Rayon's wake-up and the
+    /// work itself: an empty body costs exactly the scheduling, so anything the
+    /// forward spends above `blocks x work + this` is block imbalance or
+    /// memory. Run in release:
+    ///
+    /// ```text
+    /// cargo test --release --lib --features parallel dispatch_cost -- --ignored --nocapture
+    /// ```
+    #[cfg(feature = "parallel")]
+    #[test]
+    #[ignore = "measurement: prints dispatch cost, asserts nothing"]
+    fn dispatch_cost() {
+        use std::time::Instant;
+
+        const ITERATIONS: usize = 2000;
+        for workers in [1usize, 2, 4, 8] {
+            let threads = SessionThreads::new(Threading::Fixed(workers)).expect("a pool");
+            for _ in 0..200 {
+                threads.run_blocks(4, |_| Ok(())).expect("a warm-up");
+            }
+            for count in [1usize, 2, 4, 8] {
+                let started = Instant::now();
+                for _ in 0..ITERATIONS {
+                    threads
+                        .run_blocks(count, |_| Ok(()))
+                        .expect("an empty body");
+                }
+                let each = started.elapsed().as_secs_f64() * 1e6 / ITERATIONS as f64;
+                println!("[fn3dispatch] workers {workers} blocks {count} empty_us {each:.2}");
+            }
+            // `install` alone, without the range split, to show how much of the
+            // cost is entering the pool at all.
+            let started = Instant::now();
+            for _ in 0..ITERATIONS {
+                threads.install(|| 0);
+            }
+            let each = started.elapsed().as_secs_f64() * 1e6 / ITERATIONS as f64;
+            println!("[fn3dispatch] workers {workers} install_only_us {each:.2}");
+        }
+    }
+
     #[test]
     fn fixed_counts_are_exact_and_zero_is_rejected() {
         assert_eq!(Threading::Fixed(1).resolve(), Ok(1));
