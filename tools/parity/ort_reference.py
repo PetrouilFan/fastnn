@@ -41,11 +41,31 @@ import argparse
 import hashlib
 import json
 import platform
-import resource
 import statistics
 import sys
 import time
 from pathlib import Path
+
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
+
+    class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+else:
+    import resource
 
 import numpy as np
 import onnx
@@ -125,17 +145,49 @@ def describe(values: list) -> list[dict]:
 
 def machine() -> str:
     model = platform.processor() or "unknown CPU"
-    try:
-        for line in Path("/proc/cpuinfo").read_text().splitlines():
-            if line.startswith("model name"):
-                model = line.split(":", 1)[1].strip()
-                break
-    except OSError:
-        pass
+    if sys.platform == "win32":
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+            ) as key:
+                model = winreg.QueryValueEx(key, "ProcessorNameString")[0]
+        except OSError:
+            pass
+    else:
+        try:
+            for line in Path("/proc/cpuinfo").read_text().splitlines():
+                if line.startswith("model name"):
+                    model = line.split(":", 1)[1].strip()
+                    break
+        except OSError:
+            pass
     return model
 
 
 def peak_rss_mib() -> float:
+    if sys.platform == "win32":
+        counters = PROCESS_MEMORY_COUNTERS()
+        counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
+        get_current_process = ctypes.windll.kernel32.GetCurrentProcess
+        get_current_process.restype = wintypes.HANDLE
+        psapi = ctypes.WinDLL("psapi")
+        psapi.GetProcessMemoryInfo.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(PROCESS_MEMORY_COUNTERS),
+            wintypes.DWORD,
+        ]
+        psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+        ok = psapi.GetProcessMemoryInfo(
+            get_current_process(),
+            ctypes.byref(counters),
+            counters.cb,
+        )
+        if not ok:
+            return 0.0
+        return counters.PeakWorkingSetSize / (1024.0 * 1024.0)
     # Linux reports KiB; macOS reports bytes.
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return rss / 1024.0 if sys.platform != "darwin" else rss / (1024.0 * 1024.0)

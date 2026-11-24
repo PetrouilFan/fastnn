@@ -363,11 +363,11 @@ fn the_plan_says_which_segments_onednn_took() {
     );
     // A claimed op family is either on the engine or has a recorded reason;
     // every other op is scalar by construction. Nothing is silently re-run.
+    // Pooling is not claimed: on AVX2 oneDNN's JIT pooling rejects a plain
+    // NCHW descriptor and falls through to the reference kernel, so the scalar
+    // pooling kernel is the faster path (docs/v3/per-layer.md).
     for (index, segment) in plan.segments.iter().enumerate() {
-        let claimable = matches!(
-            segment.op_id(),
-            OpId::Conv | OpId::MaxPool | OpId::AveragePool | OpId::GlobalAveragePool | OpId::MatMul
-        );
+        let claimable = matches!(segment.op_id(), OpId::Conv | OpId::MatMul);
         if claimable {
             let fell_back = plan
                 .fallbacks()
