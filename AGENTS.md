@@ -61,8 +61,8 @@ cargo build --no-default-features
 cargo build
 cargo build --no-default-features --features vulkan
 cargo test --lib
-cargo test --test fn3_contracts
-cargo test --test fn3_ci_smoke
+cargo test --test fn3_cnn_run
+cargo test --test fn3_cli
 uv run pytest tests/ -m "not slow" -v
 ```
 
