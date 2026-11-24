@@ -22,6 +22,8 @@ pub enum Command {
     Run(RunArgs),
     /// Describe an artifact without mapping or executing it.
     Inspect(InspectArgs),
+    /// Explain the stored plan, segment by segment.
+    Explain(ExplainArgs),
     /// Diagnose an ONNX model before producing an artifact.
     Doctor(DoctorArgs),
     /// Print help.
@@ -38,6 +40,7 @@ pub enum HelpTopic {
     Load,
     Run,
     Inspect,
+    Explain,
     Doctor,
 }
 
@@ -188,6 +191,15 @@ pub struct InspectArgs {
     pub artifact: PathBuf,
 }
 
+/// Arguments of `explain`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplainArgs {
+    /// Artifact whose stored plan is explained.
+    pub artifact: PathBuf,
+    /// Target plan; the artifact default when absent.
+    pub target: Option<String>,
+}
+
 /// Arguments of `doctor`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorArgs {
@@ -207,6 +219,7 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
         "load" => parse_load(&args[1..]),
         "run" => parse_run(&args[1..]),
         "inspect" => parse_inspect(&args[1..]),
+        "explain" => parse_explain(&args[1..]),
         "doctor" => parse_doctor(&args[1..]),
         "help" | "--help" | "-h" => parse_help(&args[1..]),
         "--version" | "-V" => Ok(Command::Version),
@@ -231,10 +244,11 @@ fn parse_help(args: &[String]) -> Result<Command, CliError> {
         "load" => HelpTopic::Load,
         "run" => HelpTopic::Run,
         "inspect" => HelpTopic::Inspect,
+        "explain" => HelpTopic::Explain,
         "doctor" => HelpTopic::Doctor,
         other => {
             return Err(CliError::usage(format!(
-                "unknown help topic `{other}`; topics: prepare, load, run, inspect, doctor"
+                "unknown help topic `{other}`; topics: prepare, load, run, inspect, explain, doctor"
             )))
         }
     };
@@ -375,6 +389,26 @@ fn parse_inspect(args: &[String]) -> Result<Command, CliError> {
     }
     Ok(Command::Inspect(InspectArgs {
         artifact: finish_model(artifact, positional, "inspect")?,
+    }))
+}
+
+fn parse_explain(args: &[String]) -> Result<Command, CliError> {
+    let mut artifact = None;
+    let mut target = None;
+    let mut positional = None;
+    let mut cursor = Cursor::new(args);
+    while let Some((flag, inline)) = cursor.next_flag() {
+        match flag {
+            "--help" | "-h" => return Ok(Command::Help(HelpTopic::Explain)),
+            "--model" | "--artifact" => set_path(&mut artifact, cursor.value(inline, flag)?, flag)?,
+            "--target" => set_string(&mut target, cursor.value(inline, flag)?, flag)?,
+            other if other.starts_with('-') => return Err(unknown_flag("explain", other)),
+            other => set_positional(&mut positional, other, "explain")?,
+        }
+    }
+    Ok(Command::Explain(ExplainArgs {
+        artifact: finish_model(artifact, positional, "explain")?,
+        target,
     }))
 }
 
@@ -603,6 +637,7 @@ pub fn help_text(topic: HelpTopic) -> String {
         HelpTopic::Load => HELP_LOAD.to_string(),
         HelpTopic::Run => HELP_RUN.to_string(),
         HelpTopic::Inspect => HELP_INSPECT.to_string(),
+        HelpTopic::Explain => HELP_EXPLAIN.to_string(),
         HelpTopic::Doctor => HELP_DOCTOR.to_string(),
     }
 }
@@ -618,6 +653,7 @@ COMMANDS:
   load       map an artifact and build a session, without running it
   run        map an artifact, build a session and run one forward
   inspect    describe a header, graph, plans and hashes without mapping weights
+  explain    list the stored plan segment by segment: engine, shape, fallback
   doctor     diagnose an ONNX model before preparing it
 
 GLOBAL:
@@ -695,6 +731,19 @@ Prints the header, graph size, every target plan, weight bytes, quantization
 metadata and the stored section hashes. It never maps the weight payload:
 GRAPH, PLANS, QUANT and HASHES are read, the WEIGHTS table is read, and the
 weight payload is not. `mapped bytes: 0` is printed as the evidence.
+";
+
+const HELP_EXPLAIN: &str = "\
+fastnn-infer explain — what will run, segment by segment
+
+USAGE:
+  fastnn-infer explain <model.fnn3> [--target <name>]
+
+Prints the stored plan: every segment with its engine (scalar or oneDNN), op or
+fused chain, output slots and bytes, and the source node. Then lists the
+provider's fallbacks with their reasons, the fused chains and the layout
+reorders. The plan is read from the artifact; no session is opened and the
+weight payload is not mapped.
 ";
 
 const HELP_DOCTOR: &str = "\
