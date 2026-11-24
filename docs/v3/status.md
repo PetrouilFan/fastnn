@@ -114,6 +114,12 @@ The Python binding is not what separates them: the floor for a Python + ORT
 `session.run` call measured **0.032 ms** on a trivial identity model, which is
 0.13 % of ORT's 1-thread number and 0.4 % of its 8-thread number.
 
+The per-layer breakdown behind these totals — every segment's time, MACs and
+achieved GMAC/s next to ORT's per-node profile — is in
+[per-layer.md](per-layer.md). It is the document that says *which* layers are
+behind, and it is why the next work is pool/resize and low-channel 1×1 policy,
+not a new convolution algorithm.
+
 What the Python-free measurement does show is the real shape of the gap:
 
 - At **one thread the gap is 1.53x** — inside the <=2x goal.

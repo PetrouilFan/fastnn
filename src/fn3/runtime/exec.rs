@@ -786,7 +786,7 @@ impl Session {
                 // must not be reported as plain `Conv`, or the epilogue looks
                 // free.
                 let label = segment.op.to_string();
-                timings.record(segment.op_id(), &label, started.elapsed());
+                timings.record(segment_index, segment.op_id(), &label, started.elapsed());
             }
         }
         Ok(())
