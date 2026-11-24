@@ -126,8 +126,8 @@ authority is `docs/archive/roadmap/fn3-architecture.md`.
   recorded in the prepared segment, and is reported by
   `Session::one_dnn_splits`. A segment never mixes layout families: the chained
   policy keeps an internal conv-to-conv edge channels-last only when the
-  producer can split rows (a row range of channels-last is contiguous) and
-  every consumer is a oneDNN convolution, and it inserts one counted conversion
+  producer emits contiguous row ranges (one dense block counts, so the policy
+  is live at one worker too) and every consumer is a oneDNN convolution, and it inserts one counted conversion
   at each family boundary; a fused residual forces the plain destination, and a
   channels-last destination forces a row split. Each block owns its primitive,
   stream and one leased scratchpad slot; the row blocks of one convolution

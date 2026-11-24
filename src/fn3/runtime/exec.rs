@@ -1105,9 +1105,10 @@ fn prepare_onednn(
 /// - the consumer is not grouped: a group's channel slice is strided in a
 ///   channels-last tensor.
 ///
-/// The engine still decides whether the block split can produce it (a row split
-/// with at least two blocks); when it cannot, it prepares the plain layout and
-/// records no reorder.
+/// The engine still decides whether the block split can produce it (a row
+/// split; one dense block is a valid row range, so this is live at one
+/// worker); when it cannot, it prepares the plain layout and records no
+/// reorder.
 #[cfg(feature = "cpu-onednn")]
 fn blocked_destination(plan: &Plan, index: usize) -> bool {
     if plan.layout != LayoutStrategy::Chained {
