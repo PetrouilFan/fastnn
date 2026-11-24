@@ -3,7 +3,12 @@
 - **Date:** 2026-11-24
 - **Machine:** AMD Ryzen 7 3700X, 8 physical cores / 16 logical, AVX2 only
 - **Model:** `yolov8n.onnx` (`/home/petrouil/.hermes/yolov8n.onnx`), input `f32[1,3,320,320]`
-- **Build:** release, `--no-default-features --features cpu-onednn,parallel,segment-timing`
+- **Build:** release, `--no-default-features --features cpu-onednn,parallel,segment-timing`,
+  at Cargo's default `x86-64` target. The same tree built for `x86-64-v3` is
+  5-9 % faster at two to eight workers (see
+  [backends.md](backends.md#the-fallback-path-is-compiled-for-sse2)); the table
+  here is the baseline build, and a switch of target means re-measuring this
+  map.
 - **Protocol:** the whole harness runs three times, interleaved with any A/B
   build being compared, and every number is the median of the three runs. Inside
   one run: 3 warm-ups, then 3 groups of 3 forwards per thread count, each

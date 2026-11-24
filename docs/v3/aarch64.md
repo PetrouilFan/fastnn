@@ -42,7 +42,45 @@ kernel using the full width of both would be ~3.6x slower here. Being 1.75x
 slower means the x86 scalar path is not getting eight lanes out of AVX2 either:
 both targets auto-vectorise to about four.
 
-## ONNX Runtime's baseline is MLAS, not ACL
+### What the comparison found at home
+
+The per-layer Pi/x86 ratio was the first hint that the x86 figure was not a
+wide-SIMD figure either. It is not: this crate is compiled for Cargo's default
+x86 target, `x86-64`, whose baseline is SSE2. Counting SIMD operands in the
+release binary makes it plain.
+
+| build | `%xmm` operands | `%ymm` operands |
+|---|---:|---:|
+| default (`x86-64`) | 414387 | 61 |
+| `-C target-cpu=x86-64-v3` | 19249 | 14459 |
+
+So every scalar kernel, every arena and staging copy and every elementwise tail
+runs four lanes wide and cannot use FMA, while ONNX Runtime dispatches to AVX2
+kernels at run time and is never handicapped this way. The engine is not
+affected - oneDNN emits its own AVX2 code - which is why the oneDNN path looked
+healthy on x86 while the reference path did not.
+
+Measured on the same tree and the same plan (identical segment, layout and
+reorder counts, so this is codegen alone), three interleaved rounds of each
+build, medians:
+
+| workers | SSE2 baseline | `x86-64-v3` | |
+|---:|---:|---:|---|
+| 1 | 27.48 ms | 26.34 ms | -4 % |
+| 2 | 20.64 | 18.79 | **-9 %** |
+| 4 | 15.35 | 14.53 | -5 % |
+| 8 | 16.19 | 15.27 | **-6 %** |
+
+The two- and eight-worker ranges do not overlap; the one-worker one does, which
+fits the arithmetic - at one thread the forward is dominated by oneDNN's own
+JIT, and the flag changes only our Rust code (staging, arena, the elementwise
+and pool tails). The whole library still passes with FMA contraction enabled
+(284 tests), so the flag does not disturb the numeric gates.
+
+This does not change the AArch64 conclusion above; it is a defect the
+comparison exposed at home. See
+[backends.md](backends.md#the-fallback-path-is-compiled-for-sse2) for what to do
+about it.
 
 | threads | conv | QuickGelu | total |
 |---:|---:|---:|---:|
