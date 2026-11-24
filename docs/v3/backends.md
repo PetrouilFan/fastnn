@@ -871,3 +871,32 @@ because it evaluates the same expressions in the same order.
   separate segments.
 - The engine is a per-session object; there is no global primitive cache and no
   process-wide oneDNN setting is touched.
+
+## The fallback path is compiled for SSE2
+
+Cargo's default `x86-64` target has SSE2 as its baseline, so the scalar
+kernels, the arena and staging copies and every elementwise tail run four lanes
+wide with no FMA. `-C target-cpu=x86-64-v3` turns 43 % of the binary's SIMD
+operands from `xmm` to `ymm` and moves the yolov8n forward from 27.48 / 20.64 /
+15.35 / 16.19 ms to 26.34 / 18.79 / 14.53 / 15.27 ms at 1/2/4/8 workers
+(three interleaved rounds each, disjoint ranges at two and eight, identical
+plan). The library's 284 tests pass with FMA contraction on.
+
+The measurement is in [aarch64.md](aarch64.md#what-the-comparison-found-at-home).
+What follows from it:
+
+- **The default build stays baseline-correct.** Nothing about this changes
+  what a plain `cargo build` produces, and a build that must run on a
+  pre-Haswell x86 is still the default.
+- **Performance numbers must say which target produced them.** A figure quoted
+  from a plain build understates the same code by 5-9 % at two to eight
+  workers. Until the default changes, the per-layer map in
+  [per-layer.md](per-layer.md) is a baseline-build map.
+- **A packaged binary needs a decision, not a flag.** Requiring AVX2 is one
+  answer; runtime dispatch on a handful of `#[target_feature]` fallback
+  functions is the other. Both are honest; silently shipping the SSE2 build and
+  comparing it with ONNX Runtime's run-time-dispatched kernels is not.
+- **The engine is unaffected**, because oneDNN emits its own AVX2 code. This is
+  why the provider looked healthy while the reference path did not, and why the
+  gap between the two builds is largest where the Rust tails are the largest
+  share of the work.

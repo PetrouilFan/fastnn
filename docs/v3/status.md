@@ -305,7 +305,20 @@ the board advertises `asimddp`, because oneDNN 3.14.1 has no non-SVE int8
 convolution kernel. Neither ORT's wheel nor our build uses ACL; ACL is the only
 lever left for ARM f32 and it needs a vendored build plus an accuracy gate.
 Details, numbers and the two portability defects it found are in
-[aarch64.md](aarch64.md). That attribution now
+[aarch64.md](aarch64.md).
+
+The comparison also exposed a defect at home: this crate is compiled for
+Cargo's default `x86-64` target, whose baseline is SSE2, so 414387 of the
+release binary's SIMD operands are `xmm` and 61 are `ymm` — the scalar kernels,
+the arena and staging copies and the elementwise tails all run four lanes wide
+without FMA, while ORT's wheel dispatches to AVX2 at run time. Built for
+`x86-64-v3` instead, the same tree and the same plan measure **26.34 / 18.79 /
+14.53 / 15.27 ms** at 1/2/4/8 workers against **27.48 / 20.64 / 15.35 / 16.19**
+(three interleaved rounds, disjoint ranges at two and eight, 284 tests still
+passing with FMA contraction). That is a build-target decision, not a kernel
+change: see
+[backends.md](backends.md#the-fallback-path-is-compiled-for-sse2) for the
+options, and note that every number quoted in this file is a baseline build. That attribution now
    exists (`OneDnnReport::segment_bytes`) and it closes the block-strategy
    question: staged copies total 14.11 MB against 35.65 MB of payload, while
    weight re-reads total 60.77 MB at eight workers against 7.6 MB at one, and
