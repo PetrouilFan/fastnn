@@ -122,6 +122,26 @@ fn inspect_load_and_run_agree_with_the_rust_api() {
     assert!(out.contains("shape [1x84x2100]"), "{out}");
     assert!(out.contains("finite 176400/176400"), "{out}");
 
+    // A series reports median/p95 and, on Linux, the process's own peak RSS.
+    let (code, out, err) = invoke(&[
+        "run",
+        &path,
+        "--input",
+        "images=zeros",
+        "--threads",
+        "2",
+        "--warmup",
+        "1",
+        "--repeat",
+        "2",
+    ]);
+    assert_eq!(code, EXIT_OK, "{err}");
+    assert!(out.contains("median"), "{out}");
+    assert!(out.contains("p95"), "{out}");
+    if cfg!(target_os = "linux") {
+        assert!(out.contains("peak RSS"), "{out}");
+    }
+
     // The CLI and the Rust API see the same artifact.
     let artifact = Artifact::open(&path).expect("open");
     let session = fastnn::inference::load(&path, Threading::Fixed(1)).expect("load");

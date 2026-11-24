@@ -113,7 +113,10 @@ little-endian `f32` bytes with exactly the element count the plan declares.
 ```
 
 Every graph input must be supplied exactly once. The output line names the
-tensor, its shape, element count, min/max/mean and finite count.
+tensor, its shape, element count, min/max/mean and finite count. With
+`--warmup <n> --repeat <n>` the same command prints the median and p95 of the
+measured series and this process's peak RSS (`VmHWM`), so a latency claim and
+its memory come from one run.
 
 ## 5. Doctor
 

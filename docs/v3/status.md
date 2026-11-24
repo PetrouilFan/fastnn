@@ -72,15 +72,18 @@ fastnn-infer run yolov8n.fnn3 --input images=ones --threads 8 --warmup 5 --repea
 ```
 
 `--repeat` times `Session::execute` (arena in place, no output copy per
-forward) and prints median and p95; the outputs are materialised once, after
-the series. Measured on this machine, 5 warm-ups + 50 forwards, same `ones`
-input for every engine:
+forward) and prints median, p95 and the process's peak RSS (`VmHWM`); the
+outputs are materialised once, after the series. Measured on this machine,
+5 warm-ups + 50 forwards, same `ones` input for every engine:
 
 | | 1 thread | 4 threads | 8 threads |
 |---|---:|---:|---:|
 | fastnn scalar, Rust CLI | 1322.39 ms | 390.60 ms | 256.21 ms |
-| fastnn oneDNN, Rust CLI | **42.01 ms** | **20.32 ms** | **19.77 ms** |
+| fastnn oneDNN, Rust CLI | **36.60 ms** | **19.39 ms** | **18.70 ms** |
 | ONNX Runtime, Python per-call | 23.86 ms | 7.82 ms | 7.64 ms |
+
+Peak RSS for those oneDNN runs: 68.7 MB at one worker, 75.1 MB at four,
+77.3 MB at eight.
 
 The Python binding is not what separates them: the floor for a Python + ORT
 `session.run` call measured **0.032 ms** on a trivial identity model, which is
@@ -88,12 +91,14 @@ The Python binding is not what separates them: the floor for a Python + ORT
 
 What the Python-free measurement does show is the real shape of the gap:
 
-- At **one thread the gap is 1.86x** — inside the <=2x goal.
-- From 1 to 8 threads fastnn now gains 2.13x (ORT 3.12x). 59 of the 126
+- At **one thread the gap is 1.53x** — inside the <=2x goal.
+- From 1 to 8 threads fastnn now gains 1.96x (ORT 3.12x). 59 of the 126
   segments still run the scalar reference engine, but the row-parallel ones
   (concat, softmax, activations, pools) take the session pool; what is left
   serial is small (the 10x10 and 20x20 head layers) and Amdahl's ceiling is
-  the convolutions themselves.
+  the convolutions themselves. The remaining per-convolution gap against ORT
+  is algorithmic: MLAS has a Winograd kernel on AVX2 and this oneDNN build
+  does not.
 
 The attention-headed detector tells the same story from the other side:
 stock YOLO11n 640 gets more from the tail work because it has 174 scalar

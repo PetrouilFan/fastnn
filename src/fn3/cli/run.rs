@@ -128,6 +128,7 @@ pub fn execute(args: &RunArgs, out: &mut dyn Write) -> Result<(), CliError> {
     }
     let elapsed =
         std::time::Duration::from_secs_f64(series.iter().copied().fold(0.0f64, f64::max) / 1e3);
+    let peak_rss = peak_rss_kib();
 
     let _ = writeln!(out, "fastnn-infer run");
     let _ = writeln!(out, "  artifact: {}", args.model.display());
@@ -164,6 +165,9 @@ pub fn execute(args: &RunArgs, out: &mut dyn Write) -> Result<(), CliError> {
             sorted[sorted.len() - 1],
             args.warmup
         );
+        if let Some(rss) = peak_rss {
+            let _ = writeln!(out, "  memory:  peak RSS {rss} KiB");
+        }
     }
 
     if let Some(directory) = &args.output_dir {
@@ -284,4 +288,25 @@ fn safe_output_path(directory: &Path, name: &str) -> PathBuf {
         safe.push_str("output");
     }
     directory.join(format!("{safe}.f32"))
+}
+
+/// Peak resident set size of this process, from `/proc/self/status` on Linux.
+///
+/// A benchmark claim needs memory next to latency, and reading the kernel's own
+/// high-water mark is the cheapest way for the CLI to report the process it
+/// just measured. Other platforms return `None` rather than a guess.
+#[cfg(target_os = "linux")]
+fn peak_rss_kib() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(value) = line.strip_prefix("VmHWM:") {
+            return value.split_whitespace().next()?.parse().ok();
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn peak_rss_kib() -> Option<u64> {
+    None
 }
