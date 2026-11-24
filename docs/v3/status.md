@@ -174,12 +174,15 @@ fastnn-infer prepare model.onnx --out model.fnn3 [--target cpu] [--shape images=
 fastnn-infer load model.fnn3
 fastnn-infer run model.fnn3 --input images=ones --warmup 5 --repeat 50
 fastnn-infer inspect model.fnn3
+fastnn-infer explain model.fnn3 [--target cpu]
 fastnn-infer doctor model.onnx [--shape images=1,3,640,640]
 ```
 
 The Rust surface is `fastnn::inference::{prepare, load, inspect, doctor}` with
 `PrepareReport` and `DoctorReport`; Python mirrors it through
-`fastnn.inference`. `load` is keyword-only (`target=`, `device=`), a `Model` is
+`fastnn.inference`. `explain` is a CLI view over the stored plan (the same data
+is on `Artifact::plan_for`), useful before running a model whose engine split
+you want to understand. `load` is keyword-only (`target=`, `device=`), a `Model` is
 immutable, and every `session()` owns its own arena and thread pool.
 
 ## Open work, in the order it should be taken

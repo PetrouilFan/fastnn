@@ -11,6 +11,7 @@
 //! load      map the artifact, check every hash and build the recorded session
 //! run       one forward from the artifact, with explicit named inputs
 //! inspect   header, graph, per-target plans, weights, quant and hashes; no map
+//! explain   the stored plan segment by segment: engine, shape, fallbacks
 //! doctor    diagnose an ONNX model before preparing it
 //! ```
 //!
@@ -29,6 +30,7 @@
 
 pub mod args;
 mod doctor;
+mod explain;
 mod inspect;
 mod load;
 mod prepare;
@@ -183,6 +185,7 @@ fn dispatch(command: Command, out: &mut dyn Write) -> Result<(), CliError> {
         Command::Load(args) => load::execute(&args, out),
         Command::Run(args) => run::execute(&args, out),
         Command::Inspect(args) => inspect::execute(&args, out),
+        Command::Explain(args) => explain::execute(&args, out),
         Command::Doctor(args) => doctor::execute(&args, out),
         Command::Help(_) | Command::Version => Ok(()),
     }

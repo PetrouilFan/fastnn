@@ -79,6 +79,18 @@ metadata and the stored section hashes. It never maps the weight payload:
 as the evidence. `Artifact::open` (the `load` path) does verify every hash,
 including the payload, before the first segment can run.
 
+`explain` goes one level deeper and prints the stored plan itself:
+
+```bash
+./target/release/fastnn-infer explain yolov8n.fnn3
+```
+
+Every segment is listed with its engine (`scalar` or `onednn`), its op or fused
+chain (`conv+swish`), its output slots and bytes and the source node; then the
+provider's fallbacks with their reasons, the fused chains and the layout
+reorders. It reads the plan from the artifact, opens no session and does not map
+the weight payload. `--target <name>` selects another stored plan.
+
 ## 3. Load
 
 ```bash

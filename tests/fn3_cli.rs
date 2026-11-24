@@ -237,3 +237,34 @@ fn prepare_refuses_w8a8_and_names_the_reason() {
     );
     assert!(!out_path.exists(), "a refused prepare writes no artifact");
 }
+
+/// `explain` reads the stored plan and prints it segment by segment; it never
+/// opens a session, so it works from an artifact with no source ONNX. An
+/// unknown target is a model error naming the plans that exist.
+#[test]
+fn explain_prints_the_stored_plan_and_rejects_an_unknown_target() {
+    let scratch = Scratch::new("explain");
+    let Some(artifact) = prepared_yolo(&scratch) else {
+        return;
+    };
+    let (code, out, err) = invoke(&["explain", artifact.to_str().expect("path")]);
+    assert_eq!(code, EXIT_OK, "stdout:\n{out}\nstderr:\n{err}");
+    assert!(err.is_empty(), "{err}");
+    assert!(out.contains("fastnn-infer explain"), "{out}");
+    assert!(out.contains("segments:"), "{out}");
+    assert!(out.contains("engine"), "{out}");
+    assert!(out.contains("conv+swish"), "{out}");
+    assert!(out.contains("fusions:"), "{out}");
+    assert!(out.contains("f32[1, 3, 320, 320]"), "{out}");
+    assert!(out.contains("output0"), "{out}");
+
+    let (code, _, err) = invoke(&[
+        "explain",
+        artifact.to_str().expect("path"),
+        "--target",
+        "gpu",
+    ]);
+    assert_eq!(code, EXIT_MODEL, "{err}");
+    assert!(err.contains("available: cpu"), "{err}");
+    assert!(err.contains("next:"), "{err}");
+}
