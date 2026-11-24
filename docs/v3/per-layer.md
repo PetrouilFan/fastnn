@@ -206,11 +206,46 @@ putting two workers on one core, and a block cap of 2 is clearly worse (22.81
 ms at eight) while 4 against 8 cannot be separated: the run-to-run spread at
 four workers was 14.85-17.90 ms in that session.
 
-So the loss is inside the engine's per-block work - the row staging copies and
-the halo - and it needs an attribution that does not depend on this host's
-noise: per-segment staging, reorder and prepacked bytes in the engine report,
-compared against the segment's payload. That is the next measurement, and it is
-cheaper than another timing sweep.
+So the loss is inside the engine's per-block work. `OneDnnReport::segment_bytes`
+now carries the per-segment account (blocks, payload, staged bytes in and out,
+weight bytes), which is a count and therefore does not move with host noise.
+`FN3_CNN_TRACE=1` prints it after the timing lines as `[fn3perf][bytes]`.
+
+### Where the bytes go
+
+Per forward over the 64 convolution segments, at eight workers:
+
+| stream | bytes |
+|---|---:|
+| activation payload in + out | 35.65 MB |
+| staged copies (row blocks) | 14.11 MB |
+| weight reads, summed over blocks | **60.77 MB** |
+
+The copy hypothesis is dead twice over. A staged segment copies 1.0-1.2x its own
+payload (the halo), the channels-last segments copy nothing, and staging totals
+14 MB against 35 MB of payload: at 14.68 ms a forward that is under 1 GB/s. What
+grows with the block count is **weight traffic** — every block reads the whole
+weight tensor, so the forward reads 60.77 MB at eight workers against 7.6 MB at
+one. That is the price of blocks, and it explains why the floor sweep below
+4 Ki elements found nothing: more blocks buy parallelism and pay for it in
+re-read weights.
+
+The segments that still do not scale are the ones that cannot reach four blocks.
+Thirteen of the 64 cannot, and they are a large share of what is left:
+
+| conv segments | count | 1T | 8T | scaling |
+|---|---:|---:|---:|---:|
+| four blocks or more | 51 | 23.10 ms | 9.74 ms | 2.37x |
+| three blocks or fewer | 13 | 2.80 ms | 2.40 ms | **1.17x** |
+
+Those thirteen are 16 % of the 14.68 ms forward at eight workers while they are
+10 % of it at one. They are the 10x10 grids: a 3x3 output row at that height
+needs three input rows, so a row split produces three blocks, and a channel
+split is capped by the same 4 Ki-element floor that the sweep measured as
+optimal. The split policy is therefore at its measured optimum; what is left on
+the eight-worker side is the engine's **per-block fixed cost** — a stream, a set
+of memory objects and a scratchpad lease per block — which is a session-level
+redesign (persistent per-worker state), not a policy knob.
 
 ## Reproducing
 

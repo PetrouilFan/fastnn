@@ -602,3 +602,43 @@ fn the_scalar_path_is_unchanged() {
         "scalar vs onnxruntime",
     );
 }
+
+#[test]
+fn the_byte_account_matches_the_plan_slots() {
+    let Some(imported) = import_model() else {
+        return;
+    };
+    for &workers in worker_counts() {
+        let session = onednn_session(&imported, workers);
+        let plan = session.plan();
+        let report = session
+            .one_dnn_report()
+            .expect("an Auto session on a CNN must have oneDNN segments");
+        assert_eq!(
+            report.segment_bytes.len(),
+            report.conv_segments + report.matmul_segments,
+            "every prepared segment records one byte row at {workers} workers"
+        );
+        for row in &report.segment_bytes {
+            let segment = &plan.segments[row.index];
+            let output = plan.slot(segment.outputs[0]).expect("the result slot");
+            let input = plan.slot(segment.inputs[0]).expect("the source slot");
+            assert!(
+                (1..=workers).contains(&row.blocks),
+                "segment {} has {} blocks at {workers} workers",
+                row.index,
+                row.blocks
+            );
+            assert_eq!(
+                row.payload_out, output.bytes,
+                "segment {} payload_out must be its result slot",
+                row.index
+            );
+            assert_eq!(
+                row.payload_in, input.bytes,
+                "segment {} payload_in must be its source slot",
+                row.index
+            );
+        }
+    }
+}
