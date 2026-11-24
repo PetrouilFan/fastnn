@@ -283,10 +283,13 @@ immutable, and every `session()` owns its own arena and thread pool.
    `model.0` from 8.0 to 17.8 GMAC/s with no layout change), and both layout
    policies that were tried lost or tied. What is open is why one to two workers
    is 1.38x and why four workers beat eight: 41 of 126 segments are >30 % slower
-   at eight. The next measurement is a micro-benchmark of one `run_blocks`
-   dispatch on an empty body, to divide the ~50 us per segment between rayon's
-   wake-up and block imbalance, before any fix (a spin phase, running small
-   segments inline, or a two-dimensional split) is chosen.
+   at eight. That is not dispatch: an empty `run_blocks` costs 5-8 us, about
+   1 ms per forward, and the scalar engine scales 1.89x at two workers and
+   5.31x at eight, so the runtime parallelises and the loss is inside the
+   engine's per-block work. Pinning to distinct physical CPUs changes little
+   (15.12 against 15.97 ms) and a block cap of 2 is worse. The next measurement
+   is per-segment staging/reorder/prepacked bytes in the engine report, because
+   a byte count does not depend on this host's noise.
 5. **Phase 5 W8A8** (#103): the gate refuses it with the measured reason on
    this AVX2 host: oneDNN's AVX2 int8 convolution is 0.97-1.20x the blocked
    f32 path (0.83-0.94 ms against 0.94-1.07 ms), because without VNNI the
