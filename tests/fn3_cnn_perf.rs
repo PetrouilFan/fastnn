@@ -464,6 +464,25 @@ fn print_segment_trace(session: &Session, repeats: &[Vec<(usize, String, u64, f6
             segment.loc.describe()
         );
     }
+    // The byte account is static (it does not move with host noise), so it is
+    // printed after the timings in the same plan order and joined by index.
+    if let Some(report) = session.one_dnn_report() {
+        println!(
+            "[fn3perf][bytes] index blocks payload_in staged_in payload_out staged_out weights"
+        );
+        for row in &report.segment_bytes {
+            println!(
+                "[fn3perf][bytes] {} {} {} {} {} {} {}",
+                row.index,
+                row.blocks,
+                row.payload_in,
+                row.staged_in,
+                row.payload_out,
+                row.staged_out,
+                row.weights
+            );
+        }
+    }
 }
 
 #[test]

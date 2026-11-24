@@ -1180,6 +1180,31 @@ impl SegmentReorder {
 }
 
 /// A segment's prepared blocks.
+/// Bytes one prepared segment moves per forward, as counts rather than times.
+///
+/// This exists because the per-layer map's eight-worker loss could not be
+/// separated from host noise (`docs/v3/per-layer.md`): a segment whose blocks
+/// copy more bytes than it computes an answer for is identifiable from the
+/// counts alone, on any host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SegmentBytes {
+    /// Position in `Plan::segments`.
+    pub index: usize,
+    /// Blocks the segment was split into.
+    pub blocks: usize,
+    /// Bytes of the segment's activation operand (the whole slot).
+    pub payload_in: usize,
+    /// Bytes each block copies in, summed over blocks: the halo makes this
+    /// larger than `payload_in` for a row split.
+    pub staged_in: usize,
+    /// Bytes of the segment's result (the whole slot).
+    pub payload_out: usize,
+    /// Bytes each block copies out, summed over blocks.
+    pub staged_out: usize,
+    /// Bytes of the weight operand, read in full by every block.
+    pub weights: usize,
+}
+
 #[derive(Debug)]
 pub(crate) struct PreparedSegment {
     /// `"conv"`, `"pool"` or `"matmul"`, for diagnostics.
@@ -1202,6 +1227,26 @@ impl PreparedSegment {
     /// The number of blocks the planner split this segment into.
     pub(crate) fn block_count(&self) -> usize {
         self.blocks.len()
+    }
+
+    /// Bytes the segment's blocks copy in and out per forward, summed over
+    /// blocks.
+    ///
+    /// A row block copies its source rows (halo included) into a dense buffer
+    /// and its result rows back out; a block with a blocked source or
+    /// destination copies nothing. Summing over blocks rather than reporting
+    /// the allocation is deliberate: the buffers are pooled per worker, so the
+    /// allocation is small while the traffic grows with the block count.
+    pub(crate) fn copy_bytes(&self) -> (usize, usize) {
+        self.blocks.iter().fold((0, 0), |(input, output), block| {
+            match block.staging.as_ref() {
+                Some(staging) => (
+                    input + staging.source_bytes,
+                    output + staging.destination_bytes,
+                ),
+                None => (input, output),
+            }
+        })
     }
 
     /// Run the segment's layout prelude, if it has one.
@@ -1290,6 +1335,8 @@ pub(crate) struct OneDnnEngine {
     layout_bytes: usize,
     /// Segments whose result stays channels-last.
     blocked_segments: usize,
+    /// Per-segment byte account, `None` where no segment was prepared.
+    segment_bytes: Vec<Option<SegmentBytes>>,
 }
 
 // SAFETY: `OneDnnEngine` is `Send` because a session may be moved between
@@ -1346,6 +1393,7 @@ impl OneDnnEngine {
             reorder_bytes: 0,
             layout_bytes: 0,
             blocked_segments: 0,
+            segment_bytes: vec![None; segments],
         })
     }
 
@@ -1362,6 +1410,11 @@ impl OneDnnEngine {
     /// Bytes of dense staging owned by row blocks.
     pub(crate) fn staging_bytes(&self) -> usize {
         self.staging_bytes
+    }
+
+    /// The per-segment byte account, in plan order.
+    pub(crate) fn segment_bytes(&self) -> &[Option<SegmentBytes>] {
+        &self.segment_bytes
     }
 
     /// Bytes of user scratchpad pooled across blocks.
@@ -1477,6 +1530,19 @@ impl OneDnnEngine {
         }
         if spec.fused.is_some() {
             self.fused_segments += 1;
+        }
+        let (staged_in, staged_out) = prepared.copy_bytes();
+        let bytes = SegmentBytes {
+            index,
+            blocks: prepared.block_count(),
+            payload_in: payload_bytes(spec.inputs.first()),
+            payload_out: payload_bytes(spec.outputs.first()),
+            staged_in,
+            staged_out,
+            weights: payload_bytes(spec.inputs.get(1)),
+        };
+        if let Some(row) = self.segment_bytes.get_mut(index) {
+            *row = Some(bytes);
         }
         let len = self.prepared.len();
         let slot = self.prepared.get_mut(index).ok_or(Fn3Error::OutOfBounds {
@@ -2444,6 +2510,17 @@ fn prepare_scratchpad(pd: &PrimitiveDescHandle) -> Result<Option<(Desc, usize)>,
         }
         None => Ok(None),
     }
+}
+
+/// Bytes of one operand's payload, `0` when the operand is absent.
+///
+/// Every op the engine claims is `f32`, so four bytes per element is the whole
+/// rule; a dtype test would be dead code here.
+fn payload_bytes(shape: Option<&Shape>) -> usize {
+    shape
+        .and_then(|shape| shape.numel().ok())
+        .and_then(|count| usize::try_from(count).ok())
+        .map_or(0, |count| count * std::mem::size_of::<f32>())
 }
 
 fn push_arg(

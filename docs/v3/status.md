@@ -289,7 +289,14 @@ immutable, and every `session()` owns its own arena and thread pool.
    engine's per-block work. Pinning to distinct physical CPUs changes little
    (15.12 against 15.97 ms) and a block cap of 2 is worse. The next measurement
    is per-segment staging/reorder/prepacked bytes in the engine report, because
-   a byte count does not depend on this host's noise.
+   a byte count does not depend on this host's noise. That attribution now
+   exists (`OneDnnReport::segment_bytes`) and it closes the block-strategy
+   question: staged copies total 14.11 MB against 35.65 MB of payload, while
+   weight re-reads total 60.77 MB at eight workers against 7.6 MB at one, and
+   the thirteen segments that cannot reach four blocks (the 10x10 grids) run
+   2.80 -> 2.40 ms, 16 % of the forward at eight. The split policy is at its
+   measured optimum; the remaining eight-worker lever is per-block fixed cost,
+   i.e. persistent per-worker state, which is a session redesign.
 5. **Phase 5 W8A8** (#103): the gate refuses it with the measured reason on
    this AVX2 host: oneDNN's AVX2 int8 convolution is 0.97-1.20x the blocked
    f32 path (0.83-0.94 ms against 0.94-1.07 ms), because without VNNI the

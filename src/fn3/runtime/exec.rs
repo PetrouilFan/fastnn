@@ -200,6 +200,33 @@ pub struct OneDnnReport {
     /// `true` when blocks are executed on the session's pool; `false` when a
     /// non-sequential oneDNN build forced serial block execution.
     pub parallel_blocks: bool,
+    /// Per-segment bytes moved, in plan order.
+    ///
+    /// Times on a shared host move by several percent between runs; byte counts
+    /// do not. A segment whose `staged_in + staged_out` is a multiple of its
+    /// payload, or whose `weights` are read by many blocks, is spending its
+    /// time on copies rather than arithmetic, and this table is where that is
+    /// visible without a profiler.
+    pub segment_bytes: Vec<SegmentByteRow>,
+}
+
+/// One prepared segment's byte account, per forward.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SegmentByteRow {
+    /// Position in the plan's segment list.
+    pub index: usize,
+    /// Blocks the segment was split into.
+    pub blocks: usize,
+    /// Bytes of the segment's activation operand.
+    pub payload_in: usize,
+    /// Bytes its blocks copy in, summed over blocks (halo included).
+    pub staged_in: usize,
+    /// Bytes of the segment's result.
+    pub payload_out: usize,
+    /// Bytes its blocks copy out, summed over blocks.
+    pub staged_out: usize,
+    /// Bytes of the weight operand, which every block reads in full.
+    pub weights: usize,
 }
 
 /// Which dimension a convolution segment's blocks divide.
@@ -862,6 +889,20 @@ impl Session {
                 staging_bytes: engine.staging_bytes(),
                 scratchpad_bytes: engine.scratchpad_bytes(),
                 parallel_blocks: engine.blocks_run_in_parallel(),
+                segment_bytes: engine
+                    .segment_bytes()
+                    .iter()
+                    .flatten()
+                    .map(|bytes| SegmentByteRow {
+                        index: bytes.index,
+                        blocks: bytes.blocks,
+                        payload_in: bytes.payload_in,
+                        staged_in: bytes.staged_in,
+                        payload_out: bytes.payload_out,
+                        staged_out: bytes.staged_out,
+                        weights: bytes.weights,
+                    })
+                    .collect(),
             })
         }
         #[cfg(not(feature = "cpu-onednn"))]
