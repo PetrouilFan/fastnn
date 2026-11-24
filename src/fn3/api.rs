@@ -194,11 +194,13 @@ pub fn prepare(
 /// Refuse a precision this build cannot execute, naming why.
 ///
 /// `w8a8` is a plan decision, but a decision is only honest if something can
-/// run it. The oneDNN int8 convolution is a reference kernel on a CPU without
-/// VNNI: measured on this host at **1332 ms** for a 32x80x80x3x3 convolution
-/// against **1.57 ms** for the same f32 convolution, so writing a W8A8 artifact
-/// here would be an 848x trap. The check is in `prepare`, before the ONNX is
-/// read, so a refused request writes nothing (#103).
+/// run it and the result is worth the accuracy risk. On this AVX2 host oneDNN's
+/// AVX2 int8 convolution is only **0.97-1.20x** the blocked f32 path
+/// (0.83-0.94 ms against 0.94-1.07 ms on two pinned shapes): without VNNI the
+/// `vpmaddubsw` + `vpmaddwd` sequence has no MAC-throughput advantage over two
+/// FMA ports. The earlier 848x figure came from an NCHW descriptor the AVX2
+/// int8 kernel cannot accept, so it measured the reference fallback. The check
+/// is in `prepare`, before the ONNX is read (#103).
 pub(crate) fn refuse_unexecutable_precision(precision: Precision) -> Result<(), Fn3Error> {
     if precision != Precision::W8A8 {
         return Ok(());
@@ -209,9 +211,9 @@ pub(crate) fn refuse_unexecutable_precision(precision: Precision) -> Result<(), 
         let reason = if available {
             "int8 kernels exist on that ISA, but no W8A8 executor is implemented yet"
         } else {
-            "without VNNI oneDNN serves an int8 convolution from its reference kernel, \
-             measured at 1332 ms against 1.57 ms for the same 32x80x80x3x3 f32 convolution \
-             on this host"
+            "without VNNI the AVX2 int8 convolution measured 0.97-1.20x the blocked f32 \
+             path on this host (0.83-0.94 ms against 0.94-1.07 ms), so a W8A8 artifact \
+             would add calibration and accuracy risk for no speed"
         };
         Err(Fn3Error::InvalidFormat {
             format: "precision",

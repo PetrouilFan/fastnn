@@ -149,8 +149,14 @@ pub(crate) const ARG_BIAS: c_int = 41;
 /// `dnnl_arg_scratchpad`.
 pub(crate) const ARG_SCRATCHPAD: c_int = 80;
 
+/// `dnnl_query_src_md`.
+#[cfg(test)]
+pub(crate) const QUERY_SRC_MD: i32 = 129;
 /// `dnnl_query_weights_md`.
 pub(crate) const QUERY_WEIGHTS_MD: i32 = 131;
+/// `dnnl_query_dst_md`.
+#[cfg(test)]
+pub(crate) const QUERY_DST_MD: i32 = 133;
 /// `dnnl_query_scratchpad_md`.
 pub(crate) const QUERY_SCRATCHPAD_MD: i32 = 136;
 /// `dnnl_scratchpad_mode_user`.
@@ -1309,102 +1315,207 @@ mod tests {
     use super::*;
     use crate::inference::AlignedBuffer;
 
-    /// The measurement behind `Precision::W8A8`'s refusal on non-VNNI hosts.
+    /// The measurement behind the int8 execution decision.
     ///
-    /// Ignored because it is a benchmark, not a gate: on AVX2 the int8
-    /// primitive is oneDNN's reference kernel and takes ~1.3 s for a
-    /// 32x80x80x3x3 convolution, against 1.6 ms for f32. Run it on a VNNI host
-    /// before enabling int8 execution (issue #103).
+    /// Ignored because it is a benchmark, not a gate. It times the same
+    /// convolution four ways: f32 NCHW with the declared descriptors (the old
+    /// probe's layout), f32 with the descriptor oneDNN chose (blocked, which is
+    /// what the engine executes), int8 NCHW (which `jit_uni_x8s8s32x` cannot
+    /// accept), and int8 NHWC with a provider-chosen packed weights descriptor
+    /// (which it can). The fair comparison is blocked f32 against NHWC int8.
+    ///
+    /// On this AVX2 host the two are within 1.0-1.25x: without VNNI the
+    /// `vpmaddubsw` + `vpmaddwd` sequence has no MAC-throughput advantage over
+    /// two FMA ports, so the 8-bit form only reduces bytes moved. Run it on a
+    /// VNNI/AMX host before enabling W8A8 there.
     #[test]
-    #[ignore = "benchmark; measures the int8 fallback"]
+    #[ignore = "benchmark; measures the int8 kernels"]
     fn probe_int8_speed() {
         let engine = EngineHandle::cpu().expect("cpu engine");
         let stream = StreamHandle::new(&engine).expect("stream");
         let attr = PrimitiveAttrHandle::library_default().expect("attr");
-        let (n, c, h, w, o, k) = (1i64, 32i64, 80i64, 80i64, 32i64, 3i64);
+        let shapes = [
+            (1i64, 32i64, 80i64, 80i64, 32i64, 3i64),
+            (1, 64, 40, 40, 64, 3),
+            (1, 128, 20, 20, 128, 3),
+            (1, 32, 80, 80, 32, 1),
+        ];
+        for (n, c, h, w, o, k) in shapes {
+            let f32_ms = time_conv(
+                &engine,
+                &stream,
+                &attr,
+                (n, c, h, w, o, k),
+                false,
+                false,
+                false,
+            );
+            let f32_query_ms = time_conv(
+                &engine,
+                &stream,
+                &attr,
+                (n, c, h, w, o, k),
+                false,
+                true,
+                true,
+            );
+            let nchw_ms = time_conv(
+                &engine,
+                &stream,
+                &attr,
+                (n, c, h, w, o, k),
+                true,
+                false,
+                false,
+            );
+            let nhwc_ms = time_conv(
+                &engine,
+                &stream,
+                &attr,
+                (n, c, h, w, o, k),
+                true,
+                true,
+                true,
+            );
+            let format = |value: Option<f64>| match value {
+                Some(ms) => format!("{ms:.3} ms"),
+                None => "unavailable".to_string(),
+            };
+            let ratio = match (f32_query_ms, nhwc_ms) {
+                (Some(f32_ms), Some(nhwc_ms)) => format!("{:.2}x", f32_ms / nhwc_ms),
+                _ => "-".to_string(),
+            };
+            println!(
+                "probe {}x{}x{}x{}x{}x{}: f32-nchw {} | f32-blocked {} | int8-nchw {} | int8-nhwc {} (blocked-vs-int8 {ratio})",
+                n,
+                c,
+                h,
+                w,
+                o,
+                k,
+                format(f32_ms),
+                format(f32_query_ms),
+                format(nchw_ms),
+                format(nhwc_ms)
+            );
+        }
+    }
+
+    /// Time one convolution. `int8` selects u8/s8/s32; `nhwc` selects the
+    /// channels-last layout the AVX2 int8 kernel requires and lets oneDNN pick
+    /// the packed weights descriptor.
+    fn time_conv(
+        engine: &EngineHandle,
+        stream: &StreamHandle,
+        attr: &PrimitiveAttrHandle,
+        (n, c, h, w, o, k): (i64, i64, i64, i64, i64, i64),
+        int8: bool,
+        nhwc: bool,
+        query: bool,
+    ) -> Option<f64> {
         let src_dims = [n, c, h, w];
         let w_dims = [o, c, k, k];
         let dst_dims = [n, o, h, w];
-        for (name, sdt, wdt, ddt, sb, wb, db) in [
+        let (sdt, wdt, ddt) = if int8 {
+            (DATA_TYPE_U8, DATA_TYPE_S8, DATA_TYPE_S32)
+        } else {
+            (DATA_TYPE_F32, DATA_TYPE_F32, DATA_TYPE_F32)
+        };
+        let tag = if nhwc {
+            FORMAT_TAG_NHWC
+        } else {
+            FORMAT_TAG_ABCD
+        };
+        let weights_tag = if nhwc {
+            FORMAT_TAG_ANY
+        } else {
+            FORMAT_TAG_ABCD
+        };
+        let pad = (k - 1) / 2;
+        let src = Desc::with_tag_dtype(&src_dims, tag, sdt).ok()?;
+        let weights = Desc::with_tag_dtype(&w_dims, weights_tag, wdt).ok()?;
+        let dst = Desc::with_tag_dtype(&dst_dims, tag, ddt).ok()?;
+        let pd = match PrimitiveDescHandle::convolution(
+            engine,
+            ALG_CONVOLUTION_DIRECT,
+            &src,
+            &weights,
+            None,
+            &dst,
+            &[1, 1],
+            &[0, 0],
+            &[pad, pad],
+            &[pad, pad],
+            attr,
+        ) {
+            Ok(pd) => pd,
+            Err(error) => {
+                println!("  (pd unavailable: {error:?})");
+                return None;
+            }
+        };
+        // Ask for the layouts the primitive actually chose: the NCHW int8
+        // descriptor is rejected by the AVX2 kernel, and the packed weights
+        // descriptor cannot be expressed as a plain tag. `query = false` keeps
+        // the declared descriptors, which is what the earlier probe measured.
+        let (src_q, weights_q, dst_q) = if query {
             (
-                "f32",
-                DATA_TYPE_F32,
-                DATA_TYPE_F32,
-                DATA_TYPE_F32,
-                4usize,
-                4usize,
-                4usize,
-            ),
-            ("int8", DATA_TYPE_U8, DATA_TYPE_S8, DATA_TYPE_S32, 1, 1, 4),
-        ] {
-            let src = Desc::with_tag_dtype(&src_dims, 5, sdt).unwrap();
-            let weights = Desc::with_tag_dtype(&w_dims, 5, wdt).unwrap();
-            let dst = Desc::with_tag_dtype(&dst_dims, 5, ddt).unwrap();
-            let pd = PrimitiveDescHandle::convolution(
-                &engine,
-                ALG_CONVOLUTION_DIRECT,
-                &src,
-                &weights,
-                None,
-                &dst,
-                &[1, 1],
-                &[0, 0],
-                &[1, 1],
-                &[1, 1],
-                &attr,
+                Some(pd.query_md(QUERY_SRC_MD, 0).ok()?),
+                Some(pd.query_md(QUERY_WEIGHTS_MD, 0).ok()?),
+                Some(pd.query_md(QUERY_DST_MD, 0).ok()?),
             )
-            .unwrap();
-            let primitive = PrimitiveHandle::new(&pd).unwrap();
-            let src_buffer = AlignedBuffer::zeroed((n * c * h * w) as usize * sb).unwrap();
-            let w_buffer = AlignedBuffer::zeroed((o * c * k * k) as usize * wb).unwrap();
-            let dst_buffer = AlignedBuffer::zeroed((n * o * h * w) as usize * db).unwrap();
-            let src_memory = MemoryHandle::new(&src, &engine).unwrap();
-            let w_memory = MemoryHandle::new(&weights, &engine).unwrap();
-            let d_memory = MemoryHandle::new(&dst, &engine).unwrap();
-            unsafe {
-                src_memory
-                    .set_data_handle(src_buffer.as_ptr() as *mut u8)
-                    .unwrap();
-                w_memory
-                    .set_data_handle(w_buffer.as_ptr() as *mut u8)
-                    .unwrap();
-                d_memory
-                    .set_data_handle(dst_buffer.as_ptr() as *mut u8)
-                    .unwrap();
-            }
-            let args = [
-                ExecArg {
-                    arg: ARG_SRC,
-                    memory: src_memory.raw(),
-                },
-                ExecArg {
-                    arg: ARG_WEIGHTS,
-                    memory: w_memory.raw(),
-                },
-                ExecArg {
-                    arg: ARG_DST,
-                    memory: d_memory.raw(),
-                },
-            ];
-            for _ in 0..3 {
-                primitive.execute(&stream, &args).unwrap();
-                stream.wait().unwrap();
-            }
-            let mut times = Vec::new();
-            for _ in 0..5 {
-                let start = std::time::Instant::now();
-                primitive.execute(&stream, &args).unwrap();
-                stream.wait().unwrap();
-                times.push(start.elapsed().as_secs_f64() * 1e3);
-            }
-            times.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            println!(
-                "probe speed {name}: median {:.3} ms, min {:.3}, max {:.3}",
-                times[times.len() / 2],
-                times[0],
-                times[times.len() - 1]
-            );
+        } else {
+            (None, None, None)
+        };
+        let src = src_q.as_ref().unwrap_or(&src);
+        let weights = weights_q.as_ref().unwrap_or(&weights);
+        let dst = dst_q.as_ref().unwrap_or(&dst);
+        let primitive = PrimitiveHandle::new(&pd).ok()?;
+        let src_buffer = AlignedBuffer::zeroed(src.size()).ok()?;
+        let w_buffer = AlignedBuffer::zeroed(weights.size()).ok()?;
+        let dst_buffer = AlignedBuffer::zeroed(dst.size()).ok()?;
+        let src_memory = MemoryHandle::new(src, engine).ok()?;
+        let w_memory = MemoryHandle::new(weights, engine).ok()?;
+        let d_memory = MemoryHandle::new(dst, engine).ok()?;
+        // SAFETY: each buffer outlives its memory object and is not aliased.
+        unsafe {
+            src_memory
+                .set_data_handle(src_buffer.as_ptr() as *mut u8)
+                .ok()?;
+            w_memory
+                .set_data_handle(w_buffer.as_ptr() as *mut u8)
+                .ok()?;
+            d_memory
+                .set_data_handle(dst_buffer.as_ptr() as *mut u8)
+                .ok()?;
         }
+        let args = [
+            ExecArg {
+                arg: ARG_SRC,
+                memory: src_memory.raw(),
+            },
+            ExecArg {
+                arg: ARG_WEIGHTS,
+                memory: w_memory.raw(),
+            },
+            ExecArg {
+                arg: ARG_DST,
+                memory: d_memory.raw(),
+            },
+        ];
+        for _ in 0..3 {
+            primitive.execute(stream, &args).ok()?;
+            stream.wait().ok()?;
+        }
+        let mut times = Vec::new();
+        for _ in 0..5 {
+            let start = std::time::Instant::now();
+            primitive.execute(stream, &args).ok()?;
+            stream.wait().ok()?;
+            times.push(start.elapsed().as_secs_f64() * 1e3);
+        }
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        Some(times[times.len() / 2])
     }
 
     /// The smoke test that decides whether this build can execute a true int8
