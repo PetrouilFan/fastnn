@@ -115,8 +115,9 @@ pub(crate) const PROP_KIND_FORWARD_INFERENCE: i32 = 96;
 /// 44.05 / 41.34 ms against direct 44.23 / 43.19 / 41.25 / 43.84 ms. There is
 /// no reproducible difference (the ordering flips between runs), so the engine
 /// keeps `direct` and does not hand the accumulation order to a heuristic.
-/// Winograd itself is unavailable in this build: its primitive descriptor
-/// creation fails on AVX2. Recorded in `docs/v3/backends.md`.
+/// Winograd itself is unavailable here: oneDNN 3.14.1 registers CPU Winograd
+/// only for AArch64/ACL and RISC-V/RVV, so on x64 its primitive descriptor
+/// creation fails regardless of the ISA. Recorded in `docs/v3/backends.md`.
 pub(crate) const ALG_CONVOLUTION_DIRECT: i32 = 1;
 /// `dnnl_pooling_max`.
 pub(crate) const ALG_POOLING_MAX: i32 = 511;
