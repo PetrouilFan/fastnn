@@ -121,9 +121,13 @@ What the Python-free measurement does show is the real shape of the gap:
   segments still run the scalar reference engine, but the row-parallel ones
   (concat, softmax, activations, pools) take the session pool; what is left
   serial is small (the 10x10 and 20x20 head layers) and Amdahl's ceiling is
-  the convolutions themselves. The remaining per-convolution gap against ORT
-  is algorithmic: MLAS has a Winograd kernel on AVX2 and this oneDNN build
-  does not.
+  the convolutions themselves. The remaining per-convolution gap is the
+  kernel, not a missing fusion: MLAS runs these shapes through its tuned
+  NCHWc/direct and im2col-GEMM micro-kernels, while oneDNN's x64 path here is
+  its NCSP direct kernel. Winograd is not the difference: neither MLAS on x64
+  nor oneDNN 3.x on x64 implements it — in the pinned oneDNN source the only
+  CPU Winograd kernels are ACL/AArch64 and RVV/RISC-V. A 3x3 Winograd win on
+  x86 would have to be a new kernel of ours, not a provider flag.
 
 The attention-headed detector tells the same story from the other side:
 stock YOLO11n 640 gets more from the tail work because it has 174 scalar
