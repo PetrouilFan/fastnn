@@ -176,8 +176,6 @@ pub struct OneDnnReport {
     pub conv_channel_segments: usize,
     /// Convolution segments divided along output rows with a halo.
     pub conv_row_segments: usize,
-    /// Pooling segments prepared.
-    pub pool_segments: usize,
     /// Matmul segments prepared.
     pub matmul_segments: usize,
     /// Segment prepared with a fused epilogue (a `sum` and/or an activation).
@@ -840,7 +838,7 @@ impl Session {
         #[cfg(feature = "cpu-onednn")]
         {
             let engine = self.onednn.as_ref()?;
-            let (conv, pool, matmul) = engine.segment_kinds();
+            let (conv, matmul) = engine.segment_kinds();
             let splits = self.one_dnn_splits();
             let conv_channel_segments = splits
                 .iter()
@@ -853,7 +851,6 @@ impl Session {
                 conv_segments: conv,
                 conv_channel_segments,
                 conv_row_segments: splits.len() - conv_channel_segments,
-                pool_segments: pool,
                 matmul_segments: matmul,
                 fused_segments: engine.fused_segments(),
                 blocked_segments: engine.blocked_segments(),

@@ -172,6 +172,24 @@ fn window_pool_f32(
     let row_len = product(&out_spatial, "runtime pooling output row")?;
     check_output_len(op, out, batch * channels * row_len, out_shape)?;
 
+    // The 2-D form is what every CNN in scope uses, and it is the only form this
+    // kernel can index without decomposing each output coordinate through
+    // divisions. `Window2d` is that path; the generic loop below stays for a
+    // rank-3 spatial operand.
+    if spatial == 2 {
+        return Window2d {
+            op,
+            in_hw: [dims[2], dims[3]],
+            out_hw: [out_spatial[0], out_spatial[1]],
+            kernel: [kernel[0], kernel[1]],
+            strides: [strides[0], strides[1]],
+            dilations: [dilations[0], dilations[1]],
+            pads: [pads[0], pads[1]],
+            count_include_pad: op != OpId::MaxPool && params.count_include_pad,
+        }
+        .run(x, out, threads);
+    }
+
     let is_max = op == OpId::MaxPool;
     let kernel_volume = product(&kernel, "runtime pooling kernel volume")?;
     let in_row_len = product(spatial_in, "runtime pooling input row")?;
@@ -246,6 +264,160 @@ fn window_pool_f32(
         }
         Ok(())
     })
+}
+
+/// The resolved geometry of one 2-D window pooling op.
+///
+/// # Why this exists
+///
+/// The generic loop in [`window_pool_f32`] is correct for any spatial rank but
+/// pays for it twice per output element: it decomposes the flat output index
+/// into one coordinate per axis with `%` and `/`, and it rebuilds a flat input
+/// index per window tap. For a 128 x 20 x 20 -> 128 x 10 x 10 5x5 window that is
+/// 12800 outputs times 25 taps of index arithmetic, and it measured 3.27 ms
+/// against oneDNN's reference pooling at 0.98 ms. This type carries the 2-D
+/// geometry already resolved by the checks above, so the taps become two
+/// integer multiplications.
+///
+/// # Max is separable
+///
+/// A maximum over a rectangle is the maximum over the rows of the per-row
+/// horizontal maxima, so one pass over the input plane (`in_h * out_w` values)
+/// feeds the vertical pass and the window is never re-scanned per output. The
+/// valid positions of a window are a product of the valid positions on each
+/// axis, so the separable form drops exactly the taps the direct form ignores.
+///
+/// Average is not folded that way: its denominator differs per output whenever
+/// the window leaves the input, and `count_include_pad` counts a different set
+/// from the one that is summed. It keeps a direct sum, still without the
+/// coordinate decomposition, and accumulates in the same tap order as the
+/// generic loop so the value is bit-identical to it.
+struct Window2d {
+    op: OpId,
+    in_hw: [usize; 2],
+    out_hw: [usize; 2],
+    kernel: [usize; 2],
+    strides: [usize; 2],
+    dilations: [usize; 2],
+    /// Positive begin/end padding per axis, as `resolve_pads` returned it.
+    pads: [(i64, i64); 2],
+    count_include_pad: bool,
+}
+
+impl Window2d {
+    /// Run one pooling op over contiguous NCHW `x`.
+    fn run(
+        &self,
+        x: &[f32],
+        out: &mut [f32],
+        threads: Option<&SessionThreads>,
+    ) -> Result<(), Fn3Error> {
+        let [in_h, in_w] = self.in_hw;
+        let [out_h, out_w] = self.out_hw;
+        let plane = in_h * in_w;
+        // One task is one `(n, c)` plane, not one output row: the horizontal
+        // scratch is then allocated once per plane. With one row per task the
+        // 5x5 windows in a YOLO SPPF would allocate 1280 scratch buffers per
+        // forward for a kernel whose whole cost is a few hundred microseconds.
+        for_each_row(threads, out, out_h * out_w, |row, values| {
+            let start = row * plane;
+            let input = &x[start..start + plane];
+            if self.op == OpId::MaxPool {
+                self.max_plane(input, values);
+            } else {
+                self.average_plane(input, values);
+            }
+            Ok(())
+        })
+    }
+
+    /// Separable max: horizontal maxima over the plane, then the vertical max.
+    fn max_plane(&self, input: &[f32], values: &mut [f32]) {
+        let [in_h, in_w] = self.in_hw;
+        let out_w = self.out_hw[1];
+        let [kh, kw] = self.kernel;
+        let [sh, sw] = self.strides;
+        let [dh, dw] = self.dilations;
+        let (pad_top, pad_left) = (self.pads[0].0, self.pads[1].0);
+
+        // `horizontal[iy * out_w + ox]` is the max of input row `iy` under the
+        // horizontal extent of output column `ox`, `-inf` when it sees none.
+        let mut horizontal = vec![f32::NEG_INFINITY; in_h * out_w];
+        for (iy, line) in horizontal.chunks_mut(out_w).enumerate() {
+            let source = &input[iy * in_w..iy * in_w + in_w];
+            for (ox, best) in line.iter_mut().enumerate() {
+                let start = ox as i64 * sw as i64 - pad_left;
+                let mut value = f32::NEG_INFINITY;
+                for kx in 0..kw {
+                    let ix = start + (kx * dw) as i64;
+                    if ix >= 0 && (ix as usize) < in_w {
+                        value = value.max(source[ix as usize]);
+                    }
+                }
+                *best = value;
+            }
+        }
+
+        for (oy, line) in values.chunks_mut(out_w).enumerate() {
+            let start = oy as i64 * sh as i64 - pad_top;
+            for (ox, value) in line.iter_mut().enumerate() {
+                let mut best = f32::NEG_INFINITY;
+                for ky in 0..kh {
+                    let iy = start + (ky * dh) as i64;
+                    if iy >= 0 && (iy as usize) < in_h {
+                        best = best.max(horizontal[iy as usize * out_w + ox]);
+                    }
+                }
+                *value = best;
+            }
+        }
+    }
+
+    /// Direct sum over the window, with the ONNX denominator rules.
+    fn average_plane(&self, input: &[f32], values: &mut [f32]) {
+        let [in_h, in_w] = self.in_hw;
+        let out_w = self.out_hw[1];
+        let [kh, kw] = self.kernel;
+        let [sh, sw] = self.strides;
+        let [dh, dw] = self.dilations;
+        let [(pad_top, pad_bottom), (pad_left, pad_right)] = self.pads;
+        for (oy, line) in values.chunks_mut(out_w).enumerate() {
+            let y_start = oy as i64 * sh as i64 - pad_top;
+            for (ox, value) in line.iter_mut().enumerate() {
+                let x_start = ox as i64 * sw as i64 - pad_left;
+                let mut sum = 0.0f32;
+                let mut denominator = 0usize;
+                for ky in 0..kh {
+                    let iy = y_start + (ky * dh) as i64;
+                    let row_valid = iy >= 0 && (iy as usize) < in_h;
+                    // A padded position is one inside
+                    // `[-pad_begin, extent + pad_end)`, which is what
+                    // `count_include_pad` counts; a valid position is one that
+                    // reads the input, which is what the sum uses.
+                    let row_padded = iy >= -pad_top && iy < in_h as i64 + pad_bottom;
+                    for kx in 0..kw {
+                        let ix = x_start + (kx * dw) as i64;
+                        let valid = row_valid && ix >= 0 && (ix as usize) < in_w;
+                        if self.count_include_pad {
+                            if row_padded && ix >= -pad_left && ix < in_w as i64 + pad_right {
+                                denominator += 1;
+                            }
+                        } else if valid {
+                            denominator += 1;
+                        }
+                        if valid {
+                            sum += input[iy as usize * in_w + ix as usize];
+                        }
+                    }
+                }
+                *value = if denominator == 0 {
+                    0.0
+                } else {
+                    sum / denominator as f32
+                };
+            }
+        }
+    }
 }
 
 #[cfg(test)]

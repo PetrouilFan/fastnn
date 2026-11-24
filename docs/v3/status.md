@@ -59,6 +59,18 @@ which takes the same measurement to **76.5 MB** at eight, 75.0 MB at four and
 52.4 MB at one, with median wall time unchanged within noise (measured A/B,
 three runs each; see `docs/v3/backends.md`).
 
+Two scalar tails then moved (`docs/v3/per-layer.md`, merged `41d96c55`).
+Pooling stopped being a provider op: on this AVX2 host the primitive oneDNN
+built for the arena's plain NCHW descriptor was `ref_pooling`, so the three SPPF
+windows cost 0.98 / 0.69 / 0.60 ms; the scalar kernel gained a separable 2-D max
+and they now cost 0.17 ms each, **2.28 -> 0.51 ms** at one thread and **1.05 ->
+0.14** at eight. `Resize` resolves its width-axis mapping once per forward
+instead of once per element: **1.51 -> 0.31 ms** at one thread and **0.33 ->
+0.17** at eight. On the per-layer map's harness protocol that put the forward at
+**34.72 ms at one thread and 17.34 at eight** (ORT 23.47 / 7.75); the class rows
+are the claim, not the totals, because this host moves about 6 % between runs of
+an unchanged build.
+
 ### Without the Python binding
 
 The numbers above come from the in-process harness. Because a session is also
@@ -245,14 +257,21 @@ immutable, and every `session()` owns its own arena and thread pool.
    pool replaces 27.3 MB with 3.7 MB. CLI peak RSS on yolov8n: ~106 MB → 76.5
    MB at eight, ~97 MB → 75.0 MB at four, ~59 MB → 52.4 MB at one, with no
    wall-time change outside host noise.
-4. **Phase 5 W8A8** (#103): the gate refuses it with the measured reason on
+4. **Convolution: low-channel layout and eight-thread blocks**
+   (`docs/v3/per-layer.md`). At one thread the loss is concentrated in
+   low-channel, large-spatial layers (`model.0` 3.9x, `model.2/cv1` 6.5x,
+   `model.2/cv2` 5.0x, `model.4/cv1` 3.9x against ORT, all at 8-15 GMAC/s),
+   where the channels-last destination policy is the suspect; at eight threads
+   convolution scales 2.07x against ORT's 4.64x, so the block strategy is the
+   other open measurement.
+5. **Phase 5 W8A8** (#103): the gate refuses it with the measured reason on
    this AVX2 host: oneDNN's AVX2 int8 convolution is 0.97-1.20x the blocked
    f32 path (0.83-0.94 ms against 0.94-1.07 ms), because without VNNI the
    `vpmaddubsw`+`vpmaddwd` sequence has no MAC-throughput advantage over FMA.
    Real W8A8 needs VNNI/AMX hardware (where the same provider path uses
    `vpdpbusd`) and a calibration path; the precision plumbing
    (`Precision::W8A8`, ISA probe, refusal) exists.
-5. **Phase 6 decoder/KV** (#108) and **phase 7 packaging** (#109), hardening
+6. **Phase 6 decoder/KV** (#108) and **phase 7 packaging** (#109), hardening
    (#110), docs (#111).
 
 ## Reproducing any number here
