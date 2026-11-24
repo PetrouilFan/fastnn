@@ -288,6 +288,17 @@ extern "C" {
         padding_r: *const Dim,
         attr: PrimitiveAttr,
     ) -> c_int;
+    fn dnnl_eltwise_forward_primitive_desc_create(
+        primitive_desc: *mut PrimitiveDesc,
+        engine: Engine,
+        prop_kind: i32,
+        alg_kind: i32,
+        src_desc: MemoryDesc,
+        dst_desc: MemoryDesc,
+        alpha: f32,
+        beta: f32,
+        attr: PrimitiveAttr,
+    ) -> c_int;
     fn dnnl_pooling_forward_primitive_desc_create(
         primitive_desc: *mut PrimitiveDesc,
         engine: Engine,
@@ -899,6 +910,38 @@ impl PrimitiveDescHandle {
             "dnnl_pooling_forward_primitive_desc_create",
         )?;
         Self::from_raw(raw, "dnnl_pooling_forward_primitive_desc_create")
+    }
+
+    /// Standalone elementwise forward: the JIT eltwise kernel, in place when the
+    /// two descriptors are the same buffer.
+    pub(crate) fn eltwise(
+        engine: &EngineHandle,
+        alg: i32,
+        desc: &Desc,
+        alpha: f32,
+        beta: f32,
+        attr: &PrimitiveAttrHandle,
+    ) -> Result<PrimitiveDescHandle, Fn3Error> {
+        let mut raw: PrimitiveDesc = std::ptr::null_mut();
+        // SAFETY: the engine and descriptor are live, oneDNN copies both, and
+        // the primitive descriptor is owned by the returned handle.
+        check(
+            unsafe {
+                dnnl_eltwise_forward_primitive_desc_create(
+                    &mut raw,
+                    engine.raw(),
+                    PROP_KIND_FORWARD_INFERENCE,
+                    alg,
+                    desc.raw(),
+                    desc.raw(),
+                    alpha,
+                    beta,
+                    attr.raw(),
+                )
+            },
+            "dnnl_eltwise_forward_primitive_desc_create",
+        )?;
+        Self::from_raw(raw, "dnnl_eltwise_forward_primitive_desc_create")
     }
 
     /// Matmul (`dst = src * weights`).

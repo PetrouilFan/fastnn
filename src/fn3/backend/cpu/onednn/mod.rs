@@ -493,7 +493,7 @@ struct Block {
     /// Dense source/destination staging for a row block. `None` otherwise.
     staging: Option<RowStaging>,
     /// The fused activation, applied by the engine after the primitive.
-    epilogue: Option<ScalarEpilogue>,
+    epilogue: Option<FusedEpilogue>,
     /// The channels-last buffer this block reads, when its source is blocked.
     blocked_source: Option<Arc<AlignedBuffer>>,
     /// The channels-last buffer this block writes, when its destination is
@@ -748,12 +748,18 @@ enum EpilogueTarget {
 /// `clip` 6 ns, a `logistic` 9 ns and a `swish` 9.8 ns, against 0.4–2.7 ns for
 /// this engine's scalar loop over the same buffer — oneDNN evaluates post-ops
 /// on a reference path here, and `swish` as a post-op made a forward 3.4x
-/// slower than the two scalar segments it replaced. The engine therefore
-/// applies the activation itself, with exactly the expression the scalar
-/// kernel uses ([`Activation::apply`]), so the fused result is bit-identical to
-/// the unfused chain.
-#[derive(Debug, Clone, Copy)]
-struct ScalarEpilogue {
+/// slower than the two scalar segments it replaced.
+///
+/// # Why a standalone eltwise primitive is different
+///
+/// A standalone `dnnl_eltwise_forward` over 16.8 M f32 elements (the number of
+/// SiLU elements in a YOLO11n forward) measured **10.4 ms** for `swish` and
+/// 9.8 ms for `logistic` against **45.9 ms** for the scalar loop, so the
+/// transcendental activations use the primitive. `relu` and `clip` stay scalar:
+/// oneDNN's memory-bound eltwise is slower than the scalar loop there. The
+/// scalar path is also kept as the fallback if a primitive cannot be created.
+#[derive(Debug)]
+struct FusedEpilogue {
     activation: Activation,
     /// Contiguous runs of `f32` the activation applies to.
     runs: usize,
@@ -765,9 +771,45 @@ struct ScalarEpilogue {
     /// block of a plain destination starts at its first output channel).
     offset_bytes: usize,
     target: EpilogueTarget,
+    /// The standalone eltwise primitive, for the activations it accelerates.
+    onednn: Option<OneDnnActivation>,
 }
 
-impl ScalarEpilogue {
+/// An in-place oneDNN eltwise primitive bound to the block's destination.
+#[derive(Debug)]
+struct OneDnnActivation {
+    primitive: PrimitiveHandle,
+    stream: StreamHandle,
+    src: MemoryHandle,
+    dst: MemoryHandle,
+}
+
+impl FusedEpilogue {
+    fn new(
+        activation: Activation,
+        runs: usize,
+        run_len: usize,
+        stride: usize,
+        offset_bytes: usize,
+        target: EpilogueTarget,
+        engine: &EngineHandle,
+    ) -> Self {
+        let onednn = if runs > 0 && run_len > 0 && uses_onednn_eltwise(activation) {
+            build_eltwise(activation, run_len, engine).ok()
+        } else {
+            None
+        };
+        Self {
+            activation,
+            runs,
+            run_len,
+            stride,
+            offset_bytes,
+            target,
+            onednn,
+        }
+    }
+
     /// Apply over `address`, the base of the block's destination.
     ///
     /// # Safety
@@ -785,10 +827,44 @@ impl ScalarEpilogue {
                 "a fused epilogue has no destination".to_string(),
             ));
         }
-        let length = (self.runs - 1) * self.stride + self.run_len;
         let base = address
             .checked_add(self.offset_bytes)
             .ok_or_else(|| segment_error("a fused epilogue offset overflowed".to_string()))?;
+        if let Some(onednn) = &self.onednn {
+            let width = std::mem::size_of::<f32>();
+            for run in 0..self.runs {
+                let start = run
+                    .checked_mul(self.stride)
+                    .and_then(|elements| elements.checked_mul(width))
+                    .and_then(|bytes| base.checked_add(bytes))
+                    .ok_or_else(|| {
+                        segment_error("a fused epilogue run offset overflowed".to_string())
+                    })?;
+                // SAFETY: the caller's promise holds for every run; the region
+                // is this block's own destination, and the primitive reads and
+                // writes exactly `run_len` f32 starting at `start`.
+                unsafe {
+                    onednn.src.set_data_handle(start as *mut u8)?;
+                    onednn.dst.set_data_handle(start as *mut u8)?;
+                }
+                onednn.primitive.execute(
+                    &onednn.stream,
+                    &[
+                        ExecArg {
+                            arg: ARG_SRC,
+                            memory: onednn.src.raw(),
+                        },
+                        ExecArg {
+                            arg: ARG_DST,
+                            memory: onednn.dst.raw(),
+                        },
+                    ],
+                )?;
+                onednn.stream.wait()?;
+            }
+            return Ok(());
+        }
+        let length = (self.runs - 1) * self.stride + self.run_len;
         // SAFETY: the caller's promise above; `length` is the descriptor's own
         // logical extent, which the engine sized the buffer to.
         let values = unsafe { std::slice::from_raw_parts_mut(base as *mut f32, length) };
@@ -801,6 +877,38 @@ impl ScalarEpilogue {
         }
         Ok(())
     }
+}
+
+/// Transcendental activations, where the standalone oneDNN eltwise beats the
+/// scalar `exp` loop; `relu`/`clip` stay scalar because they are cheaper there.
+fn uses_onednn_eltwise(activation: Activation) -> bool {
+    matches!(
+        activation,
+        Activation::Sigmoid | Activation::Tanh | Activation::Gelu | Activation::Swish
+    )
+}
+
+/// Build the in-place eltwise primitive for one run of `run_len` elements.
+fn build_eltwise(
+    activation: Activation,
+    run_len: usize,
+    engine: &EngineHandle,
+) -> Result<OneDnnActivation, Fn3Error> {
+    let dims = [run_len as i64];
+    let desc = Desc::with_tag(&dims, FORMAT_TAG_A)?;
+    let attr = PrimitiveAttrHandle::library_default()?;
+    let (alg, alpha, beta) = eltwise(activation);
+    let pd = PrimitiveDescHandle::eltwise(engine, alg, &desc, alpha, beta, &attr)?;
+    let primitive = PrimitiveHandle::new(&pd)?;
+    let stream = StreamHandle::new(engine)?;
+    let src = MemoryHandle::new(&desc, engine)?;
+    let dst = MemoryHandle::new(&desc, engine)?;
+    Ok(OneDnnActivation {
+        primitive,
+        stream,
+        src,
+        dst,
+    })
 }
 
 /// Where a block argument's data handle comes from at execute time.
@@ -944,7 +1052,7 @@ impl Block {
                     buffer_address(self.blocked_destination.as_deref())?
                 }
             };
-            // SAFETY: see `ScalarEpilogue::apply`; each target is a region this
+            // SAFETY: see `FusedEpilogue::apply`; each target is a region this
             // block alone writes.
             unsafe { epilogue.apply(address) }?;
         }
@@ -1984,40 +2092,43 @@ impl OneDnnEngine {
                 .map(|activation| {
                     if dst_layout.is_some() {
                         let run_len = block.out_rows * conv.out_hw[1] * conv.out_channels;
-                        ScalarEpilogue {
+                        FusedEpilogue::new(
                             activation,
-                            runs: conv.batch,
+                            conv.batch,
                             run_len,
-                            stride: run_len,
-                            offset_bytes: block.out_row_start
+                            run_len,
+                            block.out_row_start
                                 * conv.out_hw[1]
                                 * conv.out_channels
                                 * std::mem::size_of::<f32>(),
-                            target: EpilogueTarget::BlockedDestination,
-                        }
+                            EpilogueTarget::BlockedDestination,
+                            &self.engine,
+                        )
                     } else if row_split {
                         let run_len = block.out_rows * conv.out_hw[1] * conv.out_channels;
-                        ScalarEpilogue {
+                        FusedEpilogue::new(
                             activation,
-                            runs: conv.batch,
+                            conv.batch,
                             run_len,
-                            stride: run_len,
-                            offset_bytes: 0,
-                            target: EpilogueTarget::StagingDestination,
-                        }
+                            run_len,
+                            0,
+                            EpilogueTarget::StagingDestination,
+                            &self.engine,
+                        )
                     } else {
                         let run_len = block.out_channels * conv.out_hw[0] * conv.out_hw[1];
-                        ScalarEpilogue {
+                        FusedEpilogue::new(
                             activation,
-                            runs: conv.batch,
+                            conv.batch,
                             run_len,
-                            stride: conv.out_channels * conv.out_hw[0] * conv.out_hw[1],
-                            offset_bytes: block.out_start
+                            conv.out_channels * conv.out_hw[0] * conv.out_hw[1],
+                            block.out_start
                                 * conv.out_hw[0]
                                 * conv.out_hw[1]
                                 * std::mem::size_of::<f32>(),
-                            target: EpilogueTarget::Output,
-                        }
+                            EpilogueTarget::Output,
+                            &self.engine,
+                        )
                     }
                 });
             let blocked_destination_bytes = block.out_row_start
@@ -2448,7 +2559,7 @@ impl OneDnnEngine {
 /// Evaluate a fused activation as a oneDNN eltwise post-op instead of the
 /// engine's own scalar epilogue.
 ///
-/// Measured and rejected on this host: see [`ScalarEpilogue`] for the numbers.
+/// Measured and rejected on this host: see [`FusedEpilogue`] for the numbers.
 /// The switch is kept, rather than the code deleted, so the comparison can be
 /// reproduced on another CPU or another oneDNN build where post-ops do reach
 /// the JIT injector.
@@ -2908,5 +3019,48 @@ mod tests {
             memory.data_handle().unwrap() as usize,
             buffer.as_ptr() as usize
         );
+    }
+
+    /// The standalone eltwise is a different kernel from the post-op path; it
+    /// must agree with the scalar expression the fused chain uses.
+    #[test]
+    fn the_standalone_eltwise_agrees_with_the_scalar_activation() {
+        let engine = EngineHandle::cpu().unwrap();
+        let values: Vec<f32> = (0..801)
+            .map(|index| (index as f32 - 400.0) * 0.05)
+            .collect();
+        for activation in [
+            Activation::Swish,
+            Activation::Sigmoid,
+            Activation::Tanh,
+            Activation::Gelu,
+        ] {
+            let mut got = values.clone();
+            let epilogue = FusedEpilogue::new(
+                activation,
+                1,
+                values.len(),
+                values.len(),
+                0,
+                EpilogueTarget::Output,
+                &engine,
+            );
+            assert!(
+                epilogue.onednn.is_some(),
+                "{activation} should use the standalone eltwise"
+            );
+            // SAFETY: `got` is a live, writable buffer of `values.len()` f32 and
+            // nothing else writes it; the epilogue reads and writes exactly
+            // that range.
+            unsafe { epilogue.apply(got.as_mut_ptr() as usize) }.unwrap();
+            for (index, (input, actual)) in values.iter().zip(got.iter()).enumerate() {
+                let expected = activation.apply(*input);
+                let tolerance = 2e-5 + 2e-5 * expected.abs();
+                assert!(
+                    (actual - expected).abs() <= tolerance,
+                    "{activation} at {index} (input {input}): oneDNN {actual}, scalar {expected}"
+                );
+            }
+        }
     }
 }
