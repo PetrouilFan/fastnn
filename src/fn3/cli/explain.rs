@@ -44,12 +44,11 @@ pub fn execute(args: &ExplainArgs, out: &mut dyn Write) -> Result<(), CliError> 
     );
     let _ = writeln!(
         out,
-        "            arena {} B (peak {} B), layout {}, {} reorders ({} B)",
+        "            arena {} B (peak {} B), layout {} (runtime conversions are chosen at \
+         session open)",
         thousands(plan.arena_bytes as u64),
         thousands(plan.peak_bytes as u64),
-        plan.layout.name(),
-        plan.reorders.len(),
-        thousands(plan.reorder_bytes as u64)
+        plan.layout.name()
     );
 
     let _ = writeln!(out, "  inputs:");
