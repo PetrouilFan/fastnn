@@ -454,7 +454,8 @@ impl Session {
             return Err(Fn3Error::NotImplemented {
                 what: "a plan with a segment assigned to the oneDNN engine, in a build without \
                        the `cpu-onednn` feature",
-                owner: "phase 3a (oneDNN CPU engine)",
+                owner: "rebuild with `--features cpu-onednn`, or re-prepare the ONNX with a \
+                        scalar build",
             });
         }
         #[cfg(feature = "cpu-onednn")]

@@ -85,6 +85,31 @@ outputs are materialised once, after the series. Measured on this machine,
 Peak RSS for those oneDNN runs: 68.7 MB at one worker, 75.1 MB at four,
 77.3 MB at eight.
 
+### Peak RSS against ONNX Runtime
+
+Same protocol, same `ones` input, peak resident set of the whole process. The
+fastnn side is the CLI (no interpreter); the ORT side is a Python process, so
+its number includes CPython, numpy and the binding (about 38 MB on this host).
+The comparison therefore flatters fastnn: it is a process-level number, not an
+engine-only one.
+
+| graph | threads | fastnn | ONNX Runtime |
+|---|---:|---:|---:|
+| yolov8n, 320x320 | 1 | **68.7 MB** | 100.6 MB |
+| | 4 | **75.1 MB** | 100.6 MB |
+| | 8 | **77.3 MB** | 100.4 MB |
+| yolo11n, 640x640 | 1 | **134.2 MB** | 149.7 MB |
+| | 4 | 148.5 MB | **149.6 MB** |
+| | 8 | 152.5 MB | **151.2 MB** |
+
+On the 320 graph fastnn is 23-32 % smaller even counting the interpreter in
+ORT's number. On the 640 graph the two are within 2 MB once the per-thread
+workspace ORT allocates is included; that graph's arena is 16.4 MB and the
+mapped weights 10.9 MB, so most of both numbers is the engine, not the model.
+FastNN's own memory is the arena plus 14.4 MB of pooled channels-last buffers
+and 3.7 MB of scratchpads at eight workers; the weight payload is mapped and
+shared, not copied.
+
 The Python binding is not what separates them: the floor for a Python + ORT
 `session.run` call measured **0.032 ms** on a trivial identity model, which is
 0.13 % of ORT's 1-thread number and 0.4 % of its 8-thread number.
