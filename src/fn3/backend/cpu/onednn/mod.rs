@@ -2621,6 +2621,7 @@ mod tests {
     fn run_one(spec: &SegmentSpec<'_>, input: &[f32], outputs: usize) -> Vec<f32> {
         let mut engine = OneDnnEngine::new(1).unwrap();
         engine.prepare_segment(0, spec).unwrap();
+        engine.finish_buffers(1).unwrap();
         let prepared = engine.prepared(0).unwrap();
         assert_eq!(prepared.block_count(), 1);
         let input_buffer = AlignedBuffer::from_bytes(bytemuck::cast_slice(input)).unwrap();

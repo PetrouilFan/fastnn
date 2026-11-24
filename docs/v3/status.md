@@ -12,7 +12,7 @@ here points at a commit, a test or a measurement; nothing is projected.
 | 2 scalar segment executor, arena, session threads | done | `10cda68`; ORT parity on yolov8n, 1/4/8 workers exact, one arena allocation per session |
 | 3 oneDNN provider | done | `b94922a` (engine behind `cpu-onednn`), `ca5801f` (memcpy-shaped glue, row-split convs) |
 | 4 fused segments, blocked layouts, artifact v2, API | done | `13595be`, `6235f37`, `e004a46` |
-| 5 true W8A8 + calibration + `precision="auto"` | open, hardware-gated | `w8a8` parses and is refused with a measured reason (`prepare`, CLI, API; `tests/fn3_cli.rs`); on this AVX2 host oneDNN's int8 convolution has no JIT kernel and runs 848x slower than f32 (1332 ms vs 1.57 ms for 32x80x80x3x3), so an executable path needs VNNI/AMX hardware before it can be measured and shipped (#103) |
+| 5 true W8A8 + calibration + `precision="auto"` | open, hardware-gated | `w8a8` parses and is refused with a measured reason (`prepare`, CLI, API; `tests/fn3_cli.rs`); on this AVX2 host oneDNN's AVX2 int8 convolution is only **0.97-1.20x** the blocked f32 path (0.83-0.94 ms against 0.94-1.07 ms for 32x80x80x3x3 and 64x40x40x3x3), because `vpmaddubsw`+`vpmaddwd` has no MAC-throughput advantage over FMA without VNNI. The earlier 848x figure came from an NCHW probe that fell back to the reference kernel. An executable path needs VNNI/AMX before it can be measured and shipped (#103) |
 | 6 decoder/KV on the same plan and artifact, Vulkan re-wire | open | fn3 decoder still runs the v1-shaped plan path |
 | 7 packaging, fuzzing/OOM hardening, docs | partially | wheels, fuzz corpus refresh and the benchmark methodology are open |
 
@@ -239,10 +239,13 @@ immutable, and every `session()` owns its own arena and thread pool.
    pool replaces 27.3 MB with 3.7 MB. CLI peak RSS on yolov8n: ~106 MB → 76.5
    MB at eight, ~97 MB → 75.0 MB at four, ~59 MB → 52.4 MB at one, with no
    wall-time change outside host noise.
-4. **Phase 5 W8A8** (#103): the gate refuses it with a measured reason on this
-   AVX2 host (oneDNN's int8 conv is its reference kernel, 848x slower than
-   f32). Real W8A8 needs VNNI/AMX hardware and a calibration path; the
-   precision plumbing (`Precision::W8A8`, ISA probe, refusal) exists.
+4. **Phase 5 W8A8** (#103): the gate refuses it with the measured reason on
+   this AVX2 host: oneDNN's AVX2 int8 convolution is 0.97-1.20x the blocked
+   f32 path (0.83-0.94 ms against 0.94-1.07 ms), because without VNNI the
+   `vpmaddubsw`+`vpmaddwd` sequence has no MAC-throughput advantage over FMA.
+   Real W8A8 needs VNNI/AMX hardware (where the same provider path uses
+   `vpdpbusd`) and a calibration path; the precision plumbing
+   (`Precision::W8A8`, ISA probe, refusal) exists.
 5. **Phase 6 decoder/KV** (#108) and **phase 7 packaging** (#109), hardening
    (#110), docs (#111).
 
