@@ -16,6 +16,11 @@ fn main() {
     if std::env::var_os("CARGO_FEATURE_CPU_ONEDNN").is_some() {
         // `libdnnl.a` is C++; its static initialisers and the oneDNN runtime
         // need the C++ standard library and the GCC runtime support routines.
-        println!("cargo:rustc-link-lib=dylib=stdc++");
+        // MSVC's C++ runtime is linked by the compiler automatically, so only
+        // add the libstdc++ dependency on GNU/Clang toolchains.
+        let target = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+        if target != "msvc" {
+            println!("cargo:rustc-link-lib=dylib=stdc++");
+        }
     }
 }
