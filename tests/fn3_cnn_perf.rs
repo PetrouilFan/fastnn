@@ -18,6 +18,8 @@
 //! FN3_CNN_PERF=scalar FN3_CNN_THREADS=1 cargo test --release --test fn3_cnn_perf -- --nocapture
 //! FN3_CNN_PERF=onednn FN3_CNN_THREADS=8 cargo test --release --features cpu-onednn \
 //!     --test fn3_cnn_perf -- --nocapture
+//! FN3_CNN_MODEL=/path/to/model.onnx FN3_CNN_PERF=onednn FN3_CNN_THREADS=4 \
+//!     cargo test --release --features cpu-onednn --test fn3_cnn_perf -- --nocapture
 //! ```
 //!
 //! Add `--features segment-timing` to print the per-op table (`calls`, median
@@ -58,6 +60,7 @@ const TIMING_REPEATS: usize = 3;
 const TIMING_FORWARDS: usize = 3;
 
 fn machine() -> String {
+    #[cfg(target_os = "linux")]
     let model = std::fs::read_to_string("/proc/cpuinfo")
         .ok()
         .and_then(|text| {
@@ -67,6 +70,27 @@ fn machine() -> String {
                 .map(|(_, value)| value.trim().to_string())
         })
         .unwrap_or_else(|| "unknown CPU".to_string());
+    #[cfg(target_os = "windows")]
+    let model = std::process::Command::new("reg")
+        .args([
+            "query",
+            r"HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+            "/v",
+            "ProcessorNameString",
+        ])
+        .output()
+        .ok()
+        .and_then(|output| {
+            String::from_utf8(output.stdout).ok().and_then(|text| {
+                text.lines()
+                    .find(|line| line.contains("ProcessorNameString"))
+                    .and_then(|line| line.split("REG_SZ").nth(1))
+                    .map(|value| value.trim().to_string())
+            })
+        })
+        .unwrap_or_else(|| "unknown CPU".to_string());
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    let model = "unknown CPU".to_string();
     format!(
         "{model}, {} logical CPUs, {} physical cores",
         std::thread::available_parallelism()
@@ -76,12 +100,75 @@ fn machine() -> String {
     )
 }
 
-/// Peak resident set size in MiB (`VmHWM`), or `None` off Linux.
+/// Peak working set in MiB. Linux reports `VmHWM`; Windows uses
+/// `GetProcessMemoryInfo` so the number is that of this one-engine process.
+#[cfg(target_os = "windows")]
+fn peak_rss_mib() -> Option<f64> {
+    #[repr(C)]
+    struct ProcessMemoryCounters {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set_size: usize,
+        working_set_size: usize,
+        quota_peak_paged_pool_usage: usize,
+        quota_paged_pool_usage: usize,
+        quota_peak_non_paged_pool_usage: usize,
+        quota_non_paged_pool_usage: usize,
+        page_file_usage: usize,
+        peak_page_file_usage: usize,
+    }
+
+    #[link(name = "psapi")]
+    extern "system" {
+        fn GetProcessMemoryInfo(
+            process: isize,
+            counters: *mut ProcessMemoryCounters,
+            cb: u32,
+        ) -> i32;
+        fn GetCurrentProcess() -> isize;
+    }
+
+    let mut counters = ProcessMemoryCounters {
+        cb: std::mem::size_of::<ProcessMemoryCounters>() as u32,
+        page_fault_count: 0,
+        peak_working_set_size: 0,
+        working_set_size: 0,
+        quota_peak_paged_pool_usage: 0,
+        quota_paged_pool_usage: 0,
+        quota_peak_non_paged_pool_usage: 0,
+        quota_non_paged_pool_usage: 0,
+        page_file_usage: 0,
+        peak_page_file_usage: 0,
+    };
+    // SAFETY: the pseudo-handle from GetCurrentProcess is process-local and
+    // remains valid for the call; `counters` is a live, correctly initialised
+    // struct whose `cb` field describes its own size; the API writes only
+    // within that struct and returns before the borrow ends.
+    let ok = unsafe {
+        GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            &mut counters,
+            std::mem::size_of::<ProcessMemoryCounters>() as u32,
+        )
+    };
+    if ok == 0 {
+        None
+    } else {
+        Some(counters.peak_working_set_size as f64 / (1024.0 * 1024.0))
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn peak_rss_mib() -> Option<f64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     let line = status.lines().find(|line| line.starts_with("VmHWM:"))?;
     let kib: f64 = line.split_whitespace().nth(1)?.parse().ok()?;
     Some(kib / 1024.0)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn peak_rss_mib() -> Option<f64> {
+    None
 }
 
 fn percentile(sorted: &[f64], fraction: f64) -> f64 {
@@ -114,12 +201,13 @@ fn measure(
     workers: usize,
     threads: usize,
     mut session: Session,
+    input_name: &str,
     input: &[f32],
     report: Option<String>,
 ) {
     for _ in 0..WARMUP {
         session
-            .run(&[("images", input)])
+            .run(&[(input_name, input)])
             .expect("a warm-up forward must succeed");
     }
     let mut samples = Vec::with_capacity(ITERATIONS);
@@ -127,7 +215,7 @@ fn measure(
     for _ in 0..ITERATIONS {
         let start = Instant::now();
         let outputs = session
-            .run(&[("images", input)])
+            .run(&[(input_name, input)])
             .expect("a timed forward must succeed");
         samples.push(start.elapsed().as_secs_f64() * 1000.0);
         let bits: Vec<u32> = outputs[0].1.iter().map(|value| value.to_bits()).collect();
@@ -224,6 +312,7 @@ fn segment_macs(
 fn print_segment_timings(
     engine: &str,
     imported: &Arc<ImportedGraph>,
+    input_name: &str,
     input: &[f32],
     workers: usize,
 ) {
@@ -241,7 +330,7 @@ fn print_segment_timings(
     .expect("open the timing session");
     for _ in 0..WARMUP {
         session
-            .run(&[("images", input)])
+            .run(&[(input_name, input)])
             .expect("a timing warm-up forward must succeed");
     }
     let mut repeats: Vec<Vec<(String, u64, f64, f64)>> = Vec::with_capacity(TIMING_REPEATS);
@@ -252,7 +341,7 @@ fn print_segment_timings(
         let started = Instant::now();
         for _ in 0..TIMING_FORWARDS {
             session
-                .run(&[("images", input)])
+                .run(&[(input_name, input)])
                 .expect("a timing forward must succeed");
         }
         wall.push(started.elapsed().as_secs_f64() * 1000.0 / TIMING_FORWARDS as f64);
@@ -392,32 +481,34 @@ fn cnn_forward_latency() {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(8);
-    if !Path::new(YOLOV8N).exists() {
-        eprintln!("{YOLOV8N} is not present on this machine; nothing to measure");
+    let model = std::env::var("FN3_CNN_MODEL").unwrap_or_else(|_| YOLOV8N.to_string());
+    if !Path::new(&model).exists() {
+        eprintln!("{model} is not present on this machine; nothing to measure");
         return;
     }
-    let bytes = std::fs::read(YOLOV8N).expect("the model is readable");
+    let bytes = std::fs::read(&model).expect("the model is readable");
     let imported: Arc<ImportedGraph> =
         Arc::new(import_onnx_graph(&bytes).expect("the model imports into the typed IR"));
-    let input: Vec<f32> = {
+    let (input_name, input): (String, Vec<f32>) = {
         // Deterministic input independent of the parity dump: a reproducible
-        // pseudo-random vector of the graph's declared input extent.
+        // pseudo-random vector of the graph's declared input extent. The name
+        // comes from the graph, so any supported model can be measured here.
         let input_id = imported.inputs()[0];
-        let shape = imported
+        let value = imported
             .graph()
             .value(input_id)
-            .expect("the declared input exists")
-            .ty
-            .static_shape()
-            .expect("static input");
+            .expect("the declared input exists");
+        let name = value.name.clone().unwrap_or_else(|| "input".to_string());
+        let shape = value.ty.static_shape().expect("static input");
         let elements = shape.numel().expect("a countable input");
         let mut state = 0x1234_5678u32;
-        (0..elements)
+        let values: Vec<f32> = (0..elements)
             .map(|_| {
                 state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                 ((state >> 8) as f32 / (1u32 << 24) as f32) - 0.5
             })
-            .collect()
+            .collect();
+        (name, values)
     };
     match engine.as_str() {
         "scalar" => {
@@ -428,9 +519,17 @@ fn cnn_forward_latency() {
                 options(),
             )
             .expect("open the scalar session");
-            measure("scalar", workers, workers, session, &input, None);
+            measure(
+                "scalar",
+                workers,
+                workers,
+                session,
+                &input_name,
+                &input,
+                None,
+            );
             #[cfg(feature = "segment-timing")]
-            print_timing_tables(&engine, &imported, &input);
+            print_timing_tables(&engine, &imported, &input_name, &input);
         }
         "onednn" => {
             #[cfg(feature = "cpu-onednn")]
@@ -467,9 +566,17 @@ fn cnn_forward_latency() {
                         report.parallel_blocks
                     )
                 });
-                measure("onednn", workers, workers, session, &input, report);
+                measure(
+                    "onednn",
+                    workers,
+                    workers,
+                    session,
+                    &input_name,
+                    &input,
+                    report,
+                );
                 #[cfg(feature = "segment-timing")]
-                print_timing_tables(&engine, &imported, &input);
+                print_timing_tables(&engine, &imported, &input_name, &input);
             }
             #[cfg(not(feature = "cpu-onednn"))]
             panic!("FN3_CNN_PERF=onednn needs --features cpu-onednn");
@@ -483,11 +590,16 @@ fn cnn_forward_latency() {
 /// Both tables come from fresh sessions on the same imported graph, after the
 /// latency measurement above, so the peak-RSS line stays a single-engine number.
 #[cfg(feature = "segment-timing")]
-fn print_timing_tables(engine: &str, imported: &Arc<ImportedGraph>, input: &[f32]) {
+fn print_timing_tables(
+    engine: &str,
+    imported: &Arc<ImportedGraph>,
+    input_name: &str,
+    input: &[f32],
+) {
     for threads in [1usize, 8] {
         if threads > 1 && !cfg!(feature = "parallel") {
             continue;
         }
-        print_segment_timings(engine, imported, input, threads);
+        print_segment_timings(engine, imported, input_name, input, threads);
     }
 }

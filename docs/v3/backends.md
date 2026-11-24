@@ -458,12 +458,38 @@ Measured on this host (oneDNN 3.14.1, AVX2, a 32x80x80 3x3 convolution with
 
 The post-ops run on a reference path on this build, and `swish` as a post-op
 made a forward **3.4x slower at one thread** than the two scalar segments it
-replaced (68.8 ms against 44.2 ms). The engine therefore applies
-`Activation::apply` over each block's own destination — the same expression the
-scalar kernel uses, so the fused result is bit-identical to the unfused chain —
-and keeps `dnnl_post_ops_append_eltwise` behind
-`onednn::EPILOGUE_POST_OP = false` so the comparison is reproducible elsewhere.
-The `sum` post-op is kept as a post-op.
+replaced (68.8 ms against 44.2 ms). The engine therefore keeps
+`dnnl_post_ops_append_eltwise` behind `onednn::EPILOGUE_POST_OP = false` so the
+comparison is reproducible elsewhere. The `sum` post-op is kept as a post-op.
+
+**A standalone eltwise primitive is a different kernel.** The post-op path above
+is a reference kernel; `dnnl_eltwise_forward` on its own is JIT. Measured over
+16.8 M `f32` elements (the SiLU element count of a YOLO11n forward, one thread):
+
+| Epilogue | Time |
+|---|--:|
+| scalar `x * (1 / (1 + exp(-x)))` | 45.9 ms |
+| oneDNN standalone `eltwise_swish` | **10.4 ms** |
+| oneDNN standalone `eltwise_logistic` | 9.8 ms |
+| oneDNN standalone `eltwise_relu` | 6.5 ms |
+
+So the engine uses the standalone primitive for `Sigmoid`, `Tanh`, `Gelu` and
+`Swish`, and keeps the scalar loop for `Relu` and `Clip`, where oneDNN's
+memory-bound eltwise is slower than the scalar loop. The scalar path remains the
+fallback if a primitive cannot be created. The standalone eltwise agrees with
+the scalar expression within `2e-5 + 2e-5|x|` (unit test
+`the_standalone_eltwise_agrees_with_the_scalar_activation`); on YOLO11n 640 with
+a fixed `ones` input the oneDNN and reference outputs agree to `max 642.91864`
+against `642.9187` and the same mean.
+
+Interleaved A/B on YOLO11n 640, one thread, 30 forwards, three pairs (the host
+was under background load, so only the pairing is meaningful): scalar epilogue
+222 / 188 / 244 ms against oneDNN epilogue **157 / 159 / 175 ms**. At eight
+threads the medians were 125 / 116 / 125 ms against 114 / 117 / 136 ms — inside
+this host's noise, so the change is a one-thread win and neutral at eight.
+
+`Relu` and `Clip` still evaluate `Activation::apply` over each block's own
+destination, so those fused results remain bit-identical to the unfused chain.
 
 **What fusion bought on the pinned graph** (8-thread oneDNN, same build,
 `FN3_CNN_FUSE=0` for the unfused column):
