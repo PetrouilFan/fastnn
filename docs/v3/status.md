@@ -66,10 +66,29 @@ windows cost 0.98 / 0.69 / 0.60 ms; the scalar kernel gained a separable 2-D max
 and they now cost 0.17 ms each, **2.28 -> 0.51 ms** at one thread and **1.05 ->
 0.14** at eight. `Resize` resolves its width-axis mapping once per forward
 instead of once per element: **1.51 -> 0.31 ms** at one thread and **0.33 ->
-0.17** at eight. On the per-layer map's harness protocol that put the forward at
-**34.72 ms at one thread and 17.34 at eight** (ORT 23.47 / 7.75); the class rows
-are the claim, not the totals, because this host moves about 6 % between runs of
-an unchanged build.
+0.17** at eight. On the per-layer map's harness protocol that put the forward at **34.72 ms at
+one thread and 17.34 at eight** (ORT 23.47 / 7.75).
+
+The fused activation epilogue then moved (`perf/onednn-eltwise-epilogue`, PR
+#124, merged `427bb27c`). The epilogue evaluated `Sigmoid`, `Tanh`, `GelU` and
+`Swish` with a scalar `exp` loop; oneDNN's *post-op* eltwise is a slow reference
+path on this build, but a **standalone** `dnnl_eltwise_forward` is JIT, and the
+engine now calls it per block for the transcendental activations (keeping the
+scalar loop for `Relu`/`Clip` and scalar as the fallback). That is a one-thread
+win of **7.0 ms** on this graph: the forward is now **27.68 ms at one thread and
+15.97 at eight** (ORT 23.47 / 7.75), and convolution including the fused SiLU
+goes from 31.5 to **24.9 ms**. The class rows are the claim, not the totals,
+because this host moves about 6 % between runs of an unchanged build.
+
+The thread sweep in [per-layer.md](per-layer.md#threads-where-eight-workers-stop-paying)
+then shows where the eight-worker gap is: **four workers beat eight** (15.40
+against 15.97 ms), the large convolutions still gain at eight (`cv3.0.1` reaches
+196 GMAC/s, 2.5x one core's f32 peak), and 41 of 126 segments are more than 30 %
+slower at eight than at four. One to two workers is only 1.38x, which is the
+signature of per-parallel-region overhead rather than arithmetic. Three policy
+changes - a channel floor on the blocked destination, plain NCHW for narrow
+1x1 edges, and a relaxed row/channel tie-break - were measured and rejected;
+the numbers are in that section.
 
 ### Without the Python binding
 
@@ -129,8 +148,9 @@ The Python binding is not what separates them: the floor for a Python + ORT
 The per-layer breakdown behind these totals — every segment's time, MACs and
 achieved GMAC/s next to ORT's per-node profile — is in
 [per-layer.md](per-layer.md). It is the document that says *which* layers are
-behind, and it is why the next work is pool/resize and low-channel 1×1 policy,
-not a new convolution algorithm.
+behind, and it is why the next work is scheduling rather than a new convolution
+algorithm: the big 3x3 layers are at parity with ORT's kernels at one thread,
+and what is left is low-channel layers (17-30 GMAC/s) and per-segment dispatch.
 
 What the Python-free measurement does show is the real shape of the gap:
 
@@ -257,13 +277,16 @@ immutable, and every `session()` owns its own arena and thread pool.
    pool replaces 27.3 MB with 3.7 MB. CLI peak RSS on yolov8n: ~106 MB → 76.5
    MB at eight, ~97 MB → 75.0 MB at four, ~59 MB → 52.4 MB at one, with no
    wall-time change outside host noise.
-4. **Convolution: low-channel layout and eight-thread blocks**
-   (`docs/v3/per-layer.md`). At one thread the loss is concentrated in
-   low-channel, large-spatial layers (`model.0` 3.9x, `model.2/cv1` 6.5x,
-   `model.2/cv2` 5.0x, `model.4/cv1` 3.9x against ORT, all at 8-15 GMAC/s),
-   where the channels-last destination policy is the suspect; at eight threads
-   convolution scales 2.07x against ORT's 4.64x, so the block strategy is the
-   other open measurement.
+4. **Convolution: the per-parallel-region cost** (`docs/v3/per-layer.md`).
+   The layout question is closed by measurement: the 1T loss on the low-channel
+   layers was the scalar SiLU epilogue (the standalone-eltwise change took
+   `model.0` from 8.0 to 17.8 GMAC/s with no layout change), and both layout
+   policies that were tried lost or tied. What is open is why one to two workers
+   is 1.38x and why four workers beat eight: 41 of 126 segments are >30 % slower
+   at eight. The next measurement is a micro-benchmark of one `run_blocks`
+   dispatch on an empty body, to divide the ~50 us per segment between rayon's
+   wake-up and block imbalance, before any fix (a spin phase, running small
+   segments inline, or a two-dimensional split) is chosen.
 5. **Phase 5 W8A8** (#103): the gate refuses it with the measured reason on
    this AVX2 host: oneDNN's AVX2 int8 convolution is 0.97-1.20x the blocked
    f32 path (0.83-0.94 ms against 0.94-1.07 ms), because without VNNI the

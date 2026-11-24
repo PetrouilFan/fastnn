@@ -596,7 +596,10 @@ fn print_timing_tables(
     input_name: &str,
     input: &[f32],
 ) {
-    for threads in [1usize, 8] {
+    // 1/2/4/8 is the scaling sweep: one thread is the reference, and the pairs
+    // show whether extra workers still pay once the memory system and the
+    // block-scheduling overhead are in the path.
+    for threads in [1usize, 2, 4, 8] {
         if threads > 1 && !cfg!(feature = "parallel") {
             continue;
         }
