@@ -26,6 +26,11 @@
 //! which is why the vector path is bit-identical rather than merely close.
 
 /// `true` when this CPU can execute AVX2 instructions.
+///
+/// `false` on a target that is not x86-64, where the vector module does not
+/// exist and no caller remains; the function stays so the module's contract
+/// reads the same on every target.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 #[inline]
 pub(crate) fn avx2_available() -> bool {
     #[cfg(target_arch = "x86_64")]

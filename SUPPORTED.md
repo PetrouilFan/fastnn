@@ -138,7 +138,11 @@ the twelve scalar NCHW kernels in `src/fn3/runtime/kernels/` are the reference,
 and the optional oneDNN engine executes the 4-D convolution and 2-D matmul
 rows; pooling is scalar on every engine, because the provider's plain-NCHW path
 resolves to its reference implementation on x86 without AVX-512 (see
-[docs/v3/backends.md](docs/v3/backends.md) §3). The Vulkan column stays `—`; a Vulkan session rejects those ops
+[docs/v3/backends.md](docs/v3/backends.md) §3). Those two rows are also the only
+ones the engine claims on AArch64, where it is built and tested but slower than
+ONNX Runtime (2.24x at one thread on a Raspberry Pi 5 — see
+[docs/v3/aarch64.md](docs/v3/aarch64.md)); the scalar kernels are the portable
+path on both targets. The Vulkan column stays `—`; a Vulkan session rejects those ops
 instead of staging them to the CPU.
 
 ## Dtypes and execution modes
@@ -147,7 +151,7 @@ instead of staging them to the CPU.
 |---|---|---|---|---|---|
 | `F32` | `runs` (decoder; CPU, Vulkan optional) | f32 | f32 | Yes | The reference mode for every family; decoder logits have a manual accuracy gate |
 | Weight-only INT8 (`weight_int8`) | archived with the 3.0 tree | — | — | No | Nothing; the v3 artifact has no weight-only payload |
-| `W8A8` | `refused` (#103) | int8 per-channel (planned) | u8 per-tensor (planned) | No | Nothing yet: `w8a8` parses and `prepare` refuses it with the measured reason. On this AVX2 host oneDNN's int8 convolution is 0.97-1.20x the blocked f32 path (0.83-0.94 ms against 0.94-1.07 ms); without VNNI the dot-product sequence has no MAC-throughput advantage. The executor waits for VNNI/AMX hardware where it can be measured |
+| `W8A8` | `refused` (#103) | int8 per-channel (planned) | u8 per-tensor (planned) | No | Nothing yet: `w8a8` parses and `prepare` refuses it with the measured reason. On this AVX2 host oneDNN's int8 convolution is 0.97-1.20x the blocked f32 path (0.83-0.94 ms against 0.94-1.07 ms); without VNNI the dot-product sequence has no MAC-throughput advantage. The executor waits for VNNI/AMX hardware where it can be measured. On AArch64 the hardware *does* have `sdot` and it still loses: oneDNN 3.14.1 has no non-SVE int8 convolution kernel, and int8 measures 4-6.5x slower than f32 on a Cortex-A76 ([docs/v3/aarch64.md](docs/v3/aarch64.md)); W8A8 stays refused there too |
 | `W4A8` | `planned` (#103) | 4-bit | 8-bit | Planned | Nothing; the archived report records 4-bit candidates losing detections, measured on the archived runtime ([report](docs/archive/reports/fn3-22-quant-format.md)) |
 | `F16`, `BF16`, `FP8`, `U4`, `I4`, `F4` | Not planned | — | — | — | No public dtype menu, no storage tag standing in for a compute mode |
 

@@ -289,7 +289,23 @@ immutable, and every `session()` owns its own arena and thread pool.
    engine's per-block work. Pinning to distinct physical CPUs changes little
    (15.12 against 15.97 ms) and a block cap of 2 is worse. The next measurement
    is per-segment staging/reorder/prepacked bytes in the engine report, because
-   a byte count does not depend on this host's noise. That attribution now
+   a byte count does not depend on this host's noise.
+
+### AArch64 is measured, and the provider does not transfer
+
+The tree now builds and runs on a Raspberry Pi 5 (Cortex-A76, 4 cores). ORT
+1.32.0, the same version as the x86 baseline, runs the model in **79.26 ms at
+one thread and 31.83 at four**; fastnn runs **160.00 and 72.81** through the
+oneDNN engine, i.e. 2.02x and 2.29x behind, and 2020 / 576 ms through the scalar
+engine. An isolated oneDNN convolution, with no plan and no blocks, reproduces
+the same 6.9-12.0 GMAC/s, so it is the provider's aarch64 `jit_brgemm_conv` and
+not our engine: on the same core MLAS reaches 15.9-17.9 GMAC/s and oneDNN
+reaches 7.1. int8 is worse, not better — **4-6.5x slower than f32** even though
+the board advertises `asimddp`, because oneDNN 3.14.1 has no non-SVE int8
+convolution kernel. Neither ORT's wheel nor our build uses ACL; ACL is the only
+lever left for ARM f32 and it needs a vendored build plus an accuracy gate.
+Details, numbers and the two portability defects it found are in
+[aarch64.md](aarch64.md). That attribution now
    exists (`OneDnnReport::segment_bytes`) and it closes the block-strategy
    question: staged copies total 14.11 MB against 35.65 MB of payload, while
    weight re-reads total 60.77 MB at eight workers against 7.6 MB at one, and

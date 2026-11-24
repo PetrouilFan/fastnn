@@ -20,7 +20,19 @@ fn main() {
         // add the libstdc++ dependency on GNU/Clang toolchains.
         let target = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
         if target != "msvc" {
+            // `rustc-link-lib` reaches a dependent's link line; the extra
+            // arguments reach this crate's own linkable targets. Both are
+            // needed: on aarch64 GNU ld with Debian's default `--as-needed`
+            // places the shared C++ runtime before the static oneDNN archive
+            // and then drops it as unused, so `cargo test --lib` on that
+            // target fails with undefined `operator new` and
+            // `__class_type_info` unless the library is named again at the end
+            // with `--no-as-needed` in force.
             println!("cargo:rustc-link-lib=dylib=stdc++");
+            for kind in ["", "-tests"] {
+                println!("cargo:rustc-link-arg{kind}=-Wl,--no-as-needed");
+                println!("cargo:rustc-link-arg{kind}=-lstdc++");
+            }
         }
     }
 }
