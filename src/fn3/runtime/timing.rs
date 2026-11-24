@@ -35,6 +35,24 @@ use std::time::Duration;
 
 use crate::inference::ops::OpId;
 
+/// One plan segment's accumulated time, keyed by its position in the plan.
+///
+/// The label table answers "how much does `Conv+Swish` cost in total"; this
+/// answers "which convolution". Both are recorded from the same call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentOccurrence {
+    /// Position in `Plan::segments`.
+    pub index: usize,
+    /// The op the segment is anchored on.
+    pub op: OpId,
+    /// What actually ran, including a fused chain.
+    pub label: String,
+    /// How many times the segment ran since the last reset.
+    pub calls: u64,
+    /// Summed wall time of those calls.
+    pub total: Duration,
+}
+
 /// One segment label's accumulated wall time in one session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegmentTiming {
@@ -67,6 +85,7 @@ impl SegmentTiming {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SegmentTimings {
     entries: Vec<SegmentTiming>,
+    occurrences: Vec<SegmentOccurrence>,
     total: Duration,
 }
 
@@ -74,11 +93,12 @@ impl SegmentTimings {
     /// Clear every entry, keeping the allocation for the next forward.
     pub fn reset(&mut self) {
         self.entries.clear();
+        self.occurrences.clear();
         self.total = Duration::ZERO;
     }
 
     /// Add one segment's elapsed time. Called by the session's executor.
-    pub(crate) fn record(&mut self, op: OpId, label: &str, elapsed: Duration) {
+    pub(crate) fn record(&mut self, index: usize, op: OpId, label: &str, elapsed: Duration) {
         self.total = self.total.saturating_add(elapsed);
         match self.entries.iter_mut().find(|entry| entry.label == label) {
             Some(entry) => {
@@ -94,11 +114,33 @@ impl SegmentTimings {
                 longest: elapsed,
             }),
         }
+        match self
+            .occurrences
+            .iter_mut()
+            .find(|entry| entry.index == index)
+        {
+            Some(entry) => {
+                entry.calls += 1;
+                entry.total = entry.total.saturating_add(elapsed);
+            }
+            None => self.occurrences.push(SegmentOccurrence {
+                index,
+                op,
+                label: label.to_string(),
+                calls: 1,
+                total: elapsed,
+            }),
+        }
     }
 
     /// One entry per op that ran, in first-execution order.
     pub fn entries(&self) -> &[SegmentTiming] {
         &self.entries
+    }
+
+    /// One entry per plan segment that ran, in plan order.
+    pub fn occurrences(&self) -> &[SegmentOccurrence] {
+        &self.occurrences
     }
 
     /// Summed segment time; at most a forward's wall time.
@@ -119,9 +161,9 @@ mod tests {
     #[test]
     fn entries_accumulate_per_op_in_first_seen_order() {
         let mut timings = SegmentTimings::default();
-        timings.record(OpId::Conv, "Conv", Duration::from_millis(3));
-        timings.record(OpId::Sigmoid, "Sigmoid", Duration::from_millis(1));
-        timings.record(OpId::Conv, "Conv", Duration::from_millis(5));
+        timings.record(0, OpId::Conv, "Conv", Duration::from_millis(3));
+        timings.record(1, OpId::Sigmoid, "Sigmoid", Duration::from_millis(1));
+        timings.record(2, OpId::Conv, "Conv", Duration::from_millis(5));
         let entries = timings.entries();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].op, OpId::Conv);
@@ -130,16 +172,20 @@ mod tests {
         assert_eq!(entries[0].longest, Duration::from_millis(5));
         assert_eq!(entries[0].mean(), Duration::from_millis(4));
         assert_eq!(entries[1].op, OpId::Sigmoid);
+        assert_eq!(timings.occurrences().len(), 3);
+        assert_eq!(timings.occurrences()[2].index, 2);
+        assert_eq!(timings.occurrences()[2].total, Duration::from_millis(5));
         assert_eq!(timings.total(), Duration::from_millis(9));
         timings.reset();
         assert!(timings.is_empty());
+        assert!(timings.occurrences().is_empty());
         assert_eq!(timings.total(), Duration::ZERO);
     }
 
     #[test]
     fn a_single_call_has_a_mean_equal_to_its_total() {
         let mut timings = SegmentTimings::default();
-        timings.record(OpId::Transpose, "Transpose", Duration::from_micros(7));
+        timings.record(0, OpId::Transpose, "Transpose", Duration::from_micros(7));
         assert_eq!(timings.entries()[0].mean(), Duration::from_micros(7));
     }
 }

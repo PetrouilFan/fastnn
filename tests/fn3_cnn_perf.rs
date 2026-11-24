@@ -168,6 +168,52 @@ struct OpRow {
     longest_ms: f64,
 }
 
+/// Multiply-accumulate count of one segment, when the op has one.
+///
+/// `Conv` uses the output extent and the weight extent, so groups and depthwise
+/// are included without special cases; `MatMul` uses `M*N*K` from its output
+/// and left operand. Every other op returns `None` and is reported by time
+/// alone.
+#[cfg(feature = "segment-timing")]
+fn segment_macs(
+    plan: &fastnn::inference::RuntimePlan,
+    segment: &fastnn::inference::Segment,
+) -> Option<u64> {
+    let out = plan.slot(*segment.outputs.first()?).ok()?;
+    let out_dims: Option<Vec<u64>> = out.ty.dims().iter().map(|d| d.as_const()).collect();
+    let out_dims = out_dims?;
+    match segment.op_id() {
+        OpId::Conv => {
+            let weights = plan.slot(*segment.inputs.get(1)?).ok()?;
+            let w: Option<Vec<u64>> = weights.ty.dims().iter().map(|d| d.as_const()).collect();
+            let w = w?;
+            if out_dims.len() != 4 || w.len() != 4 {
+                return None;
+            }
+            let mut macs = out_dims.iter().product::<u64>();
+            macs = macs
+                .checked_mul(w[1])?
+                .checked_mul(w[2])?
+                .checked_mul(w[3])?;
+            Some(macs)
+        }
+        OpId::MatMul => {
+            let left = plan.slot(*segment.inputs.first()?).ok()?;
+            let left_dims: Option<Vec<u64>> = left.ty.dims().iter().map(|d| d.as_const()).collect();
+            let left_dims = left_dims?;
+            if out_dims.len() != 2 || left_dims.len() != 2 {
+                return None;
+            }
+            Some(
+                out_dims[0]
+                    .checked_mul(out_dims[1])?
+                    .checked_mul(left_dims[1])?,
+            )
+        }
+        _ => None,
+    }
+}
+
 /// Print the per-op table for one engine and worker count.
 ///
 /// Each repeat is [`TIMING_FORWARDS`] forwards with the session's timing table
@@ -199,6 +245,7 @@ fn print_segment_timings(
             .expect("a timing warm-up forward must succeed");
     }
     let mut repeats: Vec<Vec<(String, u64, f64, f64)>> = Vec::with_capacity(TIMING_REPEATS);
+    let mut occurrences: Vec<Vec<(usize, String, u64, f64)>> = Vec::with_capacity(TIMING_REPEATS);
     let mut wall = Vec::with_capacity(TIMING_REPEATS);
     for _ in 0..TIMING_REPEATS {
         session.reset_segment_timings();
@@ -220,6 +267,21 @@ fn print_segment_timings(
                         entry.calls,
                         entry.total.as_secs_f64() * 1000.0,
                         entry.longest.as_secs_f64() * 1000.0,
+                    )
+                })
+                .collect(),
+        );
+        occurrences.push(
+            session
+                .segment_timings()
+                .occurrences()
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.index,
+                        entry.label.clone(),
+                        entry.calls,
+                        entry.total.as_secs_f64() * 1000.0,
                     )
                 })
                 .collect(),
@@ -271,6 +333,46 @@ fn print_segment_timings(
             100.0 * row.total_ms / accounted.max(f64::MIN_POSITIVE),
             row.total_ms / row.calls.max(1.0),
             row.longest_ms,
+        );
+    }
+    if std::env::var_os("FN3_CNN_TRACE").is_some() {
+        print_segment_trace(&session, &occurrences);
+    }
+}
+
+/// Print one line per plan segment: median time, MACs and achieved GMAC/s.
+///
+/// Only with `FN3_CNN_TRACE` set: this is the per-layer view the class table
+/// hides, and it is meant to be joined with an ORT per-node profile.
+#[cfg(feature = "segment-timing")]
+fn print_segment_trace(session: &Session, repeats: &[Vec<(usize, String, u64, f64)>]) {
+    let mut by_index: Vec<(usize, String, u64, Vec<f64>)> = Vec::new();
+    for repeat in repeats {
+        for (index, label, calls, total) in repeat {
+            let per_forward = *total / TIMING_FORWARDS as f64;
+            match by_index.iter_mut().find(|entry| entry.0 == *index) {
+                Some(entry) => entry.3.push(per_forward),
+                None => by_index.push((*index, label.clone(), *calls, vec![per_forward])),
+            }
+        }
+    }
+    by_index.sort_by_key(|entry| entry.0);
+    println!("[fn3perf][trace] index label ms calls macs gmac_s bytes source");
+    for (index, label, calls, mut samples) in by_index {
+        samples.sort_by(|a, b| a.partial_cmp(b).expect("finite durations"));
+        let ms = percentile(&samples, 0.5);
+        let segment = &session.plan().segments[index];
+        let macs = segment_macs(session.plan(), segment);
+        let macs_text = macs.map_or("-".to_string(), |value| value.to_string());
+        let gmac = macs.map_or(0.0, |value| value as f64 / ms / 1e6);
+        let bytes = session
+            .plan()
+            .slot(segment.outputs[0])
+            .map_or(0, |slot| slot.bytes);
+        println!(
+            "[fn3perf][trace] {index} {label} {ms:.4} {:.2} {macs_text} {gmac:.2} {bytes} {}",
+            calls as f64 / TIMING_FORWARDS as f64,
+            segment.loc.describe()
         );
     }
 }
