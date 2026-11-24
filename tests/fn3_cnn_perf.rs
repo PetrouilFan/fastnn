@@ -445,7 +445,7 @@ fn cnn_forward_latency() {
                 let report = session.one_dnn_report().map(|report| {
                     format!(
                         "oneDNN {} ({} runtime), {} segments ({} conv: {} row-split, {} \
-                         channel-split; {} pool, {} matmul), {} fused, {} channels-last ({} \
+                         channel-split; {} matmul), {} fused, {} channels-last ({} \
                          bytes), {} reorders ({} bytes), {} prepacked bytes, {} staging bytes, \
                          {} scratchpad bytes, {} reordered weight blocks, parallel blocks {}",
                         report.version,
@@ -454,7 +454,6 @@ fn cnn_forward_latency() {
                         report.conv_segments,
                         report.conv_row_segments,
                         report.conv_channel_segments,
-                        report.pool_segments,
                         report.matmul_segments,
                         report.fused_segments,
                         report.blocked_segments,

@@ -234,7 +234,7 @@ fn the_plan_says_which_segments_onednn_took() {
     println!(
         "[fn3onednn][measure] plan: {} segments ({} oneDNN, {} scalar), {} fallbacks, \
          oneDNN {}, cpu runtime {}, {} prepared segments ({} conv: {} row-split, {} \
-         channel-split; {} pool, {} matmul), {} prepacked bytes, {} reordered weight blocks, \
+         channel-split; {} matmul), {} prepacked bytes, {} reordered weight blocks, \
          parallel blocks {}",
         counts.total(),
         counts.one_dnn,
@@ -246,7 +246,6 @@ fn the_plan_says_which_segments_onednn_took() {
         report.conv_segments,
         report.conv_row_segments,
         report.conv_channel_segments,
-        report.pool_segments,
         report.matmul_segments,
         report.prepacked_bytes,
         report.reordered_blocks,

@@ -33,6 +33,16 @@
 //! The importer folds the constant scales/sizes operand into `OpParams`; the
 //! kernel accepts either (not both), checks the planned output extent against the
 //! rule, and rejects `cubic` and `tf_crop_and_resize`, which have no kernel.
+//!
+//! # Cost
+//!
+//! The width axis mapping does not depend on the row, so it is resolved once
+//! per forward into a table: a run-length form for nearest (`output columns
+//! start..end read input column source`) and a two-tap form for linear. The row
+//! loop then writes each output row from that table, and rows are the unit of
+//! parallelism. The value of an output element is unchanged: the tables hold
+//! exactly the indices and weights the direct form computes, and the sums are
+//! evaluated in the same order.
 
 use crate::inference::backend::{CoordinateTransformationMode, NearestMode, OpParams, ResizeMode};
 use crate::inference::error::Fn3Error;
@@ -193,42 +203,116 @@ pub(crate) fn resize_f32(
     let transform = params.coordinate_transformation_mode;
     let nearest_mode = params.nearest_mode;
 
+    // The column tables depend on the width axis alone, so they are built once
+    // per forward. Building them inside the row loop made every output element
+    // pay for a coordinate transform, which is most of the 1.51 ms the two
+    // YOLOv8n upsamples cost at one thread.
+    //
     // One row is one (n, c, y) line: [out_w] elements.
-    for_each_row(threads, out, out_w, |row, values| {
-        let plane_in = (row / out_h) * in_h * in_w;
-        let y = row % out_h;
-        let source_y = coordinate(transform, y, in_h, out_h, scales[2]);
-        match mode {
-            ResizeMode::Nearest => {
+    match mode {
+        ResizeMode::Nearest => {
+            let runs = nearest_runs(transform, nearest_mode, in_w, out_w, scales[3]);
+            for_each_row(threads, out, out_w, |row, values| {
+                let plane_in = (row / out_h) * in_h * in_w;
+                let y = row % out_h;
+                let source_y = coordinate(transform, y, in_h, out_h, scales[2]);
                 let sy = nearest(nearest_mode, source_y, in_h);
-                for (index, value) in values.iter_mut().enumerate() {
-                    let source_x = coordinate(transform, index, in_w, out_w, scales[3]);
-                    let sx = nearest(nearest_mode, source_x, in_w);
-                    *value = x[plane_in + sy * in_w + sx];
+                let line = &x[plane_in + sy * in_w..plane_in + sy * in_w + in_w];
+                // Walk the run cursor rather than building one sub-slice per
+                // run: a 64x40x40 upsample is 20 runs of two per row, and the
+                // per-run slice setup was most of the kernel's cost.
+                let Some(first) = runs.first() else {
+                    return Ok(());
+                };
+                let mut run = 0usize;
+                let mut end = first.1;
+                let mut value = line[first.2];
+                for (index, slot) in values.iter_mut().enumerate() {
+                    if index == end {
+                        run += 1;
+                        let next = runs[run];
+                        end = next.1;
+                        value = line[next.2];
+                    }
+                    *slot = value;
                 }
-            }
-            ResizeMode::Linear => {
+                Ok(())
+            })
+        }
+        ResizeMode::Linear => {
+            let columns = linear_columns(transform, in_w, out_w, scales[3]);
+            for_each_row(threads, out, out_w, |row, values| {
+                let plane_in = (row / out_h) * in_h * in_w;
+                let y = row % out_h;
+                let source_y = coordinate(transform, y, in_h, out_h, scales[2]);
                 let y0 = source_y.floor();
                 let wy = source_y - y0;
                 let sy0 = clamp_index(y0, in_h);
                 let sy1 = clamp_index(y0 + 1.0, in_h);
-                for (index, value) in values.iter_mut().enumerate() {
-                    let source_x = coordinate(transform, index, in_w, out_w, scales[3]);
-                    let x0 = source_x.floor();
-                    let wx = source_x - x0;
-                    let sx0 = clamp_index(x0, in_w);
-                    let sx1 = clamp_index(x0 + 1.0, in_w);
-                    let top = x[plane_in + sy0 * in_w + sx0] * (1.0 - wx)
-                        + x[plane_in + sy0 * in_w + sx1] * wx;
-                    let bottom = x[plane_in + sy1 * in_w + sx0] * (1.0 - wx)
-                        + x[plane_in + sy1 * in_w + sx1] * wx;
-                    *value = top * (1.0 - wy) + bottom * wy;
+                let top = &x[plane_in + sy0 * in_w..plane_in + sy0 * in_w + in_w];
+                let bottom = &x[plane_in + sy1 * in_w..plane_in + sy1 * in_w + in_w];
+                for (value, &(sx0, sx1, w0, w1)) in values.iter_mut().zip(&columns) {
+                    let upper = top[sx0] * w0 + top[sx1] * w1;
+                    let lower = bottom[sx0] * w0 + bottom[sx1] * w1;
+                    *value = upper * (1.0 - wy) + lower * wy;
                 }
-            }
-            ResizeMode::Cubic => unreachable!("cubic was rejected above"),
+                Ok(())
+            })
         }
-        Ok(())
-    })
+        ResizeMode::Cubic => unreachable!("cubic was rejected above"),
+    }
+}
+
+/// The run-length form of the nearest mapping on the width axis.
+///
+/// Each entry is `(start, end, source_column)`: output columns `start..end` all
+/// read input column `source_column`. The mapping is monotone (a coordinate
+/// transform that is non-decreasing plus a clamp), so consecutive equal columns
+/// collapse into one run and a nearest upsample becomes a handful of slice
+/// fills instead of one gather per output element.
+fn nearest_runs(
+    transform: CoordinateTransformationMode,
+    mode: NearestMode,
+    in_w: usize,
+    out_w: usize,
+    scale: f32,
+) -> Vec<(usize, usize, usize)> {
+    let mut runs: Vec<(usize, usize, usize)> = Vec::with_capacity(out_w);
+    for index in 0..out_w {
+        let sx = nearest(mode, coordinate(transform, index, in_w, out_w, scale), in_w);
+        match runs.last_mut() {
+            Some(last) if last.2 == sx => last.1 = index + 1,
+            _ => runs.push((index, index + 1, sx)),
+        }
+    }
+    runs
+}
+
+/// The two-tap form of the linear mapping on the width axis.
+///
+/// Each entry is `(left, right, left_weight, right_weight)` for one output
+/// column: the clamped input columns and the weights the row loop applies. The
+/// weights are the same `1.0 - frac` and `frac` the direct form computes, so a
+/// value is bit-identical to computing them per element.
+fn linear_columns(
+    transform: CoordinateTransformationMode,
+    in_w: usize,
+    out_w: usize,
+    scale: f32,
+) -> Vec<(usize, usize, f32, f32)> {
+    let mut columns: Vec<(usize, usize, f32, f32)> = Vec::with_capacity(out_w);
+    for index in 0..out_w {
+        let source = coordinate(transform, index, in_w, out_w, scale);
+        let left = source.floor();
+        let weight = source - left;
+        columns.push((
+            clamp_index(left, in_w),
+            clamp_index(left + 1.0, in_w),
+            1.0 - weight,
+            weight,
+        ));
+    }
+    columns
 }
 
 /// Source coordinate of output index `index` on one axis.

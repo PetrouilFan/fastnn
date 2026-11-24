@@ -18,8 +18,8 @@ is, not to claim a new number: the forward medians it produces agree with
 | class | fastnn 1T | ORT 1T | fastnn 8T | ORT 8T |
 |---|---:|---:|---:|---:|
 | convolution (incl. fused SiLU) | 30.67 ms | 21.62 ms¹ | 14.79 ms | 4.99 ms¹ |
-| max pool | 2.28 | 0.08 | 1.05 | 0.04 |
-| resize / upsample | 1.51 | 0.04 | 0.33 | 0.15 |
+| max pool † | 2.28 | 0.08 | 1.05 | 0.04 |
+| resize / upsample † | 1.51 | 0.04 | 0.33 | 0.15 |
 | softmax | 0.42 | 0.18 | 0.35 | 0.03 |
 | elementwise (sigmoid / add) | 0.47 | 0.15² | 0.48 | 0.20² |
 | concat | 0.30 | 0.33 | 0.65 | 0.52 |
@@ -36,6 +36,10 @@ the same SiLU pattern fastnn fuses into the convolution. The fastnn number is
 ² ORT's `elementwise` bucket; it fuses the SiLU but not the DFL sigmoid.
 ³ fastnn's session-open reorders are part of session open, not a forward; the
 runtime conversions that remain are inside the segments that need them.
+
+† Both tails have been fixed since this map was taken; the class rows above are
+the baseline they were measured against. See
+[The two tails](#the-two-tails-pooling-and-resize).
 
 ## Convolution detail
 
@@ -77,17 +81,48 @@ difference: they scale 3.5× here against 6.6× for ORT.
   (NHWC) destination; for 16–48 channels that layout is leaving a 3–6× gap.
   The first experiment is a policy split: keep channels-last for the ≥64-channel
   layers, use NCHW for the small ones, and measure the same table.
-- **The tails are cheap wins.** `MaxPool` is 2.28 ms for three 128×10×10 5×5
-  windows against ORT's 0.08. The engine declares plain NCHW for pools, and on
-  AVX2 oneDNN's JIT pooling accepts only blocked or NHWC descriptors
-  (`jit_uni_pool_kernel.cpp` leaves `ncsp_fmt_tag` unset unless `is_avx512`), so
-  it is served by the reference pooling path. `Resize` is a scalar kernel:
-  1.51 ms against 0.04. Together they are 3.8 ms at 1T and 1.4 ms at 8T.
+- **The tails were cheap wins, and they are taken.** Both are now fixed; the
+  measurement is in [the next section](#the-two-tails-pooling-and-resize).
 - **At 8T the question is block strategy, not arithmetic.** The head 3×3 layers
   reach 165–180 GMAC/s (2.5–2.8× one core's peak) but scale only 3.5× on eight
   workers, while ORT's NCHWc kernels reach 6.6×. A thread-count sweep on one
   segment (1/2/4/8, same block split) is the measurement that separates pool
   dispatch cost from memory/CCX saturation.
+
+## The two tails: pooling and resize
+
+Pooling no longer goes through the provider. The engine handed oneDNN the
+arena's plain NCHW descriptor, and on this AVX2 host `jit_uni_pool_kernel.cpp`
+leaves `ncsp_fmt_tag` unset unless the ISA is AVX-512, so the primitive oneDNN
+built was `ref_pooling`: 0.98 / 0.69 / 0.60 ms for the three SPPF windows of
+`model.9`. The claim is gone (the engine implements convolution and matmul) and
+the scalar kernel implements all three pool ops.
+
+The scalar kernel also grew a 2-D form. A maximum over a rectangle is the
+maximum over the rows of the per-row horizontal maxima, so one pass over the
+plane (`in_h * out_w` values) feeds the vertical pass instead of re-scanning 25
+taps per output, and one task is a whole `(n, c)` plane so the horizontal
+scratch is allocated once. Average pooling keeps a direct sum, still without the
+generic loop's per-element coordinate decomposition, and accumulates in the same
+tap order so its values are bit-identical to the generic kernel.
+
+`Resize` now resolves the width axis once per forward: a run-length table for
+nearest (`output columns start..end read input column source`, written as a
+cursor walk) and a two-tap table for linear. The tables hold exactly the indices
+and weights the direct form computed, so the values are unchanged.
+
+| row | before | after | ORT 1T |
+|---|---:|---:|---:|
+| max pool (3 segments) | 2.28 ms | 0.51 ms | 0.08 |
+| resize (2 segments) | 1.51 ms | 0.31 ms | 0.04 |
+| forward, 1 thread | 36.13 ms | 34.72 ms | 23.47 |
+| forward, 8 threads | 18.95 ms | 17.34 ms | 7.75 |
+
+The forward rows are one run each, and this host's run-to-run spread on an
+unchanged build is about 6 % (measured at 36.13 and 38.43 ms), so the class rows
+— which moved by 4.5x and 4.9x — are the evidence, not the totals. Eight-thread
+resize is at ORT parity (0.17 against 0.15); the one-thread resize gap is 0.27 ms
+and would need a vectorised row writer to close.
 
 ## Reproducing
 

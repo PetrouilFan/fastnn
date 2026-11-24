@@ -97,10 +97,17 @@ Claimed, all `f32`:
 | Op | Shape | Notes |
 |---|---|---|
 | `Conv` | 4-D NCHW | groups, strides, dilations, asymmetric explicit pads (after `auto_pad`), optional bias |
-| `MaxPool` | 4-D NCHW | explicit pads, strides |
-| `AveragePool` | 4-D NCHW | explicit pads, strides, `count_include_pad` |
-| `GlobalAveragePool` | 4-D NCHW | expressed as average pooling over the full input plane |
 | `MatMul` | 2-D | the decoder `Gemm` form; no broadcast batch, no bias operand |
+
+Pooling is **not** claimed. The engine hands oneDNN the arena's plain NCHW
+descriptor — the plan stores activations that way and the engine does not
+reorder a pooling operand — and on an AVX2 host `jit_uni_pool_kernel.cpp` leaves
+`ncsp_fmt_tag` unset unless the ISA is AVX-512, so the primitive oneDNN built was
+`ref_pooling`. That measured 2.28 ms for the three SPPF windows of YOLOv8n
+against 0.51 ms for the scalar kernel once it grew a separable 2-D form (§7,
+"The two tails"). A provider whose best case on this host is its own reference
+implementation is not worth a claim that must be a pure function of the segment,
+so `MaxPool`, `AveragePool` and `GlobalAveragePool` stay on the scalar kernels.
 
 A weight operand (and a `Conv` bias) must be a **read-only model payload**
 (`SegmentOperand::constant`, i.e. an initializer or a folded `Constant`). The
@@ -121,12 +128,10 @@ residual, a constant residual).
 |---|---|
 | `Conv` rank 3/5 (1-D/3-D spatial) | "claimed for 4-D NCHW/NCHW/NCHW operands only" |
 | dynamic (arena) weight or bias | "prepacks constant weights at session open" |
-| `MaxPool`/`AveragePool` with `ceil_mode = 1` | "oneDNN pooling has no ceil rule" |
-| pooling with dilation | "claims the undilated pool forms only" |
 | `MatMul` rank 3+ | "claimed for 2-D operands only" |
 | any other op (`Clip`, `Sigmoid`, `Add`, `Resize`, `Pad`, `TopK`, …) | "every other op runs on the scalar kernels" |
 
-On YOLOv8n every `Conv` and `MaxPool` segment is claimed; the plan report in
+On YOLOv8n every `Conv` segment is claimed; the plan report in
 `tests/fn3_onednn.rs` prints the counts, the fallback list and the prepacked
 bytes for the pinned graph.
 
@@ -139,7 +144,6 @@ plain conv       channels [0, c) | [c, 2c) | ...   source = full input
                  or rows [0, r) | [r, 2r) | ...     source = row submemory + halo
 grouped conv     whole groups only                 source = channel submemory per block
 depthwise conv   one channel (one group) per block source = channel submemory per block
-pooling          channels [0, c) | [c, 2c) | ...
 matmul           result columns [0, n) | [n, 2n) | ...
 ```
 
@@ -648,7 +652,9 @@ noise) from six to eight. The absolute numbers in this table are 2–3 ms worse
 than the interleaved A/B above because it ran at a different moment on a shared
 desktop; the shape of the curve is the point, and it is measured in one batch.
 
-The per-op table at eight threads, current tree (23.0 ms forward, 125 MB peak):
+The per-op table at eight threads, the tree at that point (23.0 ms forward,
+125 MB peak); its `max_pool` and `resize` rows are superseded by *The two tails*
+below:
 
 | Label | Calls | Total ms | Share |
 |---|--:|--:|--:|
@@ -753,6 +759,31 @@ Five changes and a set of negative results produced that:
      `concat` 0.73, `conv` 0.56, `resize` 0.33, `softmax` 0.30, `sigmoid` 0.29,
      `transpose` 0.28, `slice` 0.27, `split` 0.24; total 19.31 ms.
 
+### The two tails: pooling and resize
+
+The per-layer map (`docs/v3/per-layer.md`) put 3.8 ms of the 1-thread forward in
+two scalar tails. Both are now fixed.
+
+**Pooling** was claimed by the engine but served by `ref_pooling` (see §3), at
+0.98 / 0.69 / 0.60 ms for the three `model.9` 5x5 windows on 128x20x20. The claim
+is gone and the scalar kernel has a 2-D path: max is separable (one horizontal
+pass over the plane, then the vertical pass), and one task is a whole `(n, c)`
+plane so the horizontal scratch is allocated once per plane rather than once per
+row. Average pooling keeps a direct sum without the generic per-element
+coordinate decomposition, with the same tap order, so it is bit-identical to the
+generic kernel. Result: **2.28 ms -> 0.51 ms at one thread, 1.05 -> 0.14 at
+eight**, against ORT's 0.08 / 0.04.
+
+**`Resize`** resolved the width-axis coordinate transform inside the element
+loop. It now builds the mapping once per forward — a run-length table for
+nearest, a two-tap table for linear — and the row loop walks it; rows remain the
+unit of parallelism, and the values are unchanged. Result: **1.51 ms -> 0.31 ms
+at one thread, 0.33 -> 0.17 at eight**, against ORT's 0.04 / 0.15.
+
+The forward medians moved from 36.13 to 34.72 ms at one thread and 18.95 to
+17.34 at eight. Those are single runs on a shared host whose spread on an
+unchanged build is ~6 %, so the per-op rows are the claim, not the totals.
+
 ### Negative results, recorded
 
 | Attempt | Result |
@@ -781,7 +812,7 @@ changes:
 | oneDNN `Fixed(4/8)` vs `Fixed(1)` | same 1e-4/1e-4 gate | **not bitwise**; max_abs 2.3e-4, max_rel 5.1e-6 |
 | scalar fused vs scalar unfused | bitwise | **bitwise identical**, 176 400 elements |
 | scalar `Fixed(1/4/8)` | bitwise | bitwise identical |
-| plan report | | 126 segments: 67 oneDNN (64 conv: 20 row-split, 44 channel-split; 3 pool), 59 scalar, 0 fallbacks, 57 fusions (114 segments removed) |
+| plan report | | 126 segments: 67 oneDNN (64 conv: 20 row-split, 44 channel-split; 3 pool), 59 scalar, 0 fallbacks, 57 fusions (114 segments removed). That run predates the pooling change; the same plan is now 64 oneDNN (conv only) and 62 scalar |
 
 The oneDNN outputs are **not bitwise identical across thread counts**: the
 worker count changes the block count and the split dimension, a different block
@@ -794,11 +825,10 @@ because it evaluates the same expressions in the same order.
 
 ## 8. Known limits
 
-- 4-D NCHW convolution and pooling only; 1-D and 3-D spatial graphs fall back.
+- 4-D NCHW convolution only; 1-D and 3-D spatial graphs fall back. Pooling is
+  not a provider op at all (see §3), so every pool runs on the scalar kernels.
 - 2-D `MatMul` only; batched matmul (attention) falls back.
 - `f32` only; no `bf16`/`f16`/quantized path.
-- Pooling with `ceil_mode` or dilation falls back (the ONNX ceil rule allows
-  windows past the padded region, which oneDNN pooling does not express).
 - Weights and biases must be read-only model data (prepacked at open).
 - A row-split convolution whose result is plain NCHW stages its input and
   output rows in dense engine-owned buffers, because a row submemory's strides

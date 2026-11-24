@@ -119,8 +119,6 @@ pub(crate) const PROP_KIND_FORWARD_INFERENCE: i32 = 96;
 /// only for AArch64/ACL and RISC-V/RVV, so on x64 its primitive descriptor
 /// creation fails regardless of the ISA. Recorded in `docs/v3/backends.md`.
 pub(crate) const ALG_CONVOLUTION_DIRECT: i32 = 1;
-/// `dnnl_pooling_max`.
-pub(crate) const ALG_POOLING_MAX: i32 = 511;
 /// `dnnl_eltwise_relu`.
 pub(crate) const ALG_ELTWISE_RELU: i32 = 0x20;
 /// `dnnl_eltwise_tanh`.
@@ -133,10 +131,6 @@ pub(crate) const ALG_ELTWISE_SWISH: i32 = 0x2c;
 pub(crate) const ALG_ELTWISE_CLIP: i32 = 0x2e;
 /// `dnnl_eltwise_gelu_erf` (the exact `erf` GELU).
 pub(crate) const ALG_ELTWISE_GELU_ERF: i32 = 0x31;
-/// `dnnl_pooling_avg_include_padding`.
-pub(crate) const ALG_POOLING_AVG_INCLUDE_PADDING: i32 = 767;
-/// `dnnl_pooling_avg_exclude_padding`.
-pub(crate) const ALG_POOLING_AVG_EXCLUDE_PADDING: i32 = 1023;
 
 /// `dnnl_arg_src`.
 pub(crate) const ARG_SRC: c_int = 1;
@@ -284,20 +278,6 @@ extern "C" {
         dst_desc: MemoryDesc,
         strides: *const Dim,
         dilates: *const Dim,
-        padding_l: *const Dim,
-        padding_r: *const Dim,
-        attr: PrimitiveAttr,
-    ) -> c_int;
-    fn dnnl_pooling_forward_primitive_desc_create(
-        primitive_desc: *mut PrimitiveDesc,
-        engine: Engine,
-        prop_kind: i32,
-        alg_kind: i32,
-        src_desc: MemoryDesc,
-        dst_desc: MemoryDesc,
-        strides: *const Dim,
-        kernel: *const Dim,
-        dilation: *const Dim,
         padding_l: *const Dim,
         padding_r: *const Dim,
         attr: PrimitiveAttr,
@@ -860,45 +840,6 @@ impl PrimitiveDescHandle {
             "dnnl_convolution_forward_primitive_desc_create",
         )?;
         Self::from_raw(raw, "dnnl_convolution_forward_primitive_desc_create")
-    }
-
-    /// Pooling forward.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn pooling(
-        engine: &EngineHandle,
-        alg: i32,
-        src: &Desc,
-        dst: &Desc,
-        strides: &[Dim],
-        kernel: &[Dim],
-        dilates: &[Dim],
-        padding_l: &[Dim],
-        padding_r: &[Dim],
-        attr: &PrimitiveAttrHandle,
-    ) -> Result<PrimitiveDescHandle, Fn3Error> {
-        let mut raw: PrimitiveDesc = std::ptr::null_mut();
-        // SAFETY: as for convolution: all slices are per-spatial-axis, all
-        // descriptors and the engine are live, and oneDNN copies the inputs.
-        check(
-            unsafe {
-                dnnl_pooling_forward_primitive_desc_create(
-                    &mut raw,
-                    engine.raw(),
-                    PROP_KIND_FORWARD_INFERENCE,
-                    alg,
-                    src.raw(),
-                    dst.raw(),
-                    strides.as_ptr(),
-                    kernel.as_ptr(),
-                    dilates.as_ptr(),
-                    padding_l.as_ptr(),
-                    padding_r.as_ptr(),
-                    attr.raw(),
-                )
-            },
-            "dnnl_pooling_forward_primitive_desc_create",
-        )?;
-        Self::from_raw(raw, "dnnl_pooling_forward_primitive_desc_create")
     }
 
     /// Matmul (`dst = src * weights`).

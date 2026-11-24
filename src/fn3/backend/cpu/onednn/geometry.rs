@@ -3,7 +3,7 @@
 //! The same functions answer two questions, and that is deliberate:
 //!
 //! - the **planner** asks whether a segment is expressible in oneDNN's
-//!   vocabulary (2-D NCHW convolution and pooling, 2-D matmul, `f32`);
+//!   vocabulary (2-D NCHW convolution, 2-D matmul, `f32`);
 //! - **session preparation** builds the exact descriptors from the answer.
 //!
 //! A rule that lives in only one of them would let a segment be claimed and
@@ -18,8 +18,6 @@
 //! | Op | Claimed | Falls back |
 //! |---|---|---|
 //! | `Conv` | 4-D `f32` NCHW, groups, strides, dilations, asymmetric explicit pads, optional bias | 1-D/3-D spatial, other dtypes, negative pads |
-//! | `MaxPool`, `AveragePool` | 4-D `f32`, explicit pads, strides, `count_include_pad` | `ceil_mode = 1`, dilation, 1-D/3-D |
-//! | `GlobalAveragePool` | 4-D `f32` (as average pooling with a full window) | other ranks/dtypes |
 //! | `MatMul` | 2-D `f32` (the decoder's `Gemm` form) | batched/rank-3+, broadcasting |
 //! | everything else | — | scalar kernels |
 //!
@@ -241,148 +239,6 @@ impl Conv {
     }
 
     /// Output elements one block writes for `channels` output channels.
-    pub(crate) fn block_elements(&self, channels: usize) -> usize {
-        self.batch * channels * self.out_hw[0] * self.out_hw[1]
-    }
-}
-
-/// A 2-D pooling window, resolved.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Pool {
-    /// Batch extent.
-    pub batch: usize,
-    /// Channels (equal in and out).
-    pub channels: usize,
-    /// Input height and width.
-    pub in_hw: [usize; 2],
-    /// Output height and width the plan reserved.
-    pub out_hw: [usize; 2],
-    /// Kernel height and width.
-    pub kernel: [usize; 2],
-    /// Stride per spatial axis.
-    pub strides: [usize; 2],
-    /// Padding per spatial axis `(begin, end)`.
-    pub pads: [(i64, i64); 2],
-    /// `true` for `GlobalAveragePool`, which is average pooling over the whole
-    /// input plane.
-    pub global: bool,
-    /// `true` when padded cells count in an average denominator.
-    pub count_include_pad: bool,
-}
-
-impl Pool {
-    /// Resolve and validate one of the three pooling ids.
-    pub(crate) fn new(
-        op: OpId,
-        x: &Shape,
-        out: &Shape,
-        params: &OpParams,
-    ) -> Result<Pool, Fn3Error> {
-        if x.rank() != 4 || out.rank() != 4 {
-            return Err(Fn3Error::InvalidShape {
-                context: "oneDNN pooling",
-                detail: format!(
-                    "op {op} is claimed for 4-D NCHW operands only; found input {x}, output {out}"
-                ),
-            });
-        }
-        let x_dims = dims(x, "oneDNN pooling input")?;
-        let out_dims = dims(out, "oneDNN pooling output")?;
-        if op == OpId::GlobalAveragePool {
-            let kernel = [x_dims[2], x_dims[3]];
-            for axis in 0..2 {
-                if out_dims[axis + 2] != 1 {
-                    return Err(Fn3Error::ShapeMismatch {
-                        op: Some(op),
-                        expected: "a 1x1 pooled plane".to_string(),
-                        actual: format!("output {out}"),
-                    });
-                }
-            }
-            if x_dims.contains(&0) {
-                return Err(Fn3Error::InvalidShape {
-                    context: "oneDNN pooling",
-                    detail: format!("op {op} has a zero extent in {x}"),
-                });
-            }
-            return Ok(Pool {
-                batch: x_dims[0],
-                channels: x_dims[1],
-                in_hw: [x_dims[2], x_dims[3]],
-                out_hw: [1, 1],
-                kernel,
-                strides: [1, 1],
-                pads: [(0, 0), (0, 0)],
-                global: true,
-                count_include_pad: false,
-            });
-        }
-        if params.ceil_mode {
-            return Err(Fn3Error::InvalidShape {
-                context: "oneDNN pooling",
-                detail: format!(
-                    "op {op} sets ceil_mode = 1; oneDNN pooling has no ceil rule, so the \
-                     segment stays scalar"
-                ),
-            });
-        }
-        let (kernel, strides, dilations) = window_axes(op, params, 2)?;
-        if dilations != [1, 1] {
-            return Err(Fn3Error::InvalidShape {
-                context: "oneDNN pooling",
-                detail: format!(
-                    "op {op} has dilations {dilations:?}; the oneDNN engine claims the \
-                     undilated pool forms only"
-                ),
-            });
-        }
-        let in_hw = [x_dims[2], x_dims[3]];
-        let pads = resolve_pads(op, params, &in_hw, &kernel, &strides, &dilations)?;
-        let mut out_hw = [0usize; 2];
-        for axis in 0..2 {
-            let (begin, end) = pads[axis];
-            let computed = window_output(
-                op,
-                in_hw[axis],
-                kernel[axis],
-                strides[axis],
-                dilations[axis],
-                begin,
-                end,
-                params.ceil_mode,
-            )?;
-            if computed != out_dims[axis + 2] {
-                return Err(Fn3Error::ShapeMismatch {
-                    op: Some(op),
-                    expected: format!(
-                        "the planned output extent {} on spatial axis {axis}",
-                        out_dims[axis + 2]
-                    ),
-                    actual: format!("the kernel's rule gives {computed}"),
-                });
-            }
-            out_hw[axis] = computed;
-        }
-        if x_dims.contains(&0) || out_dims.contains(&0) {
-            return Err(Fn3Error::InvalidShape {
-                context: "oneDNN pooling",
-                detail: format!("op {op} has a zero extent (input {x}, output {out})"),
-            });
-        }
-        Ok(Pool {
-            batch: x_dims[0],
-            channels: x_dims[1],
-            in_hw,
-            out_hw,
-            kernel: [kernel[0], kernel[1]],
-            strides: [strides[0], strides[1]],
-            pads: [(pads[0].0, pads[0].1), (pads[1].0, pads[1].1)],
-            global: false,
-            count_include_pad: params.count_include_pad,
-        })
-    }
-
-    /// Output elements one block writes for `channels` channels.
     pub(crate) fn block_elements(&self, channels: usize) -> usize {
         self.batch * channels * self.out_hw[0] * self.out_hw[1]
     }
@@ -730,18 +586,6 @@ impl Conv {
     }
 }
 
-impl Pool {
-    /// The block split for this pooling op.
-    pub(crate) fn blocks(&self, workers: usize) -> Vec<(usize, usize)> {
-        split_units(
-            self.channels,
-            1,
-            |channels| self.block_elements(channels),
-            workers,
-        )
-    }
-}
-
 impl MatMul {
     /// The block split, along the result columns.
     ///
@@ -915,19 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn ceil_mode_and_batched_matmul_fall_back() {
-        let p = OpParams::new()
-            .with_kernel_shape([2, 2])
-            .with_strides([2, 2])
-            .with_ceil_mode(true);
-        let error = Pool::new(
-            OpId::MaxPool,
-            &Shape::from_dims([1, 8, 5, 5]),
-            &Shape::from_dims([1, 8, 3, 3]),
-            &p,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("ceil_mode"), "{error}");
+    fn batched_matmul_falls_back() {
         let error = MatMul::new(
             &Shape::from_dims([2, 3, 4]),
             &Shape::from_dims([2, 4, 5]),
@@ -935,24 +767,5 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("2-D"), "{error}");
-    }
-
-    #[test]
-    fn global_average_pooling_is_a_full_window_average() {
-        let pool = Pool::new(
-            OpId::GlobalAveragePool,
-            &Shape::from_dims([1, 7, 5, 9]),
-            &Shape::from_dims([1, 7, 1, 1]),
-            &OpParams::new(),
-        )
-        .unwrap();
-        assert!(pool.global);
-        assert_eq!(pool.kernel, [5, 9]);
-        assert_eq!(pool.out_hw, [1, 1]);
-        assert_eq!(
-            pool.blocks(8).len(),
-            1,
-            "7 channels and 7 elements is small"
-        );
     }
 }

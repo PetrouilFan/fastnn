@@ -2,11 +2,27 @@
 //!
 //! # What this engine is
 //!
-//! A [`SegmentProvider`] that claims `f32` 2-D NCHW convolution, the pool
-//! family and 2-D matmul, and runs them on oneDNN 3.14.1 (one `dnnl_engine`,
-//! one sequential stream, and one prepared primitive per output-channel block).
-//! Everything else stays on the scalar kernels; the planner records the split
-//! in [`Plan::fallbacks`](crate::inference::runtime::Plan::fallbacks).
+//! A [`SegmentProvider`] that claims `f32` 2-D NCHW convolution and 2-D
+//! matmul, and runs them on oneDNN 3.14.1 (one `dnnl_engine`, one sequential
+//! stream, and one prepared primitive per output-channel block). Everything
+//! else stays on the scalar kernels; the planner records the split in
+//! [`Plan::fallbacks`](crate::inference::runtime::Plan::fallbacks).
+//!
+//! # Why pooling is not claimed
+//!
+//! The engine hands oneDNN the arena's plain NCHW descriptor, because that is
+//! how the plan stores activations and the engine does not reorder a pooling
+//! operand. On AVX2 the x64 JIT pooling kernel does not accept that descriptor:
+//! `jit_uni_pool_kernel.cpp` leaves `ncsp_fmt_tag` unset unless the ISA is
+//! AVX-512, so oneDNN answers with `ref_pooling`. Measured on the SPPF pools of
+//! YOLOv8n (three 128x20x20 5x5 windows), that reference implementation cost
+//! 0.98 ms per forward, against 3.27 ms for the scalar kernel of the time and
+//! 0.45 ms after the scalar kernel grew a separable 2-D form. A claim whose
+//! best case here is the provider's slowest implementation is not a claim worth
+//! making from a pure function of the segment, which is all the planner can
+//! offer (it runs before an engine exists). Pooling therefore stays scalar; a
+//! host whose oneDNN JITs plain NCHW pooling would have to re-earn the claim
+//! with a measurement.
 //!
 //! # oneDNN is sequential here, on purpose
 //!
@@ -28,7 +44,6 @@
 //! grouped conv:    whole groups only; a boundary inside a group would
 //!                  need a weight submemory oneDNN cannot express
 //! depthwise conv:  one channel (one group) per block
-//! pooling:         channels 0..c | c..2c | ...
 //! matmul:          result columns 0..n | n..2n | ...
 //! ```
 //!
@@ -127,7 +142,7 @@ use self::ffi::{
     ALG_ELTWISE_TANH, ARG_BIAS, ARG_DST, ARG_SCRATCHPAD, ARG_SRC, ARG_WEIGHTS, FORMAT_TAG_A,
     FORMAT_TAG_ABCD, FORMAT_TAG_ABCDE, FORMAT_TAG_ANY, FORMAT_TAG_NHWC, QUERY_WEIGHTS_MD,
 };
-use self::geometry::{Conv, ConvSplitAxis, MatMul, Pool};
+use self::geometry::{Conv, ConvSplitAxis, MatMul};
 
 /// Provider name in errors.
 const BACKEND: &str = "oneDNN";
@@ -285,10 +300,7 @@ fn require_f32(op: OpId, operands: &[&SegmentOperand]) -> Result<(), Fn3Error> {
 
 /// `true` for the ops this engine implements at all.
 fn is_claimed_op(op: OpId) -> bool {
-    matches!(
-        op,
-        OpId::Conv | OpId::MaxPool | OpId::AveragePool | OpId::GlobalAveragePool | OpId::MatMul
-    )
+    matches!(op, OpId::Conv | OpId::MatMul)
 }
 
 /// The claim: pure `(op, operands, params) -> yes/reason`.
@@ -349,20 +361,6 @@ fn claimed_geometry(
             }
             Ok(())
         }
-        OpId::MaxPool | OpId::AveragePool | OpId::GlobalAveragePool => {
-            if inputs.len() != 1 || outputs.len() != 1 {
-                return Err(unsupported(
-                    op,
-                    format!(
-                        "expected 1 input and one output, found {} and {}",
-                        inputs.len(),
-                        outputs.len()
-                    ),
-                ));
-            }
-            require_f32(op, &[&inputs[0], &outputs[0]])?;
-            Pool::new(op, shape_of(&inputs[0]), shape_of(&outputs[0]), params).map(|_| ())
-        }
         OpId::MatMul => {
             if inputs.len() != 2 || outputs.len() != 1 {
                 return Err(unsupported(
@@ -391,8 +389,7 @@ fn claimed_geometry(
         }
         other => Err(unsupported(
             other,
-            "the oneDNN engine implements Conv, MaxPool, AveragePool, GlobalAveragePool and \
-             2-D MatMul",
+            "the oneDNN engine implements Conv and 2-D MatMul",
         )),
     }
 }
@@ -1166,7 +1163,6 @@ pub(crate) struct OneDnnEngine {
     scratchpad_bytes: usize,
     /// Prepared segments per kind, for the session report.
     conv_segments: usize,
-    pool_segments: usize,
     matmul_segments: usize,
     /// Weight blocks whose layout oneDNN did not choose as plain on the ONNX
     /// payload, i.e. blocks that needed a real reorder (not just a copy).
@@ -1234,7 +1230,6 @@ impl OneDnnEngine {
             staging_bytes: 0,
             scratchpad_bytes: 0,
             conv_segments: 0,
-            pool_segments: 0,
             matmul_segments: 0,
             reordered_blocks: 0,
             fused_segments: 0,
@@ -1266,9 +1261,9 @@ impl OneDnnEngine {
         self.scratchpad_bytes
     }
 
-    /// Prepared segments by kind: `(conv, pool, matmul)`.
-    pub(crate) fn segment_kinds(&self) -> (usize, usize, usize) {
-        (self.conv_segments, self.pool_segments, self.matmul_segments)
+    /// Prepared segments by kind: `(conv, matmul)`.
+    pub(crate) fn segment_kinds(&self) -> (usize, usize) {
+        (self.conv_segments, self.matmul_segments)
     }
 
     /// Weight blocks that needed a reorder rather than a plain copy.
@@ -1357,20 +1352,16 @@ impl OneDnnEngine {
         }
         let prepared = match spec.op {
             OpId::Conv => self.prepare_conv(index, spec)?,
-            OpId::MaxPool | OpId::AveragePool | OpId::GlobalAveragePool => {
-                self.prepare_pool(spec)?
-            }
             OpId::MatMul => self.prepare_matmul(spec)?,
             other => {
                 return Err(unsupported(
                     other,
-                    "the oneDNN engine implements Conv, the pool family and 2-D MatMul",
+                    "the oneDNN engine implements Conv and 2-D MatMul",
                 ))
             }
         };
         match prepared.kind {
             "conv" => self.conv_segments += 1,
-            "pool" => self.pool_segments += 1,
             _ => self.matmul_segments += 1,
         }
         if prepared.blocked {
@@ -2119,146 +2110,6 @@ impl OneDnnEngine {
         })
     }
 
-    fn prepare_pool(&mut self, spec: &SegmentSpec<'_>) -> Result<PreparedSegment, Fn3Error> {
-        let pool = Pool::new(spec.op, &spec.inputs[0], &spec.outputs[0], spec.params)?;
-        let src_parent_dims = vec![
-            pool.batch as i64,
-            pool.channels as i64,
-            pool.in_hw[0] as i64,
-            pool.in_hw[1] as i64,
-        ];
-        let src_parent = Desc::with_tag(&src_parent_dims, FORMAT_TAG_ABCD)?;
-        let dst_parent_dims = vec![
-            pool.batch as i64,
-            pool.channels as i64,
-            pool.out_hw[0] as i64,
-            pool.out_hw[1] as i64,
-        ];
-        let dst_parent = Desc::with_tag(&dst_parent_dims, FORMAT_TAG_ABCD)?;
-        let alg = match spec.op {
-            OpId::MaxPool => ffi::ALG_POOLING_MAX,
-            OpId::GlobalAveragePool => ffi::ALG_POOLING_AVG_EXCLUDE_PADDING,
-            OpId::AveragePool if pool.count_include_pad => ffi::ALG_POOLING_AVG_INCLUDE_PADDING,
-            OpId::AveragePool => ffi::ALG_POOLING_AVG_EXCLUDE_PADDING,
-            other => {
-                return Err(unsupported(other, "not a pooling op"));
-            }
-        };
-        let blocks = pool.blocks(spec.workers);
-        let single_block = blocks.len() == 1;
-        let kernel: Vec<i64> = pool.kernel.iter().map(|&value| value as i64).collect();
-        let strides: Vec<i64> = pool.strides.iter().map(|&value| value as i64).collect();
-        // oneDNN's `dilation` array is "dilation minus one"; the engine claims
-        // undilated pooling only, so every entry is zero.
-        let dilates = vec![0i64, 0i64];
-        let padding_l = vec![pool.pads[0].0, pool.pads[1].0];
-        let padding_r = vec![pool.pads[0].1, pool.pads[1].1];
-        let mut prepared = Vec::with_capacity(blocks.len());
-        for (channel_start, channels) in blocks {
-            let src = if single_block {
-                Desc::with_tag(&src_parent_dims, FORMAT_TAG_ABCD)?
-            } else {
-                let dims = vec![
-                    pool.batch as i64,
-                    channels as i64,
-                    pool.in_hw[0] as i64,
-                    pool.in_hw[1] as i64,
-                ];
-                let offsets = vec![0, channel_start as i64, 0, 0];
-                Desc::submemory(&src_parent, &dims, &offsets)?
-            };
-            let dst = if single_block {
-                Desc::with_tag(&dst_parent_dims, FORMAT_TAG_ABCD)?
-            } else {
-                let dims = vec![
-                    pool.batch as i64,
-                    channels as i64,
-                    pool.out_hw[0] as i64,
-                    pool.out_hw[1] as i64,
-                ];
-                let offsets = vec![0, channel_start as i64, 0, 0];
-                Desc::submemory(&dst_parent, &dims, &offsets)?
-            };
-            let attr = PrimitiveAttrHandle::user_scratchpad()?;
-            let pd = PrimitiveDescHandle::pooling(
-                &self.engine,
-                alg,
-                &src,
-                &dst,
-                &strides,
-                &kernel,
-                &dilates,
-                &padding_l,
-                &padding_r,
-                &attr,
-            )
-            .map_err(|error| {
-                context(error, || {
-                    format!(
-                        "pool segment: {} channels from {channel_start}, {}x{} window",
-                        channels, pool.kernel[0], pool.kernel[1]
-                    )
-                })
-            })?;
-            let scratchpad = prepare_scratchpad(&pd)?;
-            let primitive = PrimitiveHandle::new(&pd)?;
-            let mut memories = Vec::with_capacity(3);
-            let mut args = Vec::with_capacity(3);
-            let mut sources = Vec::with_capacity(3);
-            push_arg(
-                &mut memories,
-                &mut args,
-                &mut sources,
-                &src,
-                &self.engine,
-                ARG_SRC,
-                ArgSource::Input(0),
-            )?;
-            push_arg(
-                &mut memories,
-                &mut args,
-                &mut sources,
-                &dst,
-                &self.engine,
-                ARG_DST,
-                ArgSource::Output(0),
-            )?;
-            if let Some(desc) = scratchpad.as_ref().map(|(desc, _)| desc) {
-                push_arg(
-                    &mut memories,
-                    &mut args,
-                    &mut sources,
-                    desc,
-                    &self.engine,
-                    ARG_SCRATCHPAD,
-                    ArgSource::Scratchpad,
-                )?;
-            }
-            prepared.push(Block {
-                primitive,
-                stream: StreamHandle::new(&self.engine)?,
-                memories,
-                args,
-                sources,
-                weights: None,
-                bias: None,
-                scratchpad_bytes: scratchpad.map(|(_, bytes)| bytes).unwrap_or(0),
-                staging: None,
-                epilogue: None,
-                blocked_source: None,
-                blocked_destination: None,
-            });
-        }
-        Ok(PreparedSegment {
-            kind: "pool",
-            split: None,
-            blocks: prepared,
-            prelude: None,
-            blocked: false,
-            staging_pool: None,
-        })
-    }
-
     fn prepare_matmul(&mut self, spec: &SegmentSpec<'_>) -> Result<PreparedSegment, Fn3Error> {
         let matmul = MatMul::new(&spec.inputs[0], &spec.inputs[1], &spec.outputs[0])?;
         let weights = spec.weights.ok_or_else(|| {
@@ -2680,60 +2531,6 @@ mod tests {
         let got = run_one(&spec, &input, 2);
         // Group 0 sees 1, 3, 7, 9 -> 64; group 1 sees 10, 12, 16, 18 -> 154.
         close(&got, &[64.5, 153.5]);
-    }
-
-    #[test]
-    fn strided_max_pooling_runs_on_onednn() {
-        let params = OpParams::new()
-            .with_kernel_shape([2, 2])
-            .with_strides([2, 2]);
-        let input: Vec<f32> = (1..=16).map(|value| value as f32).collect();
-        let spec = SegmentSpec {
-            op: OpId::MaxPool,
-            inputs: vec![Shape::from_dims([1, 1, 4, 4])],
-            input_dtypes: vec![DType::F32],
-            input_constants: vec![false],
-            outputs: vec![Shape::from_dims([1, 1, 2, 2])],
-            output_dtypes: vec![DType::F32],
-            params: &params,
-            weights: None,
-            bias: None,
-            workers: 1,
-            fused: None,
-            input_slots: (0..3).collect(),
-            output_slots: vec![3],
-            dst_blocked: false,
-        };
-        let got = run_one(&spec, &input, 4);
-        close(&got, &[6.0, 8.0, 14.0, 16.0]);
-    }
-
-    #[test]
-    fn average_pooling_counts_padding_when_asked() {
-        let params = OpParams::new()
-            .with_kernel_shape([2, 2])
-            .with_strides([1, 1])
-            .with_pads([1, 1, 1, 1])
-            .with_count_include_pad(true);
-        let input = [1.0f32, 2.0, 3.0, 4.0];
-        let spec = SegmentSpec {
-            op: OpId::AveragePool,
-            inputs: vec![Shape::from_dims([1, 1, 2, 2])],
-            input_dtypes: vec![DType::F32],
-            input_constants: vec![false],
-            outputs: vec![Shape::from_dims([1, 1, 3, 3])],
-            output_dtypes: vec![DType::F32],
-            params: &params,
-            weights: None,
-            bias: None,
-            workers: 1,
-            fused: None,
-            input_slots: (0..3).collect(),
-            output_slots: vec![3],
-            dst_blocked: false,
-        };
-        let got = run_one(&spec, &input, 9);
-        close(&got, &[0.25, 0.75, 0.5, 1.0, 2.5, 1.5, 0.75, 1.75, 1.0]);
     }
 
     #[test]

@@ -14,7 +14,7 @@ session. The frontend maps and shapes `Conv`, the pool family,
 `BatchNormalization`, `Resize`, `Pad`, `Clip`, `Sigmoid`, `Max`, `Min` and
 `TopK` into the typed IR, and the v3 segment runtime executes all twelve on
 scalar NCHW kernels. An optional oneDNN CPU engine (`--features cpu-onednn`)
-additionally executes 4-D convolution, the pool family and 2-D matmul, folds an
+additionally executes 4-D convolution and 2-D matmul, folds an
 activation or a residual sum into the producing convolution, and keeps internal
 conv-to-conv edges in a channels-last layout; see
 [docs/v3/backends.md](docs/v3/backends.md). There is no W8A8 execution path:
@@ -93,9 +93,9 @@ target today.
 | `ScatterND` | 39 | `ScatterND` | full | — | Indexed scatter into a copy |
 | `MaskedAttention` | 40 | — | — | full | Reserved fused id; CPU composes attention from primitives, Vulkan has the fused kernel. ONNX `Attention`, `MultiHeadAttention` and `GroupQueryAttention` are rejected, not mapped |
 | `Conv` | 41 | `Conv` | runs | — | N-dimensional NCHW/NCDHW scalar kernels; the optional oneDNN engine (`cpu-onednn`) additionally runs 4-D `f32` with `group`, `dilations`, `strides`, explicit pads and bias, and claims the fused forms `conv+activation`, `conv+sum` and `conv+sum+activation` |
-| `MaxPool` | 42 | `MaxPool` | runs | — | Scalar kernels; the oneDNN engine runs 4-D `f32` with `kernel_shape`, `strides` and explicit pads (`ceil_mode = 1` and dilation fall back). The optional indices output is rejected |
-| `AveragePool` | 43 | `AveragePool` | runs | — | As `MaxPool`, plus `count_include_pad` (mapped to oneDNN's include/exclude-padding algorithms) |
-| `GlobalAveragePool` | 44 | `GlobalAveragePool` | runs | — | Spatial axes collapse to extent 1; the oneDNN engine expresses it as average pooling over the full input plane |
+| `MaxPool` | 42 | `MaxPool` | runs (scalar) | — | N-D `f32`: `kernel_shape`, `strides`, dilation, explicit pads, `ceil_mode`. `MaxPool` is separable in 2-D, so the max is taken per row first. The optional indices output is rejected |
+| `AveragePool` | 43 | `AveragePool` | runs (scalar) | — | As `MaxPool`, plus `count_include_pad` |
+| `GlobalAveragePool` | 44 | `GlobalAveragePool` | runs (scalar) | — | Spatial axes collapse to extent 1 |
 | `BatchNorm` | 45 | `BatchNormalization` | runs (scalar) | — | Inference form only: one output, 1-D `scale`/`B`/`mean`/`var`, `epsilon`; `training_mode = 1` is rejected |
 | `Resize` | 46 | `Resize` | runs (scalar) | — | 4-D nearest/linear, constant `scales` or `sizes`; the `roi` operand is accepted and ignored (its values are defined only for `tf_crop_and_resize`, which is rejected), and cubic is rejected |
 | `Pad` | 47 | `Pad` | runs (scalar) | — | Constant/reflect/edge, attribute or constant input pads, negative pads crop; `wrap` is rejected |
@@ -135,8 +135,10 @@ rejected by name as well.
 
 The CNN operators are mapped and shaped under #102/#104 and execute on the CPU:
 the twelve scalar NCHW kernels in `src/fn3/runtime/kernels/` are the reference,
-and the optional oneDNN engine executes the 4-D convolution, pooling and 2-D
-matmul rows. The Vulkan column stays `—`; a Vulkan session rejects those ops
+and the optional oneDNN engine executes the 4-D convolution and 2-D matmul
+rows; pooling is scalar on every engine, because the provider's plain-NCHW path
+resolves to its reference implementation on x86 without AVX-512 (see
+[docs/v3/backends.md](docs/v3/backends.md) §3). The Vulkan column stays `—`; a Vulkan session rejects those ops
 instead of staging them to the CPU.
 
 ## Dtypes and execution modes
@@ -192,7 +194,7 @@ Capability gaps:
   conv-to-conv edges) plus counted conversions; the scalar engine and the plan's
   slots stay NCHW.
 - The optional oneDNN CPU engine (`cpu-onednn`) is the first provider: 4-D
-  `f32` convolution, the pool family and 2-D matmul, with explicit-pad
+  `f32` convolution and 2-D matmul, with explicit-pad
   resolution, output-channel or output-row block threading, a fused epilogue and
   a channels-last layout policy. MLAS/XNNPACK are not implemented (#101, #106).
 
