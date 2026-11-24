@@ -387,9 +387,13 @@ parent's blocked strides and oneDNN falls off its JIT path, exactly as it did
 for NCHW row submemories in phase 3b. Row ranges are dense in channels-last, so
 the row split is what makes the layout usable. A convolution whose row split
 would give fewer blocks than its channel split stays plain (the engine requires
-`row_blocks >= 2` and `row_blocks >= channel_blocks`); at one worker every
-convolution is one block, so the policy is inert there and the plan reports zero
-conversions.
+`row_blocks >= 1` and `row_blocks >= channel_blocks`). One dense block is a
+valid row range, so the policy is **not** inert at one worker: the whole
+internal chain stays channels-last there, with the chain-head and chain-tail
+conversions counted. Measured on the seeded-ones input with three interleaved
+50-forward runs per side: YOLOv8n 42.2 -> 36.6 ms at one worker, 19.6 -> 18.7 at
+eight; YOLO11n 157.8 -> 137.7 at one, 52.9 -> 52.6 at eight. The single-block
+case is the largest one-thread win in the provider after 4 Ki.
 
 ### What it is worth
 
@@ -697,7 +701,7 @@ forwards, per-op totals in ms):
 | `Sub`, `Div`, `Gather`, `Shape` | 6 | 0.01 | 0.06 | 0.2% |
 | total | 126 | 41.06 | 28.90 | |
 
-Five changes and five negative results produced that:
+Five changes and a set of negative results produced that:
 
 1. **Fusion (4.6).** 57 `conv+swish` segments replace 171 graph segments; the
    plan falls from 240 to 126 segments and the arena from 6 144 000 to
@@ -757,7 +761,6 @@ Five changes and five negative results produced that:
 | activation after the residual as one oneDNN primitive | not expressible: `sum` must be the first post-op, and it reads the destination; the six YOLOv8n residual adds stay scalar |
 | channels-last destination + channel split (dst submemory of a blocked parent) | 233 ms per 32x80x80 3x3 convolution against 1.09 ms; blocked destinations require row splits |
 | mixing families inside one segment (channels-last src, NCHW dst) | 50 ms for a one-block 64x40x40 3x3 convolution against 0.5 ms; every family boundary gets an explicit conversion |
-| channels-last at one worker | inert: one block per segment cannot row-split, so the policy installs zero buffers and the plan reports zero conversions |
 | `MIN_BLOCK_ELEMENTS` 2 Ki / 1 Ki, re-tested with the staging pool | 22.4 / 22.7 ms at eight workers against 19.7 at 4 Ki (same artifact, one rebuild per floor): the pool removed the staging cost the old sweep blamed, and the extra blocks still cost more than they fill. 4 Ki stays. |
 | oneDNN Winograd (`dnnl_convolution_winograd`) | primitive creation fails on this AVX2 build; the engine is direct-only and the failure is recorded rather than retried per convolution. |
 | `auto` algorithm (`dnnl_convolution_auto`) | re-checked with four interleaved 50-forward runs per side at one worker: auto 44.15 / 41.30 / 44.05 / 41.34 ms against direct 44.23 / 43.19 / 41.25 / 43.84 ms. The ordering flips between runs, so there is no reproducible difference; not adopted, because it would hand the accumulation order to a heuristic for nothing. At eight workers both were 18.0-19.9 ms. |

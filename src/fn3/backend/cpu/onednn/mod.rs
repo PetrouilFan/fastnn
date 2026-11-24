@@ -1558,6 +1558,8 @@ impl OneDnnEngine {
         // and oneDNN's channel-submemory form took its JIT path off the table
         // (measured: 233 ms for a 4-block 32x80x80 3x3 convolution, against
         // 1.1 ms for the same four blocks as dense channels-last buffers).
+        // One dense block is a valid row range: the policy is live at one
+        // worker, and that is worth 42.2 -> 36.6 ms on YOLOv8n there.
         // ------------------------------------------------------------------
         let src_slot = spec.input_slots.first().copied();
         let dst_slot = spec.output_slots.first().copied();
@@ -1585,7 +1587,7 @@ impl OneDnnEngine {
         if spec.dst_blocked && !sum && conv.batch == 1 {
             let rows = conv.row_split(spec.workers);
             let channels = conv.channel_split(spec.workers);
-            if rows.blocks.len() >= 2 && rows.blocks.len() >= channels.blocks.len() {
+            if !rows.blocks.is_empty() && rows.blocks.len() >= channels.blocks.len() {
                 split = rows;
                 let bytes = conv.batch
                     * conv.out_channels

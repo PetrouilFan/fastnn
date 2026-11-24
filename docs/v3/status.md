@@ -39,11 +39,14 @@ binary and the current one alternately on the same artifact, 20 forwards each:
 | engine | 1 thread | 4 threads | 8 threads |
 |---|---:|---:|---:|
 | oneDNN, pre-change `92af69c` | 44.43 ms | 20.61 ms | 20.19 ms |
-| oneDNN, current | **42.01 ms** | **20.32 ms** | **19.77 ms** |
+| oneDNN, after the scalar-tail wave | 42.01 ms | 20.32 ms | 19.77 ms |
+| oneDNN, after one-block channels-last | **36.60 ms** | **19.39 ms** | **18.70 ms** |
 | ONNX Runtime | 23.86 ms | 7.82 ms | 7.64 ms |
 
-so oneDNN is **1.76x** ORT at one worker (inside the <=2x goal), 2.60x at four
-and 2.59x at eight. The remaining gap is convolution throughput, not block
+so oneDNN is **1.53x** ORT at one worker (inside the <=2x goal), 2.48x at four
+and 2.45x at eight. The one-block channels-last change is what moved the
+one-worker number: the internal conv-to-conv edges no longer drop back to NCHW
+when the row split cannot produce two blocks. The remaining gap is convolution throughput, not block
 count or glue: the 57 fused `Conv+Swish` segments are 77 % of the forward
 (14.87 of 19.31 ms at eight workers), the pool now takes every row-parallel
 tail op, and the small layers (10x10, 20x20) cannot fill eight workers. `docs/v3/backends.md` records the per-op table, the negative results
@@ -153,12 +156,14 @@ attention block and a 26k-anchor head:
 
 | yolo11n, 640x640 | 1 thread | 4 threads | 8 threads |
 |---|---:|---:|---:|
-| fastnn oneDNN | 165.74 ms | 75.14 ms | 61.79 ms |
+| fastnn oneDNN, before | 165.74 ms | 75.14 ms | 61.79 ms |
+| fastnn oneDNN, after one-block channels-last | **137.7 ms** | **62.0 ms** | **52.6 ms** |
 | ONNX Runtime | 77.78 ms | 32.07 ms | 27.90 ms |
 
-That is 2.13x / 2.34x / 2.21x, worse than yolov8n's 1.86x / 2.91x / 2.47x
-because the head's scalar segments and the attention block make the tail
-longer: 174 of 265 segments are scalar and run with a one-thread budget. Output
+That is 1.77x / 1.93x / 1.89x, down from 2.13x / 2.34x / 2.21x, and still
+worse than yolov8n's 1.53x because the head's scalar segments and the attention
+block make the tail longer: 174 of 265 segments are scalar and run with a
+one-thread budget. Output
 parity on the same input, tolerance `2e-4 + 1e-3|ref|`: 0 of 705,600 values
 outside it (max_abs 2.3e-3 on values up to 637, mean_abs 2.4e-6).
 
@@ -167,7 +172,7 @@ outside it (max_abs 2.3e-3 on values up to 637, mean_abs 2.4e-6).
 ```
 fastnn-infer prepare model.onnx --out model.fnn3 [--target cpu] [--shape images=1,3,640,640]
 fastnn-infer load model.fnn3
-fastnn-infer run model.fnn3 --input images=1,3,320,320 --warmup 5 --repeat 50
+fastnn-infer run model.fnn3 --input images=ones --warmup 5 --repeat 50
 fastnn-infer inspect model.fnn3
 fastnn-infer doctor model.onnx [--shape images=1,3,640,640]
 ```
